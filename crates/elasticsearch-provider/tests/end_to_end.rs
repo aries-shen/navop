@@ -14,6 +14,7 @@ use extension_plugin_adapter::{
 use extension_protocol::{
     blob::{BlobCloseParams, BlobReadParams, MAX_BLOB_CHUNK_BYTES},
     declarative_ui::UiActionRequest,
+    event_stream::{EventCloseParams, EventOpenParams, EventReadParams},
     job::{
         JobCloseParams, JobResultParams, JobStartParams, JobState, JobStatusParams, ProgressPercent,
     },
@@ -552,6 +553,136 @@ async fn network_permission_is_enforced_before_provider_rpc() {
         protocol.code
     );
     assert!(harness.records.lock().expect("records lock").is_empty());
+    harness.session.shutdown().await;
+}
+
+#[tokio::test]
+async fn async_search_events_use_bounded_pull_streams() {
+    let harness = harness(true).await;
+    let opened = harness
+        .client
+        .open_resource(&open_params(harness.port))
+        .await
+        .expect("open resource");
+
+    let stream = harness
+        .client
+        .open_event_stream(&EventOpenParams {
+            conn_id: None,
+            kind: "elasticsearch/search/events".into(),
+            capacity: Some(1),
+        })
+        .await
+        .expect("open event stream");
+    let first_job = harness
+        .client
+        .start_job(&JobStartParams {
+            resource_id: Some(opened.resource_id.clone()),
+            method: "elasticsearch/search/async".into(),
+            params: json!({"query":"alice"}),
+        })
+        .await
+        .expect("start first streamed job");
+    let status = wait_for_job_success(&harness.client, &first_job.job_id).await;
+
+    let first = harness
+        .client
+        .read_event_stream(&EventReadParams {
+            stream_id: stream.stream_id.clone(),
+            max_events: Some(1),
+            wait_ms: Some(0),
+        })
+        .await
+        .expect("read event stream");
+    assert_eq!(1, first.events.len());
+    assert!(!first.closed);
+    assert_eq!(0, first.dropped_count);
+    let first_event = first.events[0].clone();
+    assert_eq!(
+        "job/completed",
+        first_event["type"].as_str().expect("event type")
+    );
+    assert_eq!(
+        first_job.job_id,
+        first_event["job_id"].as_str().expect("job id")
+    );
+    assert_eq!(
+        u64::from(u8::from(
+            status.progress_percent.expect("terminal progress")
+        )),
+        first_event["progress_percent"]
+            .as_u64()
+            .expect("event progress")
+    );
+    assert!(matches!(first_event["result"]["result"], Value::Object(_)));
+    let serialized_events = serde_json::to_string(&first).expect("serialize events");
+    assert!(!serialized_events.contains("token-value"));
+
+    let second_job = harness
+        .client
+        .start_job(&JobStartParams {
+            resource_id: Some(opened.resource_id.clone()),
+            method: "elasticsearch/search/async".into(),
+            params: json!({"query":"bob"}),
+        })
+        .await
+        .expect("start second streamed job");
+    wait_for_job_success(&harness.client, &second_job.job_id).await;
+    let third_job = harness
+        .client
+        .start_job(&JobStartParams {
+            resource_id: Some(opened.resource_id.clone()),
+            method: "elasticsearch/search/async".into(),
+            params: json!({"query":"alice"}),
+        })
+        .await
+        .expect("start third streamed job");
+    wait_for_job_success(&harness.client, &third_job.job_id).await;
+    let second = harness
+        .client
+        .read_event_stream(&EventReadParams {
+            stream_id: stream.stream_id.clone(),
+            max_events: Some(1),
+            wait_ms: Some(0),
+        })
+        .await
+        .expect("read bounded event stream");
+    assert_eq!(1, second.events.len());
+    assert!(!second.closed);
+    assert_eq!(1, second.dropped_count);
+    assert_eq!(
+        third_job.job_id,
+        second.events[0]["job_id"]
+            .as_str()
+            .expect("newest buffered job id")
+    );
+
+    harness
+        .client
+        .close_event_stream(&EventCloseParams {
+            stream_id: stream.stream_id.clone(),
+        })
+        .await
+        .expect("close event stream");
+    let closed = harness
+        .client
+        .read_event_stream(&EventReadParams {
+            stream_id: stream.stream_id,
+            max_events: Some(1),
+            wait_ms: Some(0),
+        })
+        .await
+        .expect("closed stream is terminal");
+    assert!(closed.closed);
+    assert!(closed.events.is_empty());
+
+    harness
+        .client
+        .close_resource(&ResourceCloseParams {
+            resource_id: opened.resource_id,
+        })
+        .await
+        .expect("close resource");
     harness.session.shutdown().await;
 }
 

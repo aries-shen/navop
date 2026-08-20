@@ -12,6 +12,10 @@ use extension_protocol::{
     declarative_ui::{UiActionRequest, UiStateOperation, UiStatePatch},
     envelope::{Request, RequestId, Response, RpcMessage},
     error::{ProtocolError, error_codes},
+    event_stream::{
+        DEFAULT_EVENT_MAX_EVENTS, EventCloseParams, EventOpenParams, EventOpenResult,
+        EventReadParams, EventReadResult, MAX_EVENT_MAX_EVENTS,
+    },
     framing::{recv_msg_async, send_msg_async},
     host::ResolveSecretParams,
     job::{
@@ -32,7 +36,7 @@ use interprocess::local_socket::{
     tokio::{Stream, prelude::*},
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -49,6 +53,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOTAL_BLOB_BYTES: usize = 32 * 1024 * 1024;
 const MAX_JOBS: usize = 64;
+const MAX_EVENT_STREAMS: usize = 64;
 
 type ProviderResult = Result<Value, Box<ProtocolError>>;
 
@@ -62,6 +67,7 @@ struct ProviderState {
     resource: Option<ElasticsearchResource>,
     blobs: HashMap<String, ProviderBlob>,
     jobs: HashMap<String, ProviderJob>,
+    event_streams: HashMap<String, ProviderEventStream>,
     next_reverse_request_id: AtomicI64,
 }
 
@@ -82,6 +88,15 @@ struct ProviderJob {
     cancellation: Option<oneshot::Sender<()>>,
 }
 
+#[derive(Debug)]
+struct ProviderEventStream {
+    kind: String,
+    buffer: VecDeque<Value>,
+    capacity: usize,
+    dropped_count: u64,
+    closed: bool,
+}
+
 struct IpcParts<R, W>
 where
     R: AsyncReadExt + Unpin,
@@ -97,6 +112,7 @@ impl ProviderState {
             resource: None,
             blobs: HashMap::new(),
             jobs: HashMap::new(),
+            event_streams: HashMap::new(),
             next_reverse_request_id: AtomicI64::new(1),
         }
     }
@@ -174,6 +190,114 @@ impl ProviderState {
         self.blobs.remove(&params.blob_id);
     }
 
+    fn open_event_stream(
+        &mut self,
+        params: EventOpenParams,
+    ) -> Result<EventOpenResult, Box<ProtocolError>> {
+        if params.kind != "elasticsearch/search/events" {
+            return Err(boxed_error(
+                error_codes::METHOD_NOT_FOUND,
+                format!("unknown Elasticsearch event stream `{}`", params.kind),
+            ));
+        }
+        if params.conn_id.is_some() {
+            return Err(boxed_invalid_params(
+                "Elasticsearch uses a single resource-scoped connection",
+            ));
+        }
+        if self.resource.is_none() {
+            return Err(resource_error());
+        }
+        if self.event_streams.len() >= MAX_EVENT_STREAMS {
+            return Err(boxed_error(
+                error_codes::RESOURCE_BUSY,
+                "Elasticsearch event stream limit reached",
+            ));
+        }
+        let stream_id = format!("es-stream-{}", Uuid::new_v4());
+        self.event_streams.insert(
+            stream_id.clone(),
+            ProviderEventStream {
+                kind: params.kind,
+                buffer: VecDeque::new(),
+                capacity: params
+                    .capacity
+                    .unwrap_or(DEFAULT_EVENT_MAX_EVENTS)
+                    .clamp(1, MAX_EVENT_MAX_EVENTS) as usize,
+                dropped_count: 0,
+                closed: false,
+            },
+        );
+        Ok(EventOpenResult { stream_id })
+    }
+
+    fn push_event(&mut self, stream_id: &str, event: Value) {
+        let Some(stream) = self.event_streams.get_mut(stream_id) else {
+            return;
+        };
+        if stream.closed {
+            return;
+        }
+        if stream.buffer.len() >= stream.capacity {
+            let _ = stream.buffer.pop_front();
+            stream.dropped_count = stream.dropped_count.saturating_add(1);
+        }
+        stream.buffer.push_back(event);
+    }
+
+    fn broadcast_event(&mut self, event: Value) {
+        let stream_ids = self
+            .event_streams
+            .iter()
+            .filter(|(_, stream)| stream.kind == "elasticsearch/search/events")
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            self.push_event(&stream_id, event.clone());
+        }
+    }
+
+    fn read_event_stream(&mut self, params: EventReadParams) -> EventReadResult {
+        let Some(stream) = self.event_streams.get_mut(&params.stream_id) else {
+            return EventReadResult {
+                events: Vec::new(),
+                closed: true,
+                dropped_count: 0,
+            };
+        };
+        let count = params
+            .effective_max_events()
+            .min(stream.buffer.len() as u32) as usize;
+        EventReadResult {
+            events: stream.buffer.drain(..count).collect(),
+            closed: stream.closed,
+            dropped_count: stream.dropped_count,
+        }
+    }
+
+    fn close_event_stream(&mut self, stream_id: &str) {
+        self.event_streams.remove(stream_id);
+    }
+
+    fn emit_job_event(&mut self, job_id: &str) {
+        let Some(job) = self.jobs.get(job_id) else {
+            return;
+        };
+        let state = job.state;
+        let progress_percent = job.progress_percent;
+        let message = job.message.clone();
+        let result = job.result.clone();
+        let event = json!({
+            "type": "job/completed",
+            "job_id": job_id,
+            "state": state,
+            "progress_percent": progress_percent.map(u8::from),
+            "message": message,
+            "result": result,
+        });
+        self.broadcast_event(event);
+    }
+
     fn start_job(
         &mut self,
         params: JobStartParams,
@@ -223,18 +347,18 @@ impl ProviderState {
         })
     }
 
-    fn poll_job(&mut self, job_id: &str) {
+    fn poll_job(&mut self, job_id: &str) -> bool {
         let outcome = {
             let Some(job) = self.jobs.get_mut(job_id) else {
-                return;
+                return false;
             };
             if job.state != JobState::Running {
-                return;
+                return false;
             }
             let Some(mut completion) = job.completion.take() else {
                 job.state = JobState::Failed;
                 job.message = Some("search worker is unavailable".to_owned());
-                return;
+                return true;
             };
             match completion.try_recv() {
                 Ok(Ok(value)) => Some(Ok(value)),
@@ -250,7 +374,7 @@ impl ProviderState {
         };
 
         let Some(outcome) = outcome else {
-            return;
+            return false;
         };
         match outcome {
             Ok(value) => self.complete_job(job_id, value),
@@ -261,11 +385,12 @@ impl ProviderState {
                     job.message = Some(message);
                     job.result = None;
                 }
+                true
             }
         }
     }
 
-    fn complete_job(&mut self, job_id: &str, value: Value) {
+    fn complete_job(&mut self, job_id: &str, value: Value) -> bool {
         let value = normalize_search(value);
         let data = match serde_json::to_vec(&value) {
             Ok(data) => data,
@@ -275,7 +400,7 @@ impl ProviderState {
                     job.message = Some(error.to_string());
                     job.result = None;
                 }
-                return;
+                return true;
             }
         };
         let result_ref = if should_stream_blob(data.len() as u64) {
@@ -290,7 +415,7 @@ impl ProviderState {
                         );
                         job.result = None;
                     }
-                    return;
+                    return true;
                 }
             }
         } else {
@@ -302,6 +427,7 @@ impl ProviderState {
             job.message = Some("search completed".to_owned());
             job.result = Some(JobResultResult { result: result_ref });
         }
+        true
     }
 
     fn job_status(&self, params: JobStatusParams) -> Result<JobStatusResult, Box<ProtocolError>> {
@@ -317,7 +443,7 @@ impl ProviderState {
         })
     }
 
-    fn cancel_job(&mut self, params: JobCancelParams) -> Result<(), Box<ProtocolError>> {
+    fn cancel_job(&mut self, params: JobCancelParams) -> Result<bool, Box<ProtocolError>> {
         let Some(job) = self.jobs.get_mut(&params.job_id) else {
             return Err(boxed_error(
                 error_codes::RESOURCE_CLOSED,
@@ -333,8 +459,9 @@ impl ProviderState {
             if let Some(cancel) = job.cancellation.take() {
                 let _ = cancel.send(());
             }
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn job_result(&self, params: JobResultParams) -> Result<JobResultResult, Box<ProtocolError>> {
@@ -640,6 +767,9 @@ where
                 .with_method(method::JOB_CANCEL)
                 .with_method(method::JOB_RESULT)
                 .with_method(method::JOB_CLOSE)
+                .with_method(method::EVENT_OPEN)
+                .with_method(method::EVENT_READ)
+                .with_method(method::EVENT_CLOSE)
                 .with_method(method::UI_ACTION),
         )
         .map_err(|error| boxed_invalid_params(error.to_string())),
@@ -760,7 +890,9 @@ where
                     );
                 }
             };
-            state.poll_job(&params.job_id);
+            if state.poll_job(&params.job_id) {
+                state.emit_job_event(&params.job_id);
+            }
             match state.job_status(params) {
                 Ok(result) => serde_json::to_value(result)
                     .map_err(|error| boxed_invalid_params(error.to_string())),
@@ -777,8 +909,13 @@ where
                     );
                 }
             };
+            let job_id = params.job_id.clone();
             match state.cancel_job(params) {
-                Ok(()) => Ok(Value::Null),
+                Ok(true) => {
+                    state.emit_job_event(&job_id);
+                    Ok(Value::Null)
+                }
+                Ok(false) => Ok(Value::Null),
                 Err(error) => return (Response::err(request.id, *error), false),
             }
         }
@@ -792,7 +929,9 @@ where
                     );
                 }
             };
-            state.poll_job(&params.job_id);
+            if state.poll_job(&params.job_id) {
+                state.emit_job_event(&params.job_id);
+            }
             match state.job_result(params) {
                 Ok(result) => serde_json::to_value(result)
                     .map_err(|error| boxed_invalid_params(error.to_string())),
@@ -813,6 +952,48 @@ where
                 Ok(()) => Ok(Value::Null),
                 Err(error) => return (Response::err(request.id, *error), false),
             }
+        }
+        method::EVENT_OPEN => {
+            let params: EventOpenParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            match state.open_event_stream(params) {
+                Ok(result) => serde_json::to_value(result)
+                    .map_err(|error| boxed_invalid_params(error.to_string())),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
+        method::EVENT_READ => {
+            let params: EventReadParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            serde_json::to_value(state.read_event_stream(params))
+                .map_err(|error| boxed_invalid_params(error.to_string()))
+        }
+        method::EVENT_CLOSE => {
+            let params: EventCloseParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            state.close_event_stream(&params.stream_id);
+            Ok(Value::Null)
         }
         method::RESOURCE_INVOKE => {
             let params: ResourceInvokeParams = match serde_json::from_value(request.params) {
@@ -858,6 +1039,7 @@ where
             state.resource = None;
             state.blobs.clear();
             state.jobs.clear();
+            state.event_streams.clear();
             Ok(Value::Null)
         }
         method::UI_ACTION => {
@@ -879,6 +1061,7 @@ where
             state.resource = None;
             state.blobs.clear();
             state.jobs.clear();
+            state.event_streams.clear();
             Ok(Value::Null)
         }
         _ => Err(boxed_error(
