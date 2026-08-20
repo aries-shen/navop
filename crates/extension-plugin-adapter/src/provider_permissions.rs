@@ -47,28 +47,47 @@ pub struct NetworkEndpoint {
 
 impl NetworkEndpoint {
     pub fn parse(value: &str) -> Result<Self, ProviderPermissionError> {
-        let url = Url::parse(value).map_err(|_| ProviderPermissionError::InvalidUrl)?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(ProviderPermissionError::UnsupportedScheme);
+        if value.contains("://") {
+            let url = Url::parse(value).map_err(|_| ProviderPermissionError::InvalidUrl)?;
+            if !matches!(url.scheme(), "http" | "https") {
+                return Err(ProviderPermissionError::UnsupportedScheme);
+            }
+            let Some(host) = url.host_str().map(str::to_owned) else {
+                return Err(ProviderPermissionError::InvalidUrl);
+            };
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| ProviderPermissionError::InvalidUrl)?;
+            if !url.username().is_empty()
+                || url.password().is_some()
+                || url.path() != "/"
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(ProviderPermissionError::InvalidUrl);
+            }
+            return Ok(Self {
+                scheme: url.scheme().to_owned(),
+                host,
+                port,
+            });
         }
-        let Some(host) = url.host_str().map(str::to_owned) else {
+
+        if value.contains(['/', '?', '#', '@']) {
+            return Err(ProviderPermissionError::InvalidUrl);
+        }
+        let Some((host, port)) = value.rsplit_once(':') else {
             return Err(ProviderPermissionError::InvalidUrl);
         };
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| ProviderPermissionError::InvalidUrl)?;
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.path() != "/"
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
+        if host.is_empty() {
             return Err(ProviderPermissionError::InvalidUrl);
         }
         Ok(Self {
-            scheme: url.scheme().to_owned(),
-            host,
-            port,
+            scheme: "tcp".to_owned(),
+            host: host.to_owned(),
+            port: port
+                .parse::<u16>()
+                .map_err(|_| ProviderPermissionError::InvalidUrl)?,
         })
     }
 }
@@ -95,13 +114,10 @@ impl ResourceOpenAuthorizer {
     }
 
     pub fn authorize(&self, params: &ResourceOpenParams) -> Result<(), ProviderPermissionError> {
-        let url = params
-            .config
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or(ProviderPermissionError::InvalidUrl)?;
-        self.permissions
-            .authorize_endpoint(&NetworkEndpoint::parse(url)?)
+        for endpoint in resource_endpoints(&params.config)? {
+            self.permissions.authorize_endpoint(&endpoint)?;
+        }
+        Ok(())
     }
 
     pub fn into_host_authorizer(
@@ -146,7 +162,7 @@ impl ProviderPermissionSet {
     }
 
     pub fn allows_endpoint(&self, endpoint: &NetworkEndpoint) -> bool {
-        matches!(endpoint.scheme.as_str(), "http" | "https")
+        matches!(endpoint.scheme.as_str(), "http" | "https" | "tcp")
             && self.tcp_endpoints.iter().any(|(host, ports)| {
                 host.eq_ignore_ascii_case(&endpoint.host) && ports.contains(&endpoint.port)
             })
@@ -174,6 +190,60 @@ impl ProviderPermissionSet {
             Err(ProviderPermissionError::NetworkDenied)
         }
     }
+}
+
+fn resource_endpoints(config: &Value) -> Result<Vec<NetworkEndpoint>, ProviderPermissionError> {
+    let mut values = Vec::new();
+    for field in [
+        "url",
+        "server_url",
+        "server",
+        "bootstrap_servers",
+        "endpoint",
+    ] {
+        if let Some(value) = config.get(field) {
+            push_endpoint_values(value, &mut values)?;
+        }
+    }
+    if let Some(brokers) = config.get("brokers") {
+        match brokers {
+            Value::String(_) | Value::Array(_) => push_endpoint_values(brokers, &mut values)?,
+            _ => return Err(ProviderPermissionError::InvalidUrl),
+        }
+    }
+    if let (Some(host), Some(port)) = (config.get("host"), config.get("port")) {
+        let host = host.as_str().ok_or(ProviderPermissionError::InvalidUrl)?;
+        let port = port
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or(ProviderPermissionError::InvalidUrl)?;
+        values.push(Value::String(format!("{host}:{port}")));
+    }
+
+    if values.is_empty() {
+        return Err(ProviderPermissionError::InvalidUrl);
+    }
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(ProviderPermissionError::InvalidUrl)
+                .and_then(NetworkEndpoint::parse)
+        })
+        .collect()
+}
+
+fn push_endpoint_values(
+    value: &Value,
+    values: &mut Vec<Value>,
+) -> Result<(), ProviderPermissionError> {
+    match value {
+        Value::String(_) => values.push(value.clone()),
+        Value::Array(items) => values.extend(items.iter().cloned()),
+        _ => return Err(ProviderPermissionError::InvalidUrl),
+    }
+    Ok(())
 }
 
 fn parse_port_range(value: &str) -> Option<Vec<u16>> {
@@ -261,6 +331,61 @@ mod tests {
         );
         assert!(NetworkEndpoint::parse("ftp://example.com:21").is_err());
         assert!(NetworkEndpoint::parse("http://user@example.com:9200").is_err());
+    }
+
+    #[test]
+    fn resource_open_authorizer_enforces_all_provider_endpoints() {
+        let authorizer = ResourceOpenAuthorizer::new([
+            "net:tcp:broker-one:9092",
+            "net:tcp:broker-two:9093",
+            "net:tcp:kubernetes.example:6443",
+            "net:tcp:db.example:5432",
+        ]);
+        let kafka = ResourceOpenParams {
+            resource_type: "kafka".into(),
+            config: serde_json::json!({
+                "brokers": ["broker-one:9092", "broker-two:9093"]
+            }),
+            metadata: None,
+        };
+        authorizer.authorize(&kafka).unwrap();
+
+        let database = ResourceOpenParams {
+            resource_type: "database".into(),
+            config: serde_json::json!({ "host": "db.example", "port": 5432 }),
+            metadata: None,
+        };
+        authorizer.authorize(&database).unwrap();
+
+        let kubernetes = ResourceOpenParams {
+            resource_type: "kubernetes".into(),
+            config: serde_json::json!({ "server": "https://kubernetes.example:6443" }),
+            metadata: None,
+        };
+        authorizer.authorize(&kubernetes).unwrap();
+
+        let denied = ResourceOpenParams {
+            resource_type: "kafka".into(),
+            config: serde_json::json!({
+                "brokers": ["broker-one:9092", "unknown-broker:9092"]
+            }),
+            metadata: None,
+        };
+        assert_eq!(
+            ProviderPermissionError::NetworkDenied,
+            authorizer.authorize(&denied).unwrap_err()
+        );
+    }
+
+    #[test]
+    fn tcp_endpoints_use_host_port_without_url_syntax() {
+        let endpoint = NetworkEndpoint::parse("broker.example:9092").unwrap();
+        assert_eq!("tcp", endpoint.scheme);
+        assert_eq!("broker.example", endpoint.host);
+        assert_eq!(9092, endpoint.port);
+        assert!(NetworkEndpoint::parse("broker.example").is_err());
+        assert!(NetworkEndpoint::parse("broker.example:9092/path").is_err());
+        assert!(NetworkEndpoint::parse("user@broker.example:9092").is_err());
     }
 
     #[test]
