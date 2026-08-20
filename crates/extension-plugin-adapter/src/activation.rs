@@ -330,7 +330,7 @@ enum CheckDecision {
 
 /// Manages lazy runtime starts, runtime sharing across panels, and reference-counted shutdown.
 pub struct ActivationManager {
-    catalog: ExtensionRuntimeCatalog,
+    catalog: Arc<ExtensionRuntimeCatalog>,
     session_factory: SessionFactory,
     host_api_factory: HostApiFactory,
     supervision_policy: SupervisionPolicy,
@@ -340,6 +340,19 @@ pub struct ActivationManager {
 impl ActivationManager {
     pub fn new(
         catalog: ExtensionRuntimeCatalog,
+        session_factory: SessionFactory,
+        host_api_factory: HostApiFactory,
+    ) -> Self {
+        Self::from_shared_catalog(Arc::new(catalog), session_factory, host_api_factory)
+    }
+
+    /// Creates a manager sharing the application's immutable catalog snapshot.
+    ///
+    /// The GPUI runtime catalog is stored as an `Arc`. Sharing that value here
+    /// avoids loading installed extension manifests twice while preserving a
+    /// single ownership point for activation authorization.
+    pub fn from_shared_catalog(
+        catalog: Arc<ExtensionRuntimeCatalog>,
         session_factory: SessionFactory,
         host_api_factory: HostApiFactory,
     ) -> Self {
@@ -1132,8 +1145,8 @@ impl RuntimeMonitor {
         let stop = self.running.lock().take();
         if let Some(stop) = stop {
             let _ = stop.send(()).await;
+            self.stopped.notified().await;
         }
-        self.stopped.notified().await;
     }
 
     async fn check_once(&self, runtime_id: &str) -> Option<RuntimeMonitorEvent> {

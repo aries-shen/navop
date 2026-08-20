@@ -35,6 +35,7 @@ mod setting_tab;
 mod settings;
 mod sync_conflict_dialog;
 mod team_management;
+mod universal_plugins;
 mod update;
 mod user_avatar;
 #[cfg(any(target_os = "windows", test))]
@@ -289,6 +290,7 @@ fn main() {
         #[cfg(feature = "api-testing")]
         api_tools::init(cx);
         extension_runtime::init(cx);
+        universal_plugins::init(cx);
 
         let saved_size = AppSettings::current(cx).main_window_size;
         let display_size = cx.primary_display().map(|display| display.bounds().size);

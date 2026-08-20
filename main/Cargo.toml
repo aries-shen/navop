@@ -34,6 +34,7 @@ smol = { workspace = true }
 db_view = { workspace = true }
 extension-runtime = { workspace = true, features = ["wasm-components"] }
 extension-host.workspace = true
+extension-plugin-adapter.workspace = true
 extension_view = { workspace = true }
 notes = { workspace = true }
 json_view = { workspace = true }

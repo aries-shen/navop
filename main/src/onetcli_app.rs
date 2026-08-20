@@ -228,6 +228,22 @@ pub(crate) fn shutdown_application_resources_and_quit(cx: &mut App, reason: &'st
             );
         }
 
+        let plugin_shutdown_task = cx.update(|cx| crate::universal_plugins::spawn_shutdown(cx));
+        if let Some(shutdown_task) = plugin_shutdown_task {
+            if let Err(error) = shutdown_task.await {
+                tracing::warn!(
+                    reason,
+                    %error,
+                    "Universal plugin shutdown did not complete"
+                );
+            }
+        } else {
+            tracing::error!(
+                reason,
+                "Universal plugin service global is missing; quitting after remaining application teardown"
+            );
+        }
+
         let _ = cx.update(|cx| cx.quit());
     })
     .detach();
