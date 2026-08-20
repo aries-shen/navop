@@ -19,10 +19,18 @@ use thiserror::Error;
 
 pub mod activation;
 
+pub mod provider_permissions;
+pub mod universal_host;
+
 pub use activation::{
     ActivationError, ActivationHandle, ActivationManager, ManagedRpcSession,
-    RuntimeActivationState, SessionFactory, process_session_factory,
+    RuntimeActivationState, SessionContext, SessionFactory, process_session_factory,
 };
+
+pub use provider_permissions::{
+    NetworkEndpoint, ProviderPermissionError, ProviderPermissionSet, SecretReference,
+};
+pub use universal_host::{MapSecretResolver, SecretResolver, UniversalProviderHost};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PluginAdapterError {

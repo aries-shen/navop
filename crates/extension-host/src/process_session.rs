@@ -5,6 +5,7 @@
 //! `NegotiationConfig` 组装好，再通过 [`ProcessRpcSession`] 发送 typed/raw
 //! request。
 
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use tracing::warn;
 
 use crate::client::{JsonRpcClient, JsonRpcClientHandle, RequestOptions};
 use crate::error::{HostError, HostResult};
+use crate::host_api::HostApiHandler;
 use crate::negotiation::{ExtensionSession, NegotiationConfig, negotiate, shutdown};
 use crate::process::ProcessHandle;
 use crate::transport::FramedTransport;
@@ -38,6 +40,10 @@ pub struct ProcessRpcSessionConfig {
     pub shutdown_grace_ms: u32,
     /// 仅用于日志和错误上下文，不会发送给扩展进程。
     pub label: String,
+    /// Optional reverse Host API dispatcher used by native resource providers.
+    ///
+    /// This value is not sent to the process. It is retained only by the host.
+    pub host_api: Option<Arc<HostApiHandler>>,
 }
 
 impl ProcessRpcSessionConfig {
@@ -49,6 +55,7 @@ impl ProcessRpcSessionConfig {
             request_timeout: DEFAULT_SESSION_REQUEST_TIMEOUT,
             shutdown_grace_ms: DEFAULT_SESSION_SHUTDOWN_GRACE,
             label,
+            host_api: None,
         }
     }
 
@@ -64,6 +71,11 @@ impl ProcessRpcSessionConfig {
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    pub fn with_host_api(mut self, host_api: Arc<HostApiHandler>) -> Self {
+        self.host_api = Some(host_api);
         self
     }
 }
@@ -97,7 +109,11 @@ impl ProcessRpcSession {
 
         let (reader, writer) = tokio::io::split(stream);
         let transport = FramedTransport::new(reader, writer);
-        let client = JsonRpcClient::start(transport);
+        let client = if let Some(host_api) = config.host_api.clone() {
+            JsonRpcClient::start_with_host_api(transport, host_api)
+        } else {
+            JsonRpcClient::start(transport)
+        };
         Self::start_with_client(client, Some(process), config).await
     }
 

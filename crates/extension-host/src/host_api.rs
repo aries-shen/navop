@@ -28,6 +28,15 @@ pub trait HostApiProvider: Send + Sync {
         params: host::RequestCredentialParams,
     ) -> HostResult<host::RequestCredentialResult>;
 
+    /// Resolve a stored secret into a one-shot value.
+    ///
+    /// Implementations must authenticate and authorize the extension before
+    /// returning this value, and must never log or persist the resolved bytes.
+    async fn resolve_secret(
+        &self,
+        params: host::ResolveSecretParams,
+    ) -> HostResult<host::ResolveSecretResult>;
+
     /// 发送通知给用户，返回用户点击的 action id。
     async fn notify(&self, params: host::NotifyParams) -> HostResult<host::NotifyResult>;
 
@@ -57,6 +66,12 @@ pub struct HostApiHandler {
     provider: Arc<dyn HostApiProvider>,
 }
 
+impl std::fmt::Debug for HostApiHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostApiHandler").finish_non_exhaustive()
+    }
+}
+
 impl HostApiHandler {
     pub fn new(provider: Arc<dyn HostApiProvider>) -> Self {
         Self { provider }
@@ -70,6 +85,12 @@ impl HostApiHandler {
                     serde_json::from_value(params).map_err(|e| HostError::Serde(e))?;
                 let result = self.provider.request_credential(params).await?;
                 Ok(serde_json::to_value(result).expect("credential value must serialize"))
+            }
+            extension_protocol::method::HOST_RESOLVE_SECRET => {
+                let params: host::ResolveSecretParams =
+                    serde_json::from_value(params).map_err(HostError::Serde)?;
+                let result = self.provider.resolve_secret(params).await?;
+                Ok(serde_json::to_value(result).expect("secret value must serialize"))
             }
             extension_protocol::method::HOST_NOTIFY => {
                 let params: host::NotifyParams =
@@ -137,6 +158,15 @@ mod tests {
                     secret_ref: "test:password".into(),
                 },
                 remembered: false,
+            })
+        }
+
+        async fn resolve_secret(
+            &self,
+            _params: host::ResolveSecretParams,
+        ) -> HostResult<host::ResolveSecretResult> {
+            Ok(host::ResolveSecretResult {
+                value: b"token-value".to_vec(),
             })
         }
 

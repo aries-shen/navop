@@ -26,12 +26,21 @@ use thiserror::Error;
 /// production implementation is [`process_session_factory`]; restart policy and
 /// process monitoring belong to a later supervision layer.
 pub type SessionFactory = Arc<
-    dyn Fn(
-            RegisteredIpcRuntimeBinding,
-        ) -> BoxFuture<'static, Result<Arc<dyn ManagedRpcSession>, HostError>>
+    dyn Fn(SessionContext) -> BoxFuture<'static, Result<Arc<dyn ManagedRpcSession>, HostError>>
         + Send
         + Sync,
 >;
+
+/// Inputs needed to start one activation-owned runtime session.
+#[derive(Debug, Clone)]
+pub struct SessionContext {
+    pub binding: RegisteredIpcRuntimeBinding,
+    pub host_api: Arc<extension_host::HostApiHandler>,
+}
+
+/// Creates permission-enforcing reverse Host API dispatchers for activations.
+pub type HostApiFactory =
+    Arc<dyn Fn(RegisteredIpcRuntimeBinding) -> Arc<extension_host::HostApiHandler> + Send + Sync>;
 
 /// The process-session capability required by the activation manager.
 ///
@@ -53,14 +62,15 @@ impl ManagedRpcSession for ProcessRpcSession {
 /// starts one `ProcessRpcSession`. Restart/backoff supervision is intentionally
 /// not part of this factory; it belongs to the later supervision layer.
 pub fn process_session_factory() -> SessionFactory {
-    Arc::new(|binding| {
+    Arc::new(|context| {
         Box::pin(async move {
             let host_version = current_host_version().to_string();
             let instance_id = uuid::Uuid::new_v4().to_string();
             let negotiation = extension_host::NegotiationConfig::new(host_version, instance_id)
                 .offer_api("extension", "1.0");
-            let config = crate::process_session_config(&binding, negotiation)
+            let config = crate::process_session_config(&context.binding, negotiation)
                 .map_err(|error| HostError::Config(error.to_string()))?;
+            let config = config.with_host_api(context.host_api);
             let session = ProcessRpcSession::start(config).await?;
             Ok(Arc::new(session) as Arc<dyn ManagedRpcSession>)
         })
@@ -149,14 +159,20 @@ struct StartingRuntime {
 pub struct ActivationManager {
     catalog: ExtensionRuntimeCatalog,
     session_factory: SessionFactory,
+    host_api_factory: HostApiFactory,
     state: SyncMutex<ActivationState>,
 }
 
 impl ActivationManager {
-    pub fn new(catalog: ExtensionRuntimeCatalog, session_factory: SessionFactory) -> Self {
+    pub fn new(
+        catalog: ExtensionRuntimeCatalog,
+        session_factory: SessionFactory,
+        host_api_factory: HostApiFactory,
+    ) -> Self {
         Self {
             catalog,
             session_factory,
+            host_api_factory,
             state: SyncMutex::new(ActivationState::default()),
         }
     }
@@ -266,20 +282,22 @@ impl ActivationManager {
             }
         };
 
-        let session = (self.session_factory)(starting.binding.clone())
-            .await
-            .map_err(|error| {
-                let mut state = self.state.lock();
-                if let Some(runtime) = state.runtimes.get(&runtime_id) {
-                    if runtime.start_generation == starting.generation
-                        && runtime.state == RuntimeActivationState::Starting
-                        && runtime.session.is_none()
-                    {
-                        state.runtimes.remove(&runtime_id);
-                    }
+        let context = SessionContext {
+            binding: starting.binding.clone(),
+            host_api: (self.host_api_factory)(starting.binding.clone()),
+        };
+        let session = (self.session_factory)(context).await.map_err(|error| {
+            let mut state = self.state.lock();
+            if let Some(runtime) = state.runtimes.get(&runtime_id) {
+                if runtime.start_generation == starting.generation
+                    && runtime.state == RuntimeActivationState::Starting
+                    && runtime.session.is_none()
+                {
+                    state.runtimes.remove(&runtime_id);
                 }
-                ActivationError::session_start(error)
-            })?;
+            }
+            ActivationError::session_start(error)
+        })?;
 
         let stale_session: Option<Arc<dyn ManagedRpcSession>> = {
             let mut state = self.state.lock();

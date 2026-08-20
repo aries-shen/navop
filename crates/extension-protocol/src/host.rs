@@ -56,6 +56,50 @@ pub struct RequestCredentialResult {
 }
 
 // ============================================================================
+// host/secret/resolve
+// ============================================================================
+
+/// Resolve an already stored secret reference into a one-shot value.
+///
+/// This is deliberately separate from `host/request_credential`, which asks
+/// the user for a new or remembered credential and returns another reference.
+/// Providers call this when opening a connection; the host must enforce the
+/// extension's `secrets:read:<namespace>.<key|*>` permission before returning
+/// the value. Values must never be echoed into UI state or logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveSecretParams {
+    pub secret_ref: SecretRef,
+}
+
+/// The resolved secret is intentionally represented as bytes so token, API
+/// key, password, certificate, and key formats can share the same contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveSecretResult {
+    #[serde(with = "serde_bytes_base64")]
+    pub value: Vec<u8>,
+}
+
+mod serde_bytes_base64 {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        STANDARD.encode(value).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD.decode(encoded).map_err(serde::de::Error::custom)
+    }
+}
+
+// ============================================================================
 // host/notify
 // ============================================================================
 
@@ -331,6 +375,28 @@ mod tests {
         let parsed: RequestCredentialResult = serde_json::from_str(&j).unwrap();
         assert_eq!(parsed.secret_ref.secret_ref, "kss://x/y");
         assert!(parsed.remembered);
+    }
+
+    #[test]
+    fn resolve_secret_uses_base64_without_leaking_plaintext_in_json() {
+        let params = ResolveSecretParams {
+            secret_ref: SecretRef::new("secret://elasticsearch/api_key"),
+        };
+        let result = ResolveSecretResult {
+            value: b"token-value".to_vec(),
+        };
+
+        assert_eq!(
+            r#"{"secret_ref":{"secret_ref":"secret://elasticsearch/api_key"}}"#,
+            serde_json::to_string(&params).unwrap()
+        );
+        assert_eq!(
+            r#"{"value":"dG9rZW4tdmFsdWU="}"#,
+            serde_json::to_string(&result).unwrap()
+        );
+        let parsed: ResolveSecretResult =
+            serde_json::from_str(r#"{"value":"dG9rZW4tdmFsdWU="}"#).unwrap();
+        assert_eq!(b"token-value".to_vec(), parsed.value);
     }
 
     #[test]

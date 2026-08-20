@@ -110,7 +110,72 @@ fn activation_manager(
     let (root, catalog, calls, shutdowns) = activation_fixture(panel_specs);
     let factory_calls = Arc::clone(&calls);
     let session_shutdowns = Arc::clone(&shutdowns);
-    let factory: SessionFactory = Arc::new(move |_binding| {
+    #[derive(Default)]
+    struct NoopHost;
+
+    #[async_trait::async_trait]
+    impl extension_host::HostApiProvider for NoopHost {
+        async fn request_credential(
+            &self,
+            _params: extension_protocol::host::RequestCredentialParams,
+        ) -> extension_host::HostResult<extension_protocol::host::RequestCredentialResult> {
+            unimplemented!()
+        }
+
+        async fn resolve_secret(
+            &self,
+            _params: extension_protocol::host::ResolveSecretParams,
+        ) -> extension_host::HostResult<extension_protocol::host::ResolveSecretResult> {
+            unimplemented!()
+        }
+
+        async fn notify(
+            &self,
+            _params: extension_protocol::host::NotifyParams,
+        ) -> extension_host::HostResult<extension_protocol::host::NotifyResult> {
+            Ok(extension_protocol::host::NotifyResult { clicked: None })
+        }
+
+        async fn quick_pick(
+            &self,
+            _params: extension_protocol::host::QuickPickParams,
+        ) -> extension_host::HostResult<extension_protocol::host::QuickPickResult> {
+            Ok(extension_protocol::host::QuickPickResult {
+                selected: Vec::new(),
+                cancelled: true,
+            })
+        }
+
+        async fn open_view(
+            &self,
+            _params: extension_protocol::host::OpenViewParams,
+        ) -> extension_host::HostResult<()> {
+            Ok(())
+        }
+
+        async fn storage_get(
+            &self,
+            _params: extension_protocol::host::StorageGetParams,
+        ) -> extension_host::HostResult<extension_protocol::host::StorageGetResult> {
+            Ok(extension_protocol::host::StorageGetResult { value: None })
+        }
+
+        async fn storage_set(
+            &self,
+            _params: extension_protocol::host::StorageSetParams,
+        ) -> extension_host::HostResult<()> {
+            Ok(())
+        }
+
+        async fn log(
+            &self,
+            _params: extension_protocol::host::LogParams,
+        ) -> extension_host::HostResult<()> {
+            Ok(())
+        }
+    }
+
+    let factory: SessionFactory = Arc::new(move |_context| {
         let calls = Arc::clone(&factory_calls);
         let shutdowns = Arc::clone(&session_shutdowns);
         Box::pin(async move {
@@ -120,9 +185,11 @@ fn activation_manager(
             }) as Arc<dyn ManagedRpcSession>)
         })
     });
+    let host_api_factory =
+        Arc::new(|_binding| Arc::new(extension_host::HostApiHandler::new(Arc::new(NoopHost))));
     (
         root,
-        ActivationManager::new(catalog, factory),
+        ActivationManager::new(catalog, factory, host_api_factory),
         calls,
         shutdowns,
     )

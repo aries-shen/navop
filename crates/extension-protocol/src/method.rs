@@ -126,6 +126,7 @@ pub const MONGODB_CURSOR_CLOSE: &str = "mongodb/cursor_close";
 
 // -- Host API(扩展 → 宿主) --
 pub const HOST_REQUEST_CREDENTIAL: &str = "host/request_credential";
+pub const HOST_RESOLVE_SECRET: &str = "host/secret/resolve";
 pub const HOST_NOTIFY: &str = "host/notify";
 pub const HOST_QUICK_PICK: &str = "host/quick_pick";
 pub const HOST_CONFIRM: &str = "host/confirm";
