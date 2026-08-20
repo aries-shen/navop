@@ -13,6 +13,7 @@ use std::{
 
 use crate::provider_permissions::ResourceOpenAuthorizer;
 use extension_host::{HostError, ProcessRpcSession};
+use extension_runtime::extension::manifest::DeclarativePanelPlacement;
 use extension_runtime::{
     ExtensionRuntimeCatalog, RegisteredIpcRuntimeBinding, extension::manifest::current_host_version,
 };
@@ -236,6 +237,33 @@ pub struct ActivationHandle {
     pub panel_key: String,
     pub runtime_id: String,
     pub state: RuntimeActivationState,
+}
+
+/// A UI-facing, immutable catalog entry for a registered declarative panel.
+///
+/// This projection contains only rendering metadata. Activation authorization
+/// and runtime ownership remain exclusively in [`ActivationManager`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarativePanelDescriptor {
+    pub extension_id: String,
+    pub panel_key: String,
+    pub title: String,
+    pub runtime_id: String,
+    pub placement: DeclarativePanelPlacement,
+    pub icon: Option<String>,
+}
+
+impl<'a> From<&'a extension_runtime::RegisteredDeclarativePanel> for DeclarativePanelDescriptor {
+    fn from(panel: &'a extension_runtime::RegisteredDeclarativePanel) -> Self {
+        Self {
+            extension_id: panel.extension_id.clone(),
+            panel_key: panel.panel_key.clone(),
+            title: panel.title.clone(),
+            runtime_id: panel.runtime_id.clone(),
+            placement: panel.placement,
+            icon: panel.icon.clone(),
+        }
+    }
 }
 
 /// A typed client bound to one activation-owned session generation.
@@ -657,6 +685,22 @@ impl ActivationManager {
             .values()
             .flat_map(|runtime| runtime.panels.iter().cloned())
             .collect()
+    }
+
+    /// Returns a UI-facing projection of all registered declarative panels.
+    ///
+    /// Paths and activation permissions are intentionally omitted. The UI can
+    /// display these entries, but cannot activate a runtime by bypassing
+    /// [`ActivationManager::activate_panel`].
+    pub fn declarative_panel_catalog(&self) -> Vec<DeclarativePanelDescriptor> {
+        let mut panels: Vec<_> = self
+            .catalog
+            .declarative_panels()
+            .iter()
+            .map(DeclarativePanelDescriptor::from)
+            .collect();
+        panels.sort_by(|left, right| left.panel_key.cmp(&right.panel_key));
+        panels
     }
 
     /// Inspect process health without changing process state.

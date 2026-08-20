@@ -6,7 +6,7 @@ use std::time::Duration;
 use declarative_ui_demo::NodePath;
 use extension_host::{DEFAULT_SESSION_REQUEST_TIMEOUT, SpawnTransport};
 use extension_runtime::ExtensionRuntimeCatalog;
-use extension_runtime::extension::manifest::load_from_dir;
+use extension_runtime::extension::manifest::{DeclarativePanelPlacement, load_from_dir};
 use futures::future::BoxFuture;
 
 use super::*;
@@ -621,6 +621,35 @@ async fn runtime_monitor_task_starts_stops_and_rejects_double_start() {
     assert!(events.try_recv().is_err());
     assert!(monitor.start().is_ok());
     monitor.stop().await;
+}
+
+#[test]
+fn activation_catalog_projects_ui_metadata_without_trusting_paths() {
+    let (_root, manager, _calls, _shutdowns, _closed) =
+        activation_manager(&[("topics", "main"), ("overview", "secondary")]);
+
+    let panels = manager.declarative_panel_catalog();
+    assert_eq!(
+        vec![
+            DeclarativePanelDescriptor {
+                extension_id: "com.navop.kafka".into(),
+                panel_key: "com.navop.kafka::overview".into(),
+                title: "overview".into(),
+                runtime_id: "com.navop.kafka::secondary".into(),
+                placement: DeclarativePanelPlacement::HomeSidebar,
+                icon: None,
+            },
+            DeclarativePanelDescriptor {
+                extension_id: "com.navop.kafka".into(),
+                panel_key: "com.navop.kafka::topics".into(),
+                title: "topics".into(),
+                runtime_id: "com.navop.kafka::main".into(),
+                placement: DeclarativePanelPlacement::HomeSidebar,
+                icon: None,
+            },
+        ],
+        panels
+    );
 }
 
 #[test]

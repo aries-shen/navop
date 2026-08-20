@@ -23,10 +23,10 @@ pub mod provider_permissions;
 pub mod universal_host;
 
 pub use activation::{
-    ActivationError, ActivationHandle, ActivationManager, ManagedRpcSession,
-    ManagedUniversalPluginClient, RuntimeActivationState, RuntimeHealth, RuntimeMonitor,
-    RuntimeMonitorConfig, RuntimeMonitorError, RuntimeMonitorEvent, SessionContext, SessionFactory,
-    SupervisionPolicy, process_session_factory,
+    ActivationError, ActivationHandle, ActivationManager, DeclarativePanelDescriptor,
+    ManagedRpcSession, ManagedUniversalPluginClient, RuntimeActivationState, RuntimeHealth,
+    RuntimeMonitor, RuntimeMonitorConfig, RuntimeMonitorError, RuntimeMonitorEvent, SessionContext,
+    SessionFactory, SupervisionPolicy, process_session_factory,
 };
 
 pub use provider_permissions::{
