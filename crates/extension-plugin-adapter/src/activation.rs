@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
+    time::Duration,
 };
 
 use extension_host::{HostError, ProcessRpcSession};
@@ -16,15 +17,14 @@ use extension_runtime::{
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use parking_lot::Mutex as SyncMutex;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::Instant};
 
 use thiserror::Error;
 
 /// Asynchronous factory used to start a runtime session.
 ///
 /// The indirection keeps process supervision independently testable. The
-/// production implementation is [`process_session_factory`]; restart policy and
-/// process monitoring belong to a later supervision layer.
+/// production implementation is [`process_session_factory`].
 pub type SessionFactory = Arc<
     dyn Fn(SessionContext) -> BoxFuture<'static, Result<Arc<dyn ManagedRpcSession>, HostError>>
         + Send
@@ -48,6 +48,27 @@ pub type HostApiFactory =
 /// so ownership semantics can be tested without spawning a child process.
 pub trait ManagedRpcSession: Send + Sync {
     fn shutdown<'a>(&'a self) -> BoxFuture<'a, ()>;
+
+    /// Reports whether the transport or child process has already exited.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
+    /// Performs a process-level health request.
+    ///
+    /// The default is useful for in-process test doubles. A failed ping does
+    /// not by itself prove that a process crashed; supervision only restarts
+    /// after `is_closed` confirms closure.
+    fn ping<'a>(&'a self) -> BoxFuture<'a, Result<(), HostError>> {
+        async {
+            if self.is_closed() {
+                Err(HostError::Closed)
+            } else {
+                Ok(())
+            }
+        }
+        .boxed()
+    }
 
     fn universal_plugin_client(
         &self,
@@ -73,13 +94,30 @@ impl ManagedRpcSession for ProcessRpcSession {
             None => client,
         })
     }
+
+    fn is_closed(&self) -> bool {
+        ProcessRpcSession::is_closed(self)
+    }
+
+    fn ping<'a>(&'a self) -> BoxFuture<'a, Result<(), HostError>> {
+        if !self.declares_method(extension_protocol::method::PING) {
+            return async { Ok(()) }.boxed();
+        }
+        ProcessRpcSession::request_value(
+            self,
+            extension_protocol::method::PING,
+            serde_json::Value::Null,
+        )
+        .map(|result| result.map(|_| ()))
+        .boxed()
+    }
 }
 
 /// Build the production IPC session factory for native resource providers.
 ///
 /// Each call receives a fresh instance ID, negotiates the extension API, and
-/// starts one `ProcessRpcSession`. Restart/backoff supervision is intentionally
-/// not part of this factory; it belongs to the later supervision layer.
+/// starts one `ProcessRpcSession`. Restart/backoff supervision is owned by
+/// [`ActivationManager`] and remains host-authoritative.
 pub fn process_session_factory() -> SessionFactory {
     Arc::new(|context| {
         Box::pin(async move {
@@ -123,6 +161,52 @@ pub enum ActivationError {
     InvalidRuntime { runtime_id: String },
 }
 
+/// Host-owned restart timing policy.
+///
+/// Extension manifests choose whether restart is enabled and how many restarts
+/// are budgeted; timing remains host-authoritative and cannot be configured by
+/// an extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupervisionPolicy {
+    pub initial_restart_backoff: Duration,
+    pub max_restart_backoff: Duration,
+    pub backoff_multiplier: u32,
+}
+
+impl Default for SupervisionPolicy {
+    fn default() -> Self {
+        Self {
+            initial_restart_backoff: Duration::from_millis(250),
+            max_restart_backoff: Duration::from_secs(8),
+            backoff_multiplier: 2,
+        }
+    }
+}
+
+impl SupervisionPolicy {
+    fn backoff_for_attempt(&self, attempt: u32) -> Duration {
+        let mut backoff = self.initial_restart_backoff;
+        for _ in 1..attempt {
+            backoff = backoff
+                .checked_mul(self.backoff_multiplier)
+                .unwrap_or(self.max_restart_backoff)
+                .min(self.max_restart_backoff);
+        }
+        backoff
+    }
+}
+
+/// A point-in-time supervision snapshot for an activated runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeHealth {
+    pub state: RuntimeActivationState,
+    pub session_closed: bool,
+    pub ping_error: Option<String>,
+    pub restart_attempts: u32,
+    pub restart_budget: u32,
+    pub restart_backoff_remaining: Option<Duration>,
+}
+
 impl From<HostError> for ActivationError {
     fn from(error: HostError) -> Self {
         Self::SessionStart(error.to_string())
@@ -150,7 +234,14 @@ pub struct ActivationHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeActivationState {
     Starting,
+    Restarting,
     Active,
+    /// The process transport is still open, but its health ping failed.
+    Degraded,
+    /// Restart is disabled or a restart could not be initiated.
+    Failed,
+    /// The configured restart budget has been exhausted.
+    CrashLoop,
 }
 
 struct ActivatedRuntime {
@@ -160,6 +251,8 @@ struct ActivatedRuntime {
     session: Option<Arc<dyn ManagedRpcSession>>,
     start_generation: u64,
     factory_claimed: bool,
+    restart_attempts: u32,
+    next_restart_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -174,11 +267,21 @@ struct StartingRuntime {
     generation: u64,
 }
 
+enum CheckDecision {
+    Return(RuntimeHealth, Option<Arc<dyn ManagedRpcSession>>),
+    Restart {
+        binding: Box<RegisteredIpcRuntimeBinding>,
+        generation: u64,
+        attempt: u32,
+    },
+}
+
 /// Manages lazy runtime starts, runtime sharing across panels, and reference-counted shutdown.
 pub struct ActivationManager {
     catalog: ExtensionRuntimeCatalog,
     session_factory: SessionFactory,
     host_api_factory: HostApiFactory,
+    supervision_policy: SupervisionPolicy,
     state: SyncMutex<ActivationState>,
 }
 
@@ -192,8 +295,14 @@ impl ActivationManager {
             catalog,
             session_factory,
             host_api_factory,
+            supervision_policy: SupervisionPolicy::default(),
             state: SyncMutex::new(ActivationState::default()),
         }
+    }
+
+    pub fn with_supervision_policy(mut self, policy: SupervisionPolicy) -> Self {
+        self.supervision_policy = policy;
+        self
     }
 
     pub async fn activate_panel(
@@ -261,6 +370,8 @@ impl ActivationManager {
                     session: None,
                     start_generation: generation,
                     factory_claimed: false,
+                    restart_attempts: 0,
+                    next_restart_at: None,
                 },
             );
 
@@ -454,5 +565,248 @@ impl ActivationManager {
             .values()
             .flat_map(|runtime| runtime.panels.iter().cloned())
             .collect()
+    }
+
+    /// Inspect process health without changing process state.
+    pub async fn runtime_health(&self, runtime_id: &str) -> Result<RuntimeHealth, ActivationError> {
+        let session = self.active_session(runtime_id);
+        let ping_error = match &session {
+            Some(session) if !session.is_closed() => {
+                session.ping().await.err().map(|error| error.to_string())
+            }
+            _ => None,
+        };
+        self.health_snapshot(runtime_id, ping_error).await
+    }
+
+    /// Check a runtime and restart it when process closure is confirmed.
+    ///
+    /// This method is deterministic and pull-oriented: the host UI or process
+    /// monitor decides when to poll. Elapsed backoff is observed, but this
+    /// method never sleeps before attempting a restart.
+    pub async fn check_runtime(&self, runtime_id: &str) -> Result<RuntimeHealth, ActivationError> {
+        let health = self.runtime_health(runtime_id).await?;
+        if !health.session_closed {
+            return Ok(health);
+        }
+
+        let start_lock = {
+            let mut state = self.state.lock();
+            Arc::clone(state.start_locks.entry(runtime_id.to_owned()).or_default())
+        };
+        let _start_guard = start_lock.lock().await;
+
+        let decision: Result<CheckDecision, ActivationError> = {
+            let mut state = self.state.lock();
+            let runtime = state.runtimes.get_mut(runtime_id).ok_or_else(|| {
+                ActivationError::RuntimeNotFound {
+                    runtime_id: runtime_id.to_owned(),
+                }
+            })?;
+            let binding = self
+                .catalog
+                .ipc_runtime_bindings()
+                .find(|binding| binding.runtime_key == runtime_id)
+                .cloned()
+                .ok_or_else(|| ActivationError::RuntimeNotFound {
+                    runtime_id: runtime_id.to_owned(),
+                })?;
+            let budget = self.binding_restart_budget(runtime_id)?;
+
+            if !binding.auto_restart {
+                runtime.state = RuntimeActivationState::Failed;
+                let stale_session = runtime.session.take();
+                let health = self.health_locked(&mut state, runtime_id);
+                Ok(CheckDecision::Return(health, stale_session))
+            } else if runtime.restart_attempts >= budget {
+                runtime.state = RuntimeActivationState::CrashLoop;
+                let stale_session = runtime.session.take();
+                let health = self.health_locked(&mut state, runtime_id);
+                Ok(CheckDecision::Return(health, stale_session))
+            } else if let Some(restart_at) = runtime.next_restart_at
+                && restart_at > Instant::now()
+            {
+                runtime.state = RuntimeActivationState::Restarting;
+                Ok(CheckDecision::Return(
+                    self.health_locked(&mut state, runtime_id),
+                    None,
+                ))
+            } else {
+                runtime.restart_attempts += 1;
+                runtime.state = RuntimeActivationState::Restarting;
+                runtime.factory_claimed = true;
+                Ok(CheckDecision::Restart {
+                    binding: Box::new(binding),
+                    generation: runtime.start_generation,
+                    attempt: runtime.restart_attempts,
+                })
+            }
+        };
+
+        match decision? {
+            CheckDecision::Return(health, stale_session) => {
+                if let Some(session) = stale_session {
+                    session.shutdown().await;
+                }
+                return Ok(health);
+            }
+            CheckDecision::Restart {
+                binding,
+                generation,
+                attempt,
+            } => {
+                let binding = *binding;
+                let stale_session = self
+                    .restart_runtime(runtime_id, binding, generation, attempt)
+                    .await;
+                if let Some(session) = stale_session {
+                    session.shutdown().await;
+                }
+                self.health_snapshot(runtime_id, None).await
+            }
+        }
+    }
+
+    async fn restart_runtime(
+        &self,
+        runtime_id: &str,
+        binding: RegisteredIpcRuntimeBinding,
+        generation: u64,
+        attempt: u32,
+    ) -> Option<Arc<dyn ManagedRpcSession>> {
+        let context = SessionContext {
+            binding: binding.clone(),
+            host_api: (self.host_api_factory)(binding.clone()),
+        };
+        let session = (self.session_factory)(context).await.ok();
+
+        let mut stale_session = None;
+        {
+            let mut state = self.state.lock();
+            if let Some(runtime) = state.runtimes.get_mut(runtime_id)
+                && runtime.start_generation == generation
+                && runtime.restart_attempts == attempt
+            {
+                let backoff = self.supervision_policy.backoff_for_attempt(attempt);
+                runtime.next_restart_at = Some(Instant::now() + backoff);
+                match session {
+                    Some(session) => {
+                        runtime.state = RuntimeActivationState::Active;
+                        runtime.start_generation += 1;
+                        runtime.factory_claimed = false;
+                        stale_session = runtime.session.replace(session);
+                    }
+                    None => {
+                        runtime.state = if attempt >= binding.max_restart_attempts {
+                            RuntimeActivationState::CrashLoop
+                        } else {
+                            RuntimeActivationState::Restarting
+                        };
+                        runtime.factory_claimed = false;
+                    }
+                }
+            } else if let Some(session) = session {
+                stale_session = Some(session);
+            }
+        }
+        stale_session
+    }
+
+    async fn health_snapshot(
+        &self,
+        runtime_id: &str,
+        ping_error: Option<String>,
+    ) -> Result<RuntimeHealth, ActivationError> {
+        let session = self.active_session(runtime_id);
+        let mut state = self.state.lock();
+        let runtime =
+            state
+                .runtimes
+                .get_mut(runtime_id)
+                .ok_or_else(|| ActivationError::RuntimeNotFound {
+                    runtime_id: runtime_id.to_owned(),
+                })?;
+        let session_closed = runtime
+            .session
+            .as_ref()
+            .is_some_and(|session| session.is_closed())
+            || (session.is_none() && runtime.state != RuntimeActivationState::Starting);
+        let ping_error = if session_closed { None } else { ping_error };
+        match (session_closed, ping_error.as_ref()) {
+            (false, None) => {
+                if runtime.state == RuntimeActivationState::Degraded {
+                    runtime.state = RuntimeActivationState::Active;
+                }
+            }
+            (false, Some(_)) => runtime.state = RuntimeActivationState::Degraded,
+            (true, _) => {
+                if runtime.state != RuntimeActivationState::Restarting
+                    && runtime.state != RuntimeActivationState::Failed
+                    && runtime.state != RuntimeActivationState::CrashLoop
+                {
+                    runtime.state = RuntimeActivationState::Failed;
+                }
+            }
+        }
+        Ok(self.health_locked_with_ping(&mut state, runtime_id, ping_error))
+    }
+
+    fn health_locked(&self, state: &mut ActivationState, runtime_id: &str) -> RuntimeHealth {
+        self.health_locked_with_ping(state, runtime_id, None)
+    }
+
+    fn health_locked_with_ping(
+        &self,
+        state: &mut ActivationState,
+        runtime_id: &str,
+        ping_error: Option<String>,
+    ) -> RuntimeHealth {
+        let runtime = state
+            .runtimes
+            .get(runtime_id)
+            .expect("caller checked runtime");
+        let session_closed = runtime
+            .session
+            .as_ref()
+            .is_some_and(|session| session.is_closed());
+        let restart_backoff_remaining = runtime
+            .next_restart_at
+            .filter(|restart_at| *restart_at > Instant::now())
+            .map(|restart_at| restart_at - Instant::now());
+        RuntimeHealth {
+            state: runtime.state,
+            session_closed: session_closed || runtime.session.is_none(),
+            ping_error,
+            restart_attempts: runtime.restart_attempts,
+            restart_budget: self
+                .binding_restart_budget(runtime_id)
+                .expect("runtime exists"),
+            restart_backoff_remaining,
+        }
+    }
+
+    fn active_session(&self, runtime_id: &str) -> Option<Arc<dyn ManagedRpcSession>> {
+        self.state
+            .lock()
+            .runtimes
+            .get(runtime_id)
+            .and_then(|runtime| runtime.session.clone())
+    }
+
+    fn binding_restart_budget(&self, runtime_id: &str) -> Result<u32, ActivationError> {
+        self.catalog
+            .ipc_runtime_bindings()
+            .find(|binding| binding.runtime_key == runtime_id)
+            .map(|binding| binding.max_restart_attempts)
+            .ok_or_else(|| ActivationError::RuntimeNotFound {
+                runtime_id: runtime_id.to_owned(),
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_restart_backoff_for_test(&self, runtime_id: &str) {
+        if let Some(runtime) = self.state.lock().runtimes.get_mut(runtime_id) {
+            runtime.next_restart_at = None;
+        }
     }
 }

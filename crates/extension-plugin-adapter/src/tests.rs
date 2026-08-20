@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use declarative_ui_demo::NodePath;
 use extension_host::{DEFAULT_SESSION_REQUEST_TIMEOUT, SpawnTransport};
@@ -16,7 +16,7 @@ fn binding(extension_root: &std::path::Path) -> RegisteredIpcRuntimeBinding {
     std::fs::write(&command, b"provider").unwrap();
     RegisteredIpcRuntimeBinding {
         extension_id: "com.navop.kafka".into(),
-        runtime_key: "com.navop.kafka::runtime/main".into(),
+        runtime_key: "com.navop.kafka::main".into(),
         extension_root: extension_root.to_path_buf(),
         command,
         required_spawn_permission: "spawn:./bin/provider".into(),
@@ -38,6 +38,7 @@ fn binding(extension_root: &std::path::Path) -> RegisteredIpcRuntimeBinding {
 #[derive(Debug)]
 struct FakeManagedSession {
     shutdowns: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
 }
 
 impl ManagedRpcSession for FakeManagedSession {
@@ -46,6 +47,10 @@ impl ManagedRpcSession for FakeManagedSession {
         Box::pin(async move {
             shutdowns.fetch_add(1, Ordering::SeqCst);
         })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 }
 
@@ -56,6 +61,7 @@ fn activation_fixture(
     ExtensionRuntimeCatalog,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
+    Arc<AtomicBool>,
 ) {
     let root = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("bin")).unwrap();
@@ -82,8 +88,22 @@ fn activation_fixture(
         "permissions": ["spawn:./bin/provider"],
         "runtime": {
             "ipc": [
-                {"id": "main", "entry": {"command": "bin/provider"}},
-                {"id": "secondary", "entry": {"command": "bin/provider"}}
+                {
+                    "id": "main",
+                    "entry": {"command": "bin/provider"},
+                    "transport": {"kind": "local_socket", "connect_timeout_ms": 2_500},
+                    "auto_restart": false,
+                    "max_restart_attempts": 0,
+                    "shutdown_grace_ms": 4_000
+                },
+                {
+                    "id": "secondary",
+                    "entry": {"command": "bin/provider"},
+                    "transport": {"kind": "local_socket", "connect_timeout_ms": 2_500},
+                    "auto_restart": true,
+                    "max_restart_attempts": 2,
+                    "shutdown_grace_ms": 4_000
+                }
             ]
         },
         "contributes": {"declarativePanels": panels}
@@ -96,7 +116,8 @@ fn activation_fixture(
     let catalog = ExtensionRuntimeCatalog::from_manifests(vec![loaded]).unwrap();
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let shutdowns = Arc::new(AtomicUsize::new(0));
-    (root, catalog, factory_calls, shutdowns)
+    let session_closed = Arc::new(AtomicBool::new(false));
+    (root, catalog, factory_calls, shutdowns, session_closed)
 }
 
 fn activation_manager(
@@ -106,8 +127,9 @@ fn activation_manager(
     ActivationManager,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
+    Arc<AtomicBool>,
 ) {
-    let (root, catalog, calls, shutdowns) = activation_fixture(panel_specs);
+    let (root, catalog, calls, shutdowns, session_closed) = activation_fixture(panel_specs);
     let factory_calls = Arc::clone(&calls);
     let session_shutdowns = Arc::clone(&shutdowns);
     #[derive(Default)]
@@ -175,13 +197,20 @@ fn activation_manager(
         }
     }
 
+    let factory_closed = Arc::clone(&session_closed);
     let factory: SessionFactory = Arc::new(move |_context| {
         let calls = Arc::clone(&factory_calls);
         let shutdowns = Arc::clone(&session_shutdowns);
+        let closed = Arc::clone(&factory_closed);
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
+            // The shared test control represents the crashed generation while
+            // `check_runtime` captures its health. A factory call represents a
+            // replacement generation, so reset that control to open here.
+            closed.store(false, Ordering::SeqCst);
             Ok(Arc::new(FakeManagedSession {
                 shutdowns: Arc::clone(&shutdowns),
+                closed,
             }) as Arc<dyn ManagedRpcSession>)
         })
     });
@@ -192,6 +221,7 @@ fn activation_manager(
         ActivationManager::new(catalog, factory, host_api_factory),
         calls,
         shutdowns,
+        Arc::clone(&session_closed),
     )
 }
 
@@ -223,12 +253,12 @@ fn binding_maps_to_process_session_config_without_losing_spawn_fields() {
     assert_eq!(Duration::from_millis(2_500), config.spawn.ready_timeout);
     assert_eq!(DEFAULT_SESSION_REQUEST_TIMEOUT, config.request_timeout);
     assert_eq!(4_000, config.shutdown_grace_ms);
-    assert_eq!("com.navop.kafka::runtime/main", config.label);
+    assert_eq!("com.navop.kafka::main", config.label);
 }
 
 #[tokio::test]
 async fn activation_manager_starts_runtimes_lazily_and_shares_sessions() {
-    let (_root, manager, calls, shutdowns) = activation_manager(&[
+    let (_root, manager, calls, shutdowns, _closed) = activation_manager(&[
         ("topics", "main"),
         ("consumers", "main"),
         ("brokers", "main"),
@@ -280,7 +310,7 @@ async fn activation_manager_starts_runtimes_lazily_and_shares_sessions() {
 
 #[tokio::test]
 async fn concurrent_panels_sharing_runtime_start_one_session() {
-    let (_root, manager, calls, _shutdowns) =
+    let (_root, manager, calls, _shutdowns, _closed) =
         activation_manager(&[("topics", "main"), ("consumers", "main")]);
 
     let first = manager.activate_panel("com.navop.kafka::topics");
@@ -295,7 +325,7 @@ async fn concurrent_panels_sharing_runtime_start_one_session() {
 
 #[tokio::test]
 async fn deactivating_extension_closes_all_owned_runtimes_once() {
-    let (_root, manager, calls, shutdowns) =
+    let (_root, manager, calls, shutdowns, _closed) =
         activation_manager(&[("topics", "main"), ("consumers", "secondary")]);
     manager
         .activate_panel("com.navop.kafka::topics")
@@ -323,7 +353,7 @@ async fn deactivating_extension_closes_all_owned_runtimes_once() {
 
 #[tokio::test]
 async fn activation_rejects_unknown_panel_without_calling_factory() {
-    let (_root, manager, calls, _shutdowns) = activation_manager(&[("topics", "main")]);
+    let (_root, manager, calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
     let error = manager
         .activate_panel("com.navop.other/topics")
         .await
@@ -336,6 +366,128 @@ async fn activation_rejects_unknown_panel_without_calling_factory() {
         error
     );
     assert_eq!(0, calls.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn runtime_health_reports_active_and_degraded_sessions() {
+    let (_root, manager, _calls, _shutdowns, closed) = activation_manager(&[("topics", "main")]);
+    manager
+        .activate_panel("com.navop.kafka::topics")
+        .await
+        .unwrap();
+
+    let health = manager
+        .runtime_health("com.navop.kafka::main")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Active, health.state);
+    assert!(!health.session_closed);
+    assert_eq!(None, health.ping_error);
+
+    closed.store(true, Ordering::SeqCst);
+    let health = manager
+        .runtime_health("com.navop.kafka::main")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Failed, health.state);
+    assert!(health.session_closed);
+}
+
+#[tokio::test]
+async fn check_runtime_does_not_restart_open_sessions() {
+    let (_root, manager, calls, shutdowns, _closed) = activation_manager(&[("topics", "main")]);
+    manager
+        .activate_panel("com.navop.kafka::topics")
+        .await
+        .unwrap();
+
+    let health = manager
+        .check_runtime("com.navop.kafka::main")
+        .await
+        .unwrap();
+
+    assert_eq!(RuntimeActivationState::Active, health.state);
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    assert_eq!(0, shutdowns.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn check_runtime_fails_closed_sessions_when_restart_is_disabled() {
+    let (_root, manager, calls, shutdowns, closed) = activation_manager(&[("topics", "main")]);
+    manager
+        .activate_panel("com.navop.kafka::topics")
+        .await
+        .unwrap();
+    closed.store(true, Ordering::SeqCst);
+
+    let health = manager
+        .check_runtime("com.navop.kafka::main")
+        .await
+        .unwrap();
+
+    assert_eq!(RuntimeActivationState::Failed, health.state);
+    assert!(health.session_closed);
+    assert_eq!(0, health.restart_attempts);
+    assert_eq!(0, health.restart_budget);
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    assert_eq!(1, shutdowns.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn closed_secondary_runtime_restarts_with_backoff_and_budget() {
+    let (_root, manager, calls, shutdowns, closed) =
+        activation_manager(&[("consumers", "secondary")]);
+    manager
+        .activate_panel("com.navop.kafka::consumers")
+        .await
+        .unwrap();
+    closed.store(true, Ordering::SeqCst);
+
+    let first = manager
+        .check_runtime("com.navop.kafka::secondary")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Active, first.state);
+    assert!(!first.session_closed);
+    assert_eq!(1, first.restart_attempts);
+    assert_eq!(2, first.restart_budget);
+    assert!(first.restart_backoff_remaining.is_some());
+    assert_eq!(2, calls.load(Ordering::SeqCst));
+    assert_eq!(1, shutdowns.load(Ordering::SeqCst));
+    closed.store(true, Ordering::SeqCst);
+
+    // Backoff is observed without sleeping in `check_runtime`.
+    let second = manager
+        .check_runtime("com.navop.kafka::secondary")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Restarting, second.state);
+    assert!(second.session_closed);
+    assert!(second.restart_backoff_remaining.is_some());
+    assert_eq!(2, calls.load(Ordering::SeqCst));
+
+    // Simulate backoff elapsed. The second successful restart exhausts the
+    // configured budget, and another closure is classified as a crash loop.
+    manager.clear_restart_backoff_for_test("com.navop.kafka::secondary");
+    let third = manager
+        .check_runtime("com.navop.kafka::secondary")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Active, third.state);
+    assert_eq!(2, third.restart_attempts);
+    assert_eq!(3, calls.load(Ordering::SeqCst));
+    closed.store(true, Ordering::SeqCst);
+
+    let crash_loop = manager
+        .check_runtime("com.navop.kafka::secondary")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::CrashLoop, crash_loop.state);
+    assert_eq!(2, crash_loop.restart_attempts);
+    assert_eq!(2, crash_loop.restart_budget);
+    assert_eq!(3, calls.load(Ordering::SeqCst));
+    // Both replaced sessions and the terminal crash-loop session are retired.
+    assert_eq!(3, shutdowns.load(Ordering::SeqCst));
 }
 
 #[test]
