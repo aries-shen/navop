@@ -6,8 +6,12 @@
 
 use extension_protocol::declarative_ui::{validate_ui_dialog_request, validate_ui_window_request};
 use extension_protocol::{
+    blob::{BlobCloseParams, BlobOpenParams, BlobOpenResult, BlobReadParams, BlobReadResult},
     declarative_ui::{
         UiActionRequest, UiDialogRequest, UiDialogResult, UiStatePatch, UiWindowRequest,
+    },
+    event_stream::{
+        EventCloseParams, EventOpenParams, EventOpenResult, EventReadParams, EventReadResult,
     },
     job::{
         JobCancelParams, JobCloseParams, JobResultParams, JobResultResult, JobStartParams,
@@ -93,6 +97,30 @@ impl UniversalPluginClient {
 
     pub async fn close_job(&self, params: &JobCloseParams) -> HostResult<()> {
         self.request(method::JOB_CLOSE, params).await
+    }
+
+    pub async fn open_blob(&self, params: &BlobOpenParams) -> HostResult<BlobOpenResult> {
+        self.request(method::BLOB_OPEN, params).await
+    }
+
+    pub async fn read_blob(&self, params: &BlobReadParams) -> HostResult<BlobReadResult> {
+        self.request(method::BLOB_READ, params).await
+    }
+
+    pub async fn close_blob(&self, params: &BlobCloseParams) -> HostResult<()> {
+        self.request(method::BLOB_CLOSE, params).await
+    }
+
+    pub async fn open_event_stream(&self, params: &EventOpenParams) -> HostResult<EventOpenResult> {
+        self.request(method::EVENT_OPEN, params).await
+    }
+
+    pub async fn read_event_stream(&self, params: &EventReadParams) -> HostResult<EventReadResult> {
+        self.request(method::EVENT_READ, params).await
+    }
+
+    pub async fn close_event_stream(&self, params: &EventCloseParams) -> HostResult<()> {
+        self.request(method::EVENT_CLOSE, params).await
     }
 
     pub async fn ui_action(&self, params: &UiActionRequest) -> HostResult<UiStatePatch> {

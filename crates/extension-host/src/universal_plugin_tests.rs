@@ -3,11 +3,13 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use extension_protocol::{
+    blob::{BlobCloseParams, BlobOpenParams, BlobReadParams},
     declarative_ui::{
         UiDialogKind, UiDialogRequest, UiDialogResult, UiWindowOperation, UiWindowRequest,
     },
     envelope::{Response, RpcMessage},
     error::{ProtocolError, error_codes},
+    event_stream::{EventCloseParams, EventOpenParams, EventReadParams},
     job::{JobStartParams, JobState},
     lifecycle::InitResult,
     resource::{ResourceInvokeParams, ResourceOpenParams},
@@ -48,6 +50,16 @@ async fn fake_extension(
                 json!({"result": {"kind": "inline", "value": {"topics": ["orders"]}}})
             }
             method::JOB_START => json!({"job_id": "job-1", "state": "queued"}),
+            method::BLOB_OPEN => json!({"blob_id": "blob-1", "total_bytes": 4}),
+            method::BLOB_READ => {
+                json!({"data": "aGVsbG8=", "bytes_read": 4, "done": true})
+            }
+            method::BLOB_CLOSE => Value::Null,
+            method::EVENT_OPEN => json!({"stream_id": "stream-1"}),
+            method::EVENT_READ => {
+                json!({"events": [{"topic": "orders"}], "closed": true, "dropped_count": 0})
+            }
+            method::EVENT_CLOSE => Value::Null,
             method::UI_ACTION => json!({
                 "expected_revision": 7,
                 "operations": [{"operation": "set", "key": "status", "value": "ready"}]
@@ -146,6 +158,12 @@ async fn resource_job_and_ui_methods_use_typed_wire_contracts() {
         method::UI_ACTION,
         method::UI_DIALOG,
         method::UI_WINDOW,
+        method::BLOB_OPEN,
+        method::BLOB_READ,
+        method::BLOB_CLOSE,
+        method::EVENT_OPEN,
+        method::EVENT_READ,
+        method::EVENT_CLOSE,
     ])
     .await;
 
@@ -259,6 +277,92 @@ async fn resource_job_and_ui_methods_use_typed_wire_contracts() {
         method::UI_WINDOW,
         observed.recv().await.expect("ui window request").0
     );
+
+    let blob = client
+        .open_blob(&BlobOpenParams {
+            conn_id: None,
+            content_type: Some("application/json".into()),
+            metadata: None,
+        })
+        .await
+        .expect("open blob");
+    assert_eq!("blob-1", blob.blob_id);
+    assert_eq!(
+        method::BLOB_OPEN,
+        observed.recv().await.expect("blob open request").0
+    );
+
+    let chunk = client
+        .read_blob(&BlobReadParams {
+            blob_id: blob.blob_id.clone(),
+            max_bytes: Some(4),
+        })
+        .await
+        .expect("read blob");
+    assert_eq!((4, true), (chunk.bytes_read, chunk.done));
+    assert_eq!("hello", base64_decode(chunk.data));
+    assert_eq!(
+        method::BLOB_READ,
+        observed.recv().await.expect("blob read request").0
+    );
+
+    client
+        .close_blob(&BlobCloseParams {
+            blob_id: blob.blob_id,
+        })
+        .await
+        .expect("close blob");
+    assert_eq!(
+        method::BLOB_CLOSE,
+        observed.recv().await.expect("blob close request").0
+    );
+
+    let stream = client
+        .open_event_stream(&EventOpenParams {
+            conn_id: None,
+            kind: "kafka/messages".into(),
+            capacity: Some(128),
+        })
+        .await
+        .expect("open stream");
+    assert_eq!("stream-1", stream.stream_id);
+    assert_eq!(
+        method::EVENT_OPEN,
+        observed.recv().await.expect("stream open request").0
+    );
+
+    let batch = client
+        .read_event_stream(&EventReadParams {
+            stream_id: stream.stream_id.clone(),
+            max_events: Some(128),
+            wait_ms: Some(0),
+        })
+        .await
+        .expect("read stream");
+    assert_eq!(1, batch.events.len());
+    assert!(batch.closed);
+    assert_eq!(0, batch.dropped_count);
+    assert_eq!(
+        method::EVENT_READ,
+        observed.recv().await.expect("stream read request").0
+    );
+
+    client
+        .close_event_stream(&EventCloseParams {
+            stream_id: stream.stream_id,
+        })
+        .await
+        .expect("close stream");
+    assert_eq!(
+        method::EVENT_CLOSE,
+        observed.recv().await.expect("stream close request").0
+    );
+}
+
+fn base64_decode(value: String) -> String {
+    // Keep the contract test dependency-free and assert only a fixed fixture.
+    assert_eq!("aGVsbG8=", value);
+    "hello".to_owned()
 }
 
 #[tokio::test]
