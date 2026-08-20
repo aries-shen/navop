@@ -1,6 +1,6 @@
 use std::fs;
 
-use super::{ManifestError, RemoteFileEditorLaunchMode, load_from_dir};
+use super::{DeclarativePanelPlacement, ManifestError, RemoteFileEditorLaunchMode, load_from_dir};
 
 fn write_manifest(dir: &std::path::Path, body: &str) {
     fs::write(dir.join("extension.json"), body).unwrap();
@@ -308,4 +308,442 @@ fn manifest_parses_document_exporters() {
     assert_eq!("documents", exporter.id);
     assert_eq!("export-document", exporter.function);
     assert_eq!(vec!["html", "pdf", "docx"], exporter.formats);
+}
+
+#[test]
+fn manifest_parses_typed_declarative_panels() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([{
+            "id": "resources",
+            "title": "Resources",
+            "runtimeId": "main",
+            "template": "ui/resources.html",
+            "style": "ui/resources.css",
+            "placement": "home_sidebar",
+            "icon": "boxes",
+            "activation": ["on_startup"]
+        }]),
+    );
+
+    let manifest = load_from_dir(tmp.path()).unwrap();
+    let panel = &manifest.contributes.declarative_panels[0];
+
+    assert_eq!("resources", panel.id);
+    assert_eq!("Resources", panel.title);
+    assert_eq!("main", panel.runtime_id);
+    assert_eq!("ui/resources.html", panel.template);
+    assert_eq!(Some("ui/resources.css"), panel.style.as_deref());
+    assert_eq!(DeclarativePanelPlacement::HomeSidebar, panel.placement);
+    assert_eq!(Some("boxes"), panel.icon.as_deref());
+    assert_eq!(vec!["on_startup"], panel.activation);
+}
+
+#[test]
+fn manifest_rejects_duplicate_declarative_panel_ids() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([
+            panel_json("resources", "main", "ui/one.html"),
+            panel_json("resources", "main", "ui/two.html")
+        ]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/id",
+        "重复",
+    );
+}
+
+#[test]
+fn manifest_rejects_auto_restart_without_restart_budget() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_ipc_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "main",
+            "entry": { "command": "bin/provider" },
+            "auto_restart": true,
+            "max_restart_attempts": 0
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/runtime/ipc/main/max_restart_attempts", field);
+            assert!(reason.contains("1"), "{reason}");
+        }
+        other => panic!("expected invalid restart policy, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_rejects_invalid_declarative_panel_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([panel_json("Bad Panel", "main", "ui/panel.html")]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/Bad Panel/id",
+        "格式",
+    );
+}
+
+#[test]
+fn manifest_rejects_declarative_panel_with_unknown_runtime() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([panel_json("resources", "missing", "ui/panel.html")]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/runtimeId",
+        "不存在",
+    );
+}
+
+#[test]
+fn manifest_rejects_declarative_panel_template_path_escape() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([panel_json("resources", "main", "../panel.html")]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/template",
+        "逃逸",
+    );
+}
+
+#[test]
+fn manifest_rejects_absolute_declarative_panel_template_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([panel_json("resources", "main", "/tmp/panel.html")]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/template",
+        "绝对路径",
+    );
+}
+
+#[test]
+fn manifest_rejects_declarative_panel_style_path_escape() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([{
+            "id": "resources",
+            "title": "Resources",
+            "runtimeId": "main",
+            "template": "ui/panel.html",
+            "style": "../panel.css"
+        }]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/style",
+        "逃逸",
+    );
+}
+
+#[test]
+fn manifest_rejects_absolute_declarative_panel_style_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([{
+            "id": "resources",
+            "title": "Resources",
+            "runtimeId": "main",
+            "template": "ui/panel.html",
+            "style": "/tmp/panel.css"
+        }]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/style",
+        "绝对路径",
+    );
+}
+
+#[test]
+fn manifest_rejects_unsupported_ipc_transport() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_ipc_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "main",
+            "entry": { "command": "bin/provider" },
+            "transport": { "kind": "stdio" }
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/runtime/ipc/main/transport/kind", field);
+            assert!(reason.contains("local_socket"), "{reason}");
+        }
+        other => panic!("expected invalid IPC transport, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_rejects_ipc_working_directory_escape() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_ipc_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "main",
+            "entry": {
+                "command": "bin/provider",
+                "working_dir": "../outside"
+            }
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/runtime/ipc/main/entry/working_dir", field);
+            assert!(reason.contains("逃逸"), "{reason}");
+        }
+        other => panic!("expected invalid IPC working directory, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_rejects_absolute_ipc_working_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_ipc_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "main",
+            "entry": {
+                "command": "bin/provider",
+                "working_dir": "/tmp/runtime"
+            }
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/runtime/ipc/main/entry/working_dir", field);
+            assert!(reason.contains("绝对路径"), "{reason}");
+        }
+        other => panic!("expected invalid IPC working directory, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_requires_spawn_permission_for_resolved_ipc_command() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "id": "com.example.resources",
+        "name": "Resources",
+        "version": "0.1.0",
+        "engines": { "onetcli": ">=0.1.0" },
+        "permissions": ["spawn:./bin/provider"],
+        "runtime": {
+            "ipc": [{
+                "id": "main",
+                "entry": {
+                    "command": "./bin/provider",
+                    "working_dir": "runtime"
+                }
+            }]
+        }
+    });
+    write_manifest(
+        tmp.path(),
+        &serde_json::to_string_pretty(&manifest).unwrap(),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/runtime/ipc/main/entry/command", field);
+            assert!(reason.contains("spawn:./runtime/bin/provider"), "{reason}");
+        }
+        other => panic!("expected missing spawn permission, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_rejects_ipc_command_that_relies_on_path_lookup() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_ipc_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "main",
+            "entry": { "command": "provider" }
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/runtime/ipc/main/entry/command", field);
+            assert!(reason.contains("PATH"), "{reason}");
+        }
+        other => panic!("expected PATH lookup rejection, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_rejects_declarative_panel_template_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("ui")).unwrap();
+    std::fs::write(outside.path().join("panel.html"), "<div />").unwrap();
+    symlink(
+        outside.path().join("panel.html"),
+        tmp.path().join("ui/panel.html"),
+    )
+    .unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([panel_json("resources", "main", "ui/panel.html")]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/template",
+        "符号链接",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_rejects_declarative_panel_style_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("ui")).unwrap();
+    std::fs::write(outside.path().join("panel.css"), ".panel {}").unwrap();
+    symlink(
+        outside.path().join("panel.css"),
+        tmp.path().join("ui/panel.css"),
+    )
+    .unwrap();
+    write_declarative_panel_manifest(
+        tmp.path(),
+        serde_json::json!([{
+            "id": "resources",
+            "title": "Resources",
+            "runtimeId": "main",
+            "template": "ui/panel.html",
+            "style": "ui/panel.css"
+        }]),
+    );
+
+    assert_invalid_panel_field(
+        load_from_dir(tmp.path()).unwrap_err(),
+        "/contributes/declarativePanels/resources/style",
+        "符号链接",
+    );
+}
+
+fn panel_json(id: &str, runtime_id: &str, template: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "title": "Resources",
+        "runtimeId": runtime_id,
+        "template": template,
+        "placement": "home_tab"
+    })
+}
+
+fn write_ipc_manifest(dir: &std::path::Path, runtime: serde_json::Value) {
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "id": "com.example.resources",
+        "name": "Resources",
+        "version": "0.1.0",
+        "engines": { "onetcli": ">=0.1.0" },
+        "permissions": ["spawn:./bin/provider"],
+        "runtime": { "ipc": [runtime] }
+    });
+    write_manifest(dir, &serde_json::to_string_pretty(&manifest).unwrap());
+}
+
+fn write_declarative_panel_manifest(dir: &std::path::Path, panels: serde_json::Value) {
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "id": "com.example.resources",
+        "name": "Resources",
+        "version": "0.1.0",
+        "engines": { "onetcli": ">=0.1.0" },
+        "permissions": ["spawn:./bin/resources"],
+        "runtime": {
+            "ipc": [{
+                "id": "main",
+                "entry": { "command": "bin/resources" }
+            }]
+        },
+        "contributes": {
+            "declarativePanels": panels
+        }
+    });
+    write_manifest(dir, &serde_json::to_string_pretty(&manifest).unwrap());
+}
+
+fn assert_invalid_panel_field(error: ManifestError, expected_field: &str, reason_fragment: &str) {
+    match error {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!(expected_field, field);
+            assert!(reason.contains(reason_fragment), "{reason}");
+        }
+        other => panic!("expected invalid panel field, got {other:?}"),
+    }
+}
+
+#[test]
+fn reference_resource_plugin_manifests_are_parser_valid() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let examples = [
+        ("nacos", "com.navop.nacos"),
+        ("elasticsearch", "com.navop.elasticsearch"),
+        ("rocketmq", "com.navop.rocketmq"),
+        ("kafka", "com.navop.kafka"),
+        ("docker", "com.navop.docker"),
+        ("kubernetes", "com.navop.kubernetes"),
+        ("api-test", "com.navop.api-test"),
+    ];
+
+    for (name, expected_id) in examples {
+        let directory = repo_root
+            .join("docs/extension-resource-plugins/examples")
+            .join(name);
+        let manifest = load_from_dir(&directory)
+            .unwrap_or_else(|error| panic!("{}: {error}", directory.display()));
+
+        assert_eq!(expected_id, manifest.id);
+        assert_eq!(1, manifest.runtime.ipc.len());
+        assert_eq!("main", manifest.runtime.ipc[0].id);
+        assert_eq!(1, manifest.contributes.declarative_panels.len());
+
+        let panel = &manifest.contributes.declarative_panels[0];
+        assert_eq!("main", panel.runtime_id);
+        assert_eq!("ui/main.html", panel.template);
+        assert!(directory.join(&panel.template).is_file());
+        assert!(!manifest.contributes.connections.is_empty());
+    }
 }

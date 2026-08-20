@@ -8,7 +8,7 @@ use thiserror::Error;
 
 pub use action::{ActionContext, ActionError, ActionEvent};
 use action::{ActionHandler, invoke_handler};
-pub use state::{ActionOutcome, StateChange, StateChangeOrigin, StateStore};
+pub use state::{ActionOutcome, StateChange, StateChangeOrigin, StateOperation, StateStore};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -40,6 +40,8 @@ pub enum RuntimeError {
     HandlerFailed { action: String, message: String },
     #[error("action `{action}` panicked: {message}")]
     HandlerPanicked { action: String, message: String },
+    #[error("state revision conflict: expected {expected}, actual {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
 }
 
 impl Runtime {
@@ -87,6 +89,42 @@ impl Runtime {
             self.commit_external(next, cx);
         }
         result
+    }
+
+    pub fn apply_external_patch(
+        &mut self,
+        expected_revision: Option<u64>,
+        operations: &[StateOperation],
+        cx: &mut Context<Self>,
+    ) -> Result<Option<StateChange>, RuntimeError> {
+        if let Some(expected) = expected_revision
+            && expected != self.revision
+        {
+            return Err(RuntimeError::RevisionConflict {
+                expected,
+                actual: self.revision,
+            });
+        }
+
+        let mut next = self.state.clone();
+        for operation in operations {
+            match operation {
+                StateOperation::Set { key, value } => {
+                    next.set(key.clone(), value.clone());
+                }
+                StateOperation::Remove { key } => {
+                    next.remove(key);
+                }
+            }
+        }
+        if next == self.state {
+            return Ok(None);
+        }
+
+        let change = self.commit_state(next, StateChangeOrigin::External);
+        cx.emit(RuntimeEvent::StateChanged(change.clone()));
+        cx.notify();
+        Ok(Some(change))
     }
 
     pub fn on(

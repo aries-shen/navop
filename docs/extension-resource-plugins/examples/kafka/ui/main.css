@@ -1,0 +1,15 @@
+#kafka-provider {
+    padding: 16px;
+    background: zinc-950;
+    color: zinc-100;
+    border-radius: 8px;
+}
+
+#kafka-query {
+    width: 100%;
+    opacity: 0.9;
+}
+
+button.primary {
+    font-weight: 600;
+}

@@ -94,6 +94,24 @@ pub const EVENT_OPEN: &str = "event/open";
 pub const EVENT_READ: &str = "event/read";
 pub const EVENT_CLOSE: &str = "event/close";
 
+// -- 通用资源 --
+pub const RESOURCE_OPEN: &str = "resource/open";
+pub const RESOURCE_CLOSE: &str = "resource/close";
+pub const RESOURCE_PING: &str = "resource/ping";
+pub const RESOURCE_INVOKE: &str = "resource/invoke";
+
+// -- 可取消长任务 --
+pub const JOB_START: &str = "job/start";
+pub const JOB_STATUS: &str = "job/status";
+pub const JOB_CANCEL: &str = "job/cancel";
+pub const JOB_RESULT: &str = "job/result";
+pub const JOB_CLOSE: &str = "job/close";
+
+// -- Declarative UI bridge --
+pub const UI_ACTION: &str = "ui/action";
+pub const UI_DIALOG: &str = "ui/dialog";
+pub const UI_WINDOW: &str = "ui/window";
+
 // -- Redis --
 pub const REDIS_COMMAND: &str = "redis/command";
 pub const REDIS_PIPELINE: &str = "redis/pipeline";
@@ -192,6 +210,18 @@ pub const ALL_METHODS: &[&str] = &[
     EVENT_OPEN,
     EVENT_READ,
     EVENT_CLOSE,
+    RESOURCE_OPEN,
+    RESOURCE_CLOSE,
+    RESOURCE_PING,
+    RESOURCE_INVOKE,
+    JOB_START,
+    JOB_STATUS,
+    JOB_CANCEL,
+    JOB_RESULT,
+    JOB_CLOSE,
+    UI_ACTION,
+    UI_DIALOG,
+    UI_WINDOW,
     REDIS_COMMAND,
     REDIS_PIPELINE,
     REDIS_PUBSUB_OPEN,

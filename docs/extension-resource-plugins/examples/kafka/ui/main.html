@@ -1,0 +1,14 @@
+<div id="kafka-provider" class="flex flex-col gap-2">
+    <span bind="provider_name">Kafka</span>
+    <span bind="provider_status">ready</span>
+    <input id="kafka-query" type="text" bind="query" placeholder="Search topics or groups" />
+    <button
+        id="kafka-refresh"
+        action="refresh-resources"
+        data-provider="kafka"
+        data-method="kafka/topic/list"
+        variant="primary"
+    >
+        Refresh topics
+    </button>
+</div>

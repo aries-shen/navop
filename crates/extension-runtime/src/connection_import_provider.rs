@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+#[cfg(feature = "wasm-components")]
+use connection_import_protocol::ImporterAvailability;
 use connection_import_protocol::{
-    CandidateFile, ImportRecord, ImportRecordKind, ImportScanReport, ImporterAvailability,
-    ImporterCapabilities, ImporterDescriptor, Platform,
+    CandidateFile, ImportRecord, ImportRecordKind, ImportScanReport, ImporterCapabilities,
+    ImporterDescriptor, Platform,
 };
 #[cfg(feature = "wasm-components")]
 use extension_component::PermissionSet;
@@ -234,6 +236,7 @@ pub async fn preview_manifest_connection_importers_with_files(
     Ok(records)
 }
 
+#[cfg(feature = "wasm-components")]
 fn connection_import_inputs(
     importer: &ManifestConnectionImporter,
     descriptor_id: &str,
@@ -248,6 +251,7 @@ fn connection_import_inputs(
     (candidates, permissions)
 }
 
+#[cfg(feature = "wasm-components")]
 pub(crate) fn manual_file_candidates(
     importer_id: &str,
     manual_files: &[ManualConnectionImportFile],
@@ -270,6 +274,7 @@ pub(crate) fn manual_file_candidates(
     (candidates, permissions)
 }
 
+#[cfg(feature = "wasm-components")]
 fn scan_error_report(importer_id: String, message: String) -> ImportScanReport {
     ImportScanReport {
         importer_id,

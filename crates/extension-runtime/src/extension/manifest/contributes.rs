@@ -31,6 +31,8 @@ pub struct ContributesManifest {
     pub document_exporters: Vec<DocumentExporterContrib>,
     #[serde(default, rename = "remoteFileEditors")]
     pub remote_file_editors: Vec<RemoteFileEditorContrib>,
+    #[serde(default, rename = "declarativePanels")]
+    pub declarative_panels: Vec<DeclarativePanelContrib>,
     #[serde(default)]
     pub views: Vec<Value>,
     #[serde(default)]
@@ -67,6 +69,7 @@ impl ContributesManifest {
             + self.document_renderers.len()
             + self.document_exporters.len()
             + self.remote_file_editors.len()
+            + self.declarative_panels.len()
             + self.views.len()
             + self.tasks.len()
             + self.data_types.len()
@@ -78,6 +81,31 @@ impl ContributesManifest {
             + self.themes.len()
             + self.icons.len()
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeclarativePanelContrib {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "runtimeId")]
+    pub runtime_id: String,
+    pub template: String,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub placement: DeclarativePanelPlacement,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub activation: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclarativePanelPlacement {
+    #[default]
+    HomeSidebar,
+    HomeTab,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

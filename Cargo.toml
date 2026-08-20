@@ -17,6 +17,7 @@ members = [
     "crates/agent_runtime",
     "crates/extension-protocol",
     "crates/extension-host",
+    "crates/extension-plugin-adapter",
     "crates/extension-driver",
     "crates/extension-api",
     "crates/extension-component",
@@ -146,8 +147,10 @@ markdown-editor = { path = "crates/markdown-editor" }
 er_flow = { path = "crates/er_flow" }
 extension-protocol = { path = "crates/extension-protocol" }
 extension-host = { path = "crates/extension-host" }
+extension-plugin-adapter = { path = "crates/extension-plugin-adapter" }
 extension-driver = { path = "crates/extension-driver" }
 extension-runtime = { path = "crates/extension-runtime", default-features = false }
+declarative-ui-demo = { path = "crates/declarative_ui_demo" }
 extension_view = { path = "crates/extension_view" }
 extension-api = { path = "crates/extension-api" }
 extension-component = { path = "crates/extension-component" }

@@ -25,8 +25,8 @@ pub use extension_view_host::MainExtensionViewHost;
 pub use extension_wasm::{DocumentRenderArtifact, DocumentRenderRequest, DocumentRenderTheme};
 pub use global::{GlobalExtensionRuntimeCatalog, refresh_global_runtime_catalog};
 pub use types::{
-    RegisteredDocumentExporter, RegisteredRemoteFileEditorCommand,
-    RegisteredRemoteFileEditorContribution,
+    RegisteredDeclarativePanel, RegisteredDocumentExporter, RegisteredIpcRuntimeBinding,
+    RegisteredRemoteFileEditorCommand, RegisteredRemoteFileEditorContribution,
 };
 
 #[cfg(all(test, feature = "wasm-components"))]

@@ -87,7 +87,7 @@ impl ComponentRenderer for FormComponent {
         };
 
         if let Some(columns) = parse_positive_usize_attribute(&props.element, "columns")? {
-            if columns > u16::MAX.into() {
+            if columns > u16::MAX as usize {
                 return Err(ComponentError::new(format!(
                     "attribute `columns` on <form> is too large: `{columns}`"
                 )));

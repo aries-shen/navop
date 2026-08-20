@@ -16,7 +16,11 @@
 
 mod binding;
 mod builtin_components;
+mod code_editor_cache;
 mod component;
+pub mod css;
+#[cfg(test)]
+mod css_tests;
 mod diagnostic;
 pub mod diff;
 mod html_input_adapter;
@@ -37,6 +41,7 @@ mod table_cache;
 pub mod tailwind;
 mod tailwind_style;
 mod template;
+mod terminal_component;
 mod tree_cache;
 pub mod vnode;
 
@@ -44,6 +49,13 @@ pub use binding::{BindingResolution, resolve_bindings, resolve_bindings_checked}
 pub use component::{
     ComponentError, ComponentProps, ComponentRegistry, ComponentRenderer, ComponentResult,
     ComponentSchema, RegistryError,
+};
+pub use css::{
+    CssAlignItems, CssBorderStyle, CssColor, CssError, CssFlexWrap, CssLength, CssLimits,
+    CssOverflow, CssPosition, CssProperty, CssPropertyKey, CssResource, CssRule, CssSelector,
+    CssStylesheet, DEFAULT_MAX_CSS_DECLARATIONS, DEFAULT_MAX_CSS_RULES, DEFAULT_MAX_CSS_SELECTORS,
+    DEFAULT_MAX_CSS_SOURCE_BYTES, ResolvedCssStyle, apply_css, css_property_key, parse_css,
+    resolve_style,
 };
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticPhase, DiagnosticSeverity, Diagnostics, SourceSpan,
@@ -58,7 +70,7 @@ pub use render_context::RenderContext;
 pub use renderer::{DeclarativeView, DeclarativeViewConfig};
 pub use runtime::{
     ActionContext, ActionError, ActionEvent, ActionOutcome, Runtime, RuntimeError, RuntimeEvent,
-    StateChange, StateChangeOrigin, StateStore,
+    StateChange, StateChangeOrigin, StateOperation, StateStore,
 };
 pub use tailwind::{
     ColorToken, MAX_SPACING_SCALE, TailwindModifier, TailwindParseResult, parse_classes,
@@ -66,5 +78,6 @@ pub use tailwind::{
 pub use tailwind_style::apply_modifiers;
 pub use template::{
     CompileOptions, CompiledTemplate, TemplateCompileError, ValidationMode, compile_template,
+    compile_template_with_style,
 };
 pub use vnode::{VElement, VNode};

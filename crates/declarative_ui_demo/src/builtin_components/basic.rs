@@ -1,4 +1,4 @@
-use gpui::{IntoElement, ParentElement, div, img};
+use gpui::{IntoElement, ParentElement, Styled, div, img};
 use gpui_component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
@@ -29,6 +29,8 @@ pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryE
         textarea_schema(),
         InputComponent { multiline: true },
     )?;
+    registry.register_with_schema("code-editor", code_editor_schema(), CodeEditorComponent)?;
+    registry.register_with_schema("terminal", terminal_schema(), TerminalComponent)?;
     registry.register_with_schema(
         "img",
         ComponentSchema::new().required_attribute("src"),
@@ -105,6 +107,22 @@ fn textarea_schema() -> ComponentSchema {
         .attribute("cleanable")
 }
 
+fn code_editor_schema() -> ComponentSchema {
+    ComponentSchema::new()
+        .required_attribute("language")
+        .attribute("bind")
+        .attribute("value")
+        .attribute("placeholder")
+        .attribute("disabled")
+        .attribute("read-only")
+        .attribute("line-numbers")
+        .attribute("folding")
+}
+
+fn terminal_schema() -> ComponentSchema {
+    ComponentSchema::new().required_attribute("session")
+}
+
 struct ContainerComponent;
 
 impl ComponentRenderer for ContainerComponent {
@@ -169,6 +187,35 @@ impl ComponentRenderer for ButtonComponent {
 
 struct InputComponent {
     multiline: bool,
+}
+
+struct CodeEditorComponent;
+
+impl ComponentRenderer for CodeEditorComponent {
+    fn render(&self, props: ComponentProps, context: &mut RenderContext<'_>) -> ComponentResult {
+        let state = context.code_editor_state(&props)?;
+        let input = Input::new(&state)
+            .disabled(bool_attribute(&props.element, "disabled")?)
+            .read_only(bool_attribute(&props.element, "read-only")?);
+        Ok(context.style(input, &props).into_any_element())
+    }
+}
+
+struct TerminalComponent;
+
+impl ComponentRenderer for TerminalComponent {
+    fn render(&self, props: ComponentProps, context: &mut RenderContext<'_>) -> ComponentResult {
+        let session = props
+            .element
+            .attr("session")
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .ok_or_else(|| ComponentError::new("<terminal> requires `session`"))?;
+        let terminal = context.terminal_view(session)?.into_any_element();
+        Ok(context
+            .style(div().size_full().overflow_hidden().child(terminal), &props)
+            .into_any_element())
+    }
 }
 
 impl ComponentRenderer for InputComponent {

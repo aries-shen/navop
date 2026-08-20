@@ -9,12 +9,14 @@ use serde_json::Value;
 use crate::extension::is_active_install_dir_name;
 use crate::extension::manifest::{
     HostApiVersions, Manifest, ManifestError, current_host_version, load_and_check,
+    required_spawn_permission,
 };
 
 use super::catalog::ExtensionRuntimeCatalog;
 use super::types::{
-    ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
-    RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredKeybindingContribution,
+    ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDeclarativePanel,
+    RegisteredDocumentExporter, RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform,
+    RegisteredIpcRuntimeBinding, RegisteredKeybindingContribution,
     RegisteredRemoteFileEditorCommand, RegisteredRemoteFileEditorContribution, WasmRuntimeBinding,
     command_descriptor, runtime_key, slot_item_from_menu,
 };
@@ -27,6 +29,8 @@ impl ExtensionRuntimeCatalog {
         manifest: Manifest,
     ) -> Result<(), ExtensionRuntimeError> {
         self.register_wasm_runtimes(&manifest)?;
+        self.register_ipc_runtimes(&manifest)?;
+        self.register_declarative_panels(&manifest)?;
         self.register_html_preview_transforms(&manifest)?;
         self.register_document_renderers(&manifest)?;
         self.register_document_exporters(&manifest)?;
@@ -36,6 +40,84 @@ impl ExtensionRuntimeCatalog {
         self.register_keybindings(&manifest);
         self.register_remote_file_editors(&manifest)?;
         self.register_db_tree_menus(&manifest);
+        Ok(())
+    }
+
+    fn register_ipc_runtimes(&mut self, manifest: &Manifest) -> Result<(), ExtensionRuntimeError> {
+        for runtime in &manifest.runtime.ipc {
+            let key = runtime_key(&manifest.id, &runtime.id);
+            if self.ipc_runtimes.contains_key(&key) || self.wasm_runtimes.contains_key(&key) {
+                return Err(ExtensionRuntimeError::DuplicateRuntime { id: key });
+            }
+            let working_dir = resolve_ipc_working_dir(
+                &manifest.manifest_dir,
+                runtime.entry.working_dir.as_deref(),
+            );
+            let command = resolve_ipc_command(&runtime.entry.command, &working_dir);
+            self.ipc_runtimes.insert(
+                key.clone(),
+                RegisteredIpcRuntimeBinding {
+                    extension_id: manifest.id.clone(),
+                    runtime_key: key,
+                    extension_root: manifest.manifest_dir.clone(),
+                    command,
+                    required_spawn_permission: required_spawn_permission(
+                        &runtime.entry.command,
+                        runtime.entry.working_dir.as_deref(),
+                    ),
+                    args: runtime.entry.args.clone(),
+                    working_dir: Some(working_dir),
+                    env: runtime.entry.env.clone(),
+                    transport_kind: runtime.transport.kind.clone(),
+                    connect_timeout_ms: runtime.transport.connect_timeout_ms,
+                    auto_restart: runtime.auto_restart,
+                    max_restart_attempts: runtime.max_restart_attempts,
+                    shutdown_grace_ms: runtime.shutdown_grace_ms,
+                    permissions: manifest.permissions.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn register_declarative_panels(
+        &mut self,
+        manifest: &Manifest,
+    ) -> Result<(), ExtensionRuntimeError> {
+        for panel in &manifest.contributes.declarative_panels {
+            let runtime_id = runtime_key(&manifest.id, &panel.runtime_id);
+            let panel_key = runtime_key(&manifest.id, &panel.id);
+            if self
+                .declarative_panels
+                .iter()
+                .any(|registered| registered.panel_key == panel_key)
+            {
+                return Err(ExtensionRuntimeError::DuplicateDeclarativePanel { id: panel_key });
+            }
+            if !self.ipc_runtimes.contains_key(&runtime_id)
+                && !self.wasm_runtimes.contains_key(&runtime_id)
+            {
+                return Err(ExtensionRuntimeError::UnknownRuntime {
+                    command_id: panel.id.clone(),
+                    runtime_id: panel.runtime_id.clone(),
+                });
+            }
+            self.declarative_panels.push(RegisteredDeclarativePanel {
+                extension_id: manifest.id.clone(),
+                id: panel.id.clone(),
+                panel_key: runtime_key(&manifest.id, &panel.id),
+                title: panel.title.clone(),
+                runtime_id,
+                template_path: resolve_asset_root(&manifest.manifest_dir, &panel.template),
+                style_path: panel
+                    .style
+                    .as_deref()
+                    .map(|style| resolve_asset_root(&manifest.manifest_dir, style)),
+                placement: panel.placement,
+                icon: panel.icon.clone(),
+                activation: panel.activation.clone(),
+            });
+        }
         Ok(())
     }
 
@@ -345,6 +427,22 @@ fn resolve_asset_root(manifest_dir: &Path, assets: &str) -> PathBuf {
         return manifest_dir.to_path_buf();
     }
     manifest_dir.join(assets).components().collect()
+}
+
+fn resolve_ipc_working_dir(manifest_dir: &Path, working_dir: Option<&str>) -> PathBuf {
+    working_dir
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| manifest_dir.join(path).components().collect())
+        .unwrap_or_else(|| manifest_dir.to_path_buf())
+}
+
+fn resolve_ipc_command(command: &str, working_dir: &Path) -> PathBuf {
+    let path = Path::new(command);
+    if path.is_absolute() || (!command.contains('/') && !command.contains('\\')) {
+        path.to_path_buf()
+    } else {
+        working_dir.join(path).components().collect()
+    }
 }
 
 pub(super) fn load_installed_composite_manifests(

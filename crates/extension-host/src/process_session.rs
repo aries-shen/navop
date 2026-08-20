@@ -101,7 +101,7 @@ impl ProcessRpcSession {
         Self::start_with_client(client, Some(process), config).await
     }
 
-    async fn start_with_client(
+    pub(crate) async fn start_with_client(
         mut client: JsonRpcClient,
         process: Option<ProcessHandle>,
         config: ProcessRpcSessionConfig,

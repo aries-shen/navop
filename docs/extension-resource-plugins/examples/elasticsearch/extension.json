@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "com.navop.elasticsearch",
+  "name": "Navop Elasticsearch Resource Provider",
+  "version": "0.1.0",
+  "description": "Reference IPC provider for Elasticsearch indices, mappings, search and documents.",
+  "engines": {
+    "onetcli": ">=0.1.0"
+  },
+  "permissions": [
+    "net:tcp:elasticsearch.example.com:9200",
+    "secrets:read:elasticsearch.*",
+    "spawn:./bin/elasticsearch-provider",
+    "ui:tab",
+    "ui:notify",
+    "ui:progress"
+  ],
+  "runtime": {
+    "ipc": [
+      {
+        "id": "main",
+        "entry": {
+          "command": "./bin/elasticsearch-provider"
+        },
+        "transport": {
+          "kind": "local_socket",
+          "connect_timeout_ms": 5000
+        }
+      }
+    ]
+  },
+  "contributes": {
+    "connections": [
+      {
+        "kind": "elasticsearch",
+        "label": "Elasticsearch",
+        "secretNamespace": "elasticsearch"
+      }
+    ],
+    "declarativePanels": [
+      {
+        "id": "elasticsearch",
+        "title": "Elasticsearch",
+        "runtimeId": "main",
+        "template": "ui/main.html",
+        "placement": "home_sidebar",
+        "icon": "search",
+        "activation": [
+          "onConnectionKind:elasticsearch"
+        ]
+      }
+    ]
+  }
+}

@@ -23,6 +23,93 @@ impl ComponentRenderer for PanickingComponent {
 }
 
 #[gpui::test]
+fn code_editor_uses_host_language_allowlist_and_safe_declarations(cx: &mut TestAppContext) {
+    let valid = render_diagnostics(
+        r#"
+        <div>
+            <code-editor
+                id="query"
+                language="sql"
+                value="SELECT 1"
+                read-only="true"
+                line-numbers="true"
+                folding="false"
+            />
+            <code-editor id="module" language="rs" line-numbers="false" folding="true" />
+        </div>
+        "#,
+        ComponentRegistry::with_defaults(),
+        cx,
+    );
+    assert!(
+        valid.iter().all(|diagnostic| {
+            !matches!(
+                diagnostic.code,
+                DiagnosticCode::ComponentRenderFailed | DiagnosticCode::ComponentPanicked
+            )
+        }),
+        "valid code editors must remain inside the component boundary: {valid:?}"
+    );
+
+    let unknown = render_diagnostics(
+        r#"<code-editor language="not-a-language" />"#,
+        ComponentRegistry::with_defaults(),
+        cx,
+    );
+    let failure = diagnostic(
+        &unknown,
+        DiagnosticCode::ComponentRenderFailed,
+        DiagnosticPhase::Render,
+    );
+    assert!(failure.message.contains("not-a-language"));
+
+    let invalid = compile_template(
+        r#"<code-editor id="evil" language="sql" command="rm -rf /" />"#,
+        &ComponentRegistry::with_defaults(),
+        CompileOptions::strict(),
+    )
+    .expect_err("unsafe attributes must be compile errors");
+    let diagnostics = invalid.diagnostics().expect("compile diagnostics");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == DiagnosticCode::UnsupportedAttribute
+            && diagnostic.message.contains("command")
+    }));
+}
+
+#[gpui::test]
+fn terminal_component_requires_a_host_approved_session(cx: &mut TestAppContext) {
+    let diagnostics = render_diagnostics(
+        r#"<terminal id="logs" session="host-session" />"#,
+        ComponentRegistry::with_defaults(),
+        cx,
+    );
+    let failure = diagnostic(
+        &diagnostics,
+        DiagnosticCode::ComponentRenderFailed,
+        DiagnosticPhase::Render,
+    );
+    assert!(failure.message.contains("host-session"));
+    assert!(failure.message.contains("approved by the host"));
+
+    let invalid = compile_template(
+        r#"<terminal session="host" command="zsh -c 'id'" cwd="/" shell="/bin/zsh" />"#,
+        &ComponentRegistry::with_defaults(),
+        CompileOptions::strict(),
+    )
+    .expect_err("terminal process arguments must be compile errors");
+    let diagnostics = invalid.diagnostics().expect("compile diagnostics");
+    for attribute in ["command", "cwd", "shell"] {
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::UnsupportedAttribute
+                    && diagnostic.message.contains(attribute)
+            }),
+            "missing unsupported attribute diagnostic for `{attribute}`"
+        );
+    }
+}
+
+#[gpui::test]
 fn renderer_errors_become_typed_render_diagnostics(cx: &mut TestAppContext) {
     let mut registry = ComponentRegistry::with_defaults();
     registry

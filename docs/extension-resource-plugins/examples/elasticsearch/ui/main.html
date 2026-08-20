@@ -1,0 +1,14 @@
+<div id="elasticsearch-provider" class="flex flex-col gap-2">
+    <span bind="provider_name">Elasticsearch</span>
+    <span bind="provider_status">ready</span>
+    <input id="elasticsearch-query" type="text" bind="query" placeholder="Search indices or documents" />
+    <button
+        id="elasticsearch-refresh"
+        action="refresh-resources"
+        data-provider="elasticsearch"
+        data-method="elasticsearch/index/list"
+        variant="primary"
+    >
+        Refresh indices
+    </button>
+</div>

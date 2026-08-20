@@ -1,6 +1,4 @@
-#[cfg(feature = "wasm-components")]
-use std::path::PathBuf;
-#[cfg(not(feature = "wasm-components"))]
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use db_view::extension_menu::DbTreeExtensionMenuItem;
@@ -10,7 +8,9 @@ use one_core::{
 };
 use serde_json::Value;
 
-use crate::extension::manifest::{CommandContrib, RemoteFileEditorLaunchMode, WasmRuntimeKind};
+use crate::extension::manifest::{
+    CommandContrib, DeclarativePanelPlacement, RemoteFileEditorLaunchMode, WasmRuntimeKind,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredRemoteFileEditorContribution {
@@ -82,6 +82,38 @@ pub struct RegisteredDocumentExporter {
     pub priority: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredDeclarativePanel {
+    pub extension_id: String,
+    pub id: String,
+    pub panel_key: String,
+    pub title: String,
+    pub runtime_id: String,
+    pub template_path: PathBuf,
+    pub style_path: Option<PathBuf>,
+    pub placement: DeclarativePanelPlacement,
+    pub icon: Option<String>,
+    pub activation: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredIpcRuntimeBinding {
+    pub extension_id: String,
+    pub runtime_key: String,
+    pub extension_root: PathBuf,
+    pub command: PathBuf,
+    pub required_spawn_permission: String,
+    pub args: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+    pub transport_kind: String,
+    pub connect_timeout_ms: Option<u64>,
+    pub auto_restart: bool,
+    pub max_restart_attempts: u32,
+    pub shutdown_grace_ms: u64,
+    pub permissions: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WasmRuntimeBinding {
     #[cfg(feature = "wasm-components")]
@@ -100,6 +132,8 @@ pub struct WasmRuntimeBinding {
 pub enum ExtensionRuntimeError {
     #[error("duplicate wasm runtime id: {id}")]
     DuplicateRuntime { id: String },
+    #[error("duplicate declarative panel id: {id}")]
+    DuplicateDeclarativePanel { id: String },
     #[error("unknown runtime_id `{runtime_id}` for command `{command_id}`")]
     UnknownRuntime {
         command_id: String,

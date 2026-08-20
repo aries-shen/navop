@@ -20,6 +20,7 @@ pub enum DiagnosticPhase {
 pub enum DiagnosticCode {
     UnknownTag,
     UnsupportedClass,
+    UnsupportedCss,
     DuplicateIdentity,
     EmptyAttribute,
     UnsupportedAttribute,

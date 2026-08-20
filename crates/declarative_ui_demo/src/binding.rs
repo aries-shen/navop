@@ -91,7 +91,7 @@ impl<'a> BindingResolver<'a> {
 
 pub(crate) fn binding_attribute(tag: &str) -> Option<&'static str> {
     match tag.to_ascii_lowercase().as_str() {
-        "input" | "textarea" | "progress" | "rating" | "slider" => Some("value"),
+        "input" | "textarea" | "code-editor" | "progress" | "rating" | "slider" => Some("value"),
         "checkbox" | "switch" | "radio" => Some("checked"),
         "badge" => Some("count"),
         "pagination" => Some("current-page"),

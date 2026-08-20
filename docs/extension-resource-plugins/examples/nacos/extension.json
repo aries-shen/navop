@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "com.navop.nacos",
+  "name": "Navop Nacos Resource Provider",
+  "version": "0.1.0",
+  "description": "Reference IPC provider for Nacos namespaces, configuration and services.",
+  "engines": {
+    "onetcli": ">=0.1.0"
+  },
+  "permissions": [
+    "net:tcp:nacos.example.com:8848",
+    "secrets:read:nacos.*",
+    "spawn:./bin/nacos-provider",
+    "ui:tab",
+    "ui:notify"
+  ],
+  "runtime": {
+    "ipc": [
+      {
+        "id": "main",
+        "entry": {
+          "command": "./bin/nacos-provider"
+        },
+        "transport": {
+          "kind": "local_socket",
+          "connect_timeout_ms": 5000
+        }
+      }
+    ]
+  },
+  "contributes": {
+    "connections": [
+      {
+        "kind": "nacos",
+        "label": "Nacos",
+        "secretNamespace": "nacos"
+      }
+    ],
+    "declarativePanels": [
+      {
+        "id": "nacos",
+        "title": "Nacos",
+        "runtimeId": "main",
+        "template": "ui/main.html",
+        "placement": "home_sidebar",
+        "icon": "cloud",
+        "activation": [
+          "onConnectionKind:nacos"
+        ]
+      }
+    ]
+  }
+}

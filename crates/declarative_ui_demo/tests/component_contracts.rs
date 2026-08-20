@@ -28,6 +28,8 @@ fn registry_contains_defaults_and_accepts_custom_components() {
         "button",
         "input",
         "textarea",
+        "code-editor",
+        "terminal",
         "img",
         "group-box",
         "label",

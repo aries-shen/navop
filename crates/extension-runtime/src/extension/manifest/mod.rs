@@ -7,15 +7,19 @@ mod security_rules;
 pub mod versioning;
 
 pub use contributes::{
-    CommandContrib, DocumentExporterContrib, DocumentRendererContrib, RemoteFileEditorLaunchMode,
+    CommandContrib, DeclarativePanelContrib, DeclarativePanelPlacement, DocumentExporterContrib,
+    DocumentRendererContrib, RemoteFileEditorLaunchMode,
 };
 #[cfg(test)]
 pub use contributes::{CommandHandlerContrib, ContributesManifest, HtmlPreviewTransformContrib};
 #[cfg(test)]
 pub use menus::{MenuCommandRef, MenuContrib};
+pub(crate) use parser::required_spawn_permission;
 pub use parser::{ManifestError, load_and_check, load_from_dir};
 #[cfg(test)]
-pub use schema::{ApiVersions, Engines, RuntimeSection, WasmRuntime};
+pub use schema::{
+    ApiVersions, Engines, IpcEntry, IpcRuntime, IpcTransport, RuntimeSection, WasmRuntime,
+};
 pub use schema::{Manifest, WasmRuntimeKind};
 pub use security::build_permission_review;
 pub use versioning::{HostApiVersions, current_host_version, set_current_host_version};

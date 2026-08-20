@@ -14,7 +14,7 @@ CompiledTemplate
 Resolved VNode
   ↓ VNode diff + transactional patch
 Stored VNode
-  ↓ Component Registry + Tailwind utility
+  ↓ Component Registry + external CSS subset + Tailwind utility
 GPUI Element / stateful Entity
 ```
 
@@ -25,7 +25,9 @@ GPUI Element / stateful Entity
 ## v1 已提供的机制
 
 - 使用 `html5ever` 解析 HTML fragment，并转换为自定义 `VNode`；
-- 只接受 Tailwind utility class，不解析 `style` 或 CSS；
+- 模板内仍禁止 inline `style` 与 `<style>`；宿主可用
+  `compile_template_with_style` 传入 **包内 external CSS file**，先应用受限 CSS，
+  再应用 Tailwind utility class；
 - strict / permissive 两种模板编译模式；
 - 编译期受限 HTML `<input type>` adapter：文本类映射原生 `Input`，并把
   `checkbox` / `radio` / `range` / button-family 规范化到已有原生 DSL 组件；
@@ -54,6 +56,8 @@ GPUI Element / stateful Entity
 - 原生虚拟化 `Tree`，通过 `<tree>` + 嵌套 `<tree-node>` 描述层级结构，内部使用
   `uniform_list` 只渲染可见行；缓存 `Entity<TreeState>` 并支持 `selected-id`
   字符串 binding 和 Action 写回；
+- 安全 `<code-editor>` host-owned state cache，以及 capability/session-gated
+  `<terminal>` view boundary；
 - 原生虚拟化 `<data-list>`，按 `data-count`（上限 100 000）生成平铺大数据行，
   `data-label` 模板支持 `{n}` 占位符，复用 `Tree` 的虚拟化渲染；
 - `Pagination`、`Rating`、`Tabs`、`Stepper` 的数值 attribute binding、点击写回
@@ -61,7 +65,7 @@ GPUI Element / stateful Entity
 - `SliderEvent::Change` 连续写回 binding，`SliderEvent::Release` 在最终写回后派发
   可选结构化 Action；
 - 真实、可滚动、可交互的 GPUI showcase，以及 parser、compiler、runtime、
-  binding、component boundary、limits、Tailwind、input 和 diff 契约测试。
+  binding、component boundary、limits、external CSS、Tailwind、input 和 diff 契约测试。
 
 ## 运行与验证
 
@@ -362,7 +366,7 @@ handler。
 
 | 标签 | state 写入目标 | children 行为 |
 | --- | --- | --- |
-| `input`、`textarea`、`progress` | `value` attribute | 保留 |
+| `input`、`textarea`、`code-editor`、`progress` | `value` attribute | 保留 |
 | `checkbox`、`switch`、`radio` | `checked` attribute | 保留标签文本 |
 | `badge` | `count` attribute | 保留 Badge 内容 |
 | `rating` | `value` attribute | 不接受 children |
@@ -406,7 +410,7 @@ children、Accordion items / Collapsible content / Tree nodes 不会被清空。
 必须只有一个来源；
 下列组合都是 compile error：
 
-- `input` / `textarea` / `progress` / `rating` / `slider`：`bind` 与显式
+- `input` / `textarea` / `code-editor` / `progress` / `rating` / `slider`：`bind` 与显式
   `value`；
 - `checkbox` / `switch` / `radio`：`bind` 与显式 `checked`；
 - `badge`：`bind` 与显式 `count`；
@@ -463,6 +467,7 @@ attribute 伪装成已支持能力；strict schema 会明确拒绝它们。需�
 <input id="username" bind="username" placeholder="用户名" />
 <input id="credential" type="password" bind="credential" />
 <textarea key="notes" bind="notes"></textarea>
+<code-editor id="query" language="sql" bind="query"></code-editor>
 ```
 
 - state → input：reconcile 后同步到已有 `InputState`；
@@ -470,9 +475,36 @@ attribute 伪装成已支持能力；strict schema 会明确拒绝它们。需�
 - 程序调用 `InputState::set_value` 不重新产生 Change，因此不会形成 binding loop；
 - `bind` 与声明式 `value` 同时出现是 compile error。
 
-每个输入缓存一个 `Entity<InputState>` 和对应 subscription。节点移除后，cache entry
-和 subscription 一起释放；旧 Entity 即使仍被其他 Rust 代码持有，也不会继续写回
-Runtime。
+`code-editor` 的 state 同步语义与 input/textarea 相同，但使用独立
+`CodeEditorCache`。`language` 先通过 host
+`LanguageRegistry::resolve_language_name` 解析（例如 `rs` 会规范化为 `rust`），
+且不会加载 lazy wasm parser；未知语言产生 typed render diagnostic。编辑器
+Entity、语言选择和高亮 parser 全部由 host 拥有，provider markup 只声明 UI。
+第一版不支持本地文件读取、LSP、formatter、代码执行或 provider-controlled shell。
+
+每个输入缓存一个 `Entity<InputState>` 和对应 subscription。节点移除后，input、
+code editor cache entry 和 subscription 一起释放；旧 Entity 即使仍被其他 Rust
+代码持有，也不会继续写回 Runtime。
+
+### Host-approved terminal view
+
+`<terminal>` 只描述一个视图插槽：
+
+```html
+<terminal id="build-output" session="host-approved-session"></terminal>
+```
+
+真实 terminal session、shell、工作目录、环境变量、连接对象和生命周期由 trusted
+host 创建并授权后，把 type-erased GPUI `AnyView` 注入 `DeclarativeView` 的内部
+session store。Provider markup 只能引用 session id；缺失或未授权 session 返回
+typed `ComponentRenderFailed` diagnostic，不会启动本地 shell。schema 在 strict
+compile 阶段拒绝 `command`、`cwd`、`shell`、`env` 等进程参数，避免把权限决策
+伪装成样式声明。
+
+当 resolved VNode 不再引用某个 session 时，`retain_live()` 调用宿主提供的 release
+callback。宿主还必须在 panel close / extension uninstall 之类的所有权边界调用
+`DeclarativeView::shutdown_terminal_sessions()`；drop 本身不携带 GPUI `App`
+context，因此不能隐式执行 terminal 清理。
 
 ### 布尔表单控件
 
@@ -640,6 +672,8 @@ identity namespace。
 | semantic / basic | `group-box`、`label`、`tag`、`skeleton` | 原生 `GroupBox`、`Label`、`Tag`、`Skeleton` |
 | form / input controls | `form`、`field` | 强结构的原生 `Form` + `Field` |
 | form / input controls | `input`、`textarea` | 原生 `Input` + 缓存的 `Entity<InputState>`；分别是单行和多行；HTML frontend 会先处理受支持的 `input type`，password 进入 masked mode |
+| form / input controls | `code-editor` | 原生轻量 `InputState::code_editor`；支持 host 语言 registry allowlist、行号、折叠、只读/禁用和双向文本 binding |
+| host views | `terminal` | 只按 session id 引用宿主已创建并批准的 type-erased GPUI view；不创建 shell、进程、连接或文件系统访问 |
 | form / input controls | `checkbox`、`switch`、`radio` | 原生 `Checkbox`、`Switch`、`Radio`；支持字符串布尔双向 binding |
 | static table | `table`、`thead`、`tbody`、`tfoot`、`tr`、`th`、`td`、`caption` | 原生 `Table`、section、row、cell 和 caption primitives |
 | static list | `list`、`list-item` | flex-column 静态容器 + 原生 `ListItem` |
@@ -668,6 +702,8 @@ identity namespace。
 | `button` | `label` 或直接文本、`action`、`data-*`、`variant`、`size`、`disabled`、`outline`、`loading`、`tooltip` |
 | `input` | `type=text\|password\|email\|search\|url\|tel`（默认 text）、`bind`、`value`、`placeholder`、`size`、`disabled`、`read-only` / HTML `readonly` alias、`cleanable` |
 | `textarea` | `bind`、`value`、`placeholder`、`size`、`disabled`、`read-only`、`cleanable`；不接受 `type` |
+| `code-editor` | 必填 `language`（只接受 host registry 可解析名称或扩展名 alias）、`bind`、`value`、`placeholder`、`disabled`、`read-only`、`line-numbers`、`folding`；不接受文件路径、LSP、formatter、shell command 或 `size` |
+| `terminal` | 必填非空 `session`；只接受宿主已注入的 session id，不接受 `command`、`cwd`、`shell`、环境变量、连接参数或文件路径 |
 | `img` | 必填 `src` |
 | `group-box` | `title`、`variant=normal\|fill\|outline` |
 | `label` | `bind`、`secondary`、`masked` |
@@ -1242,6 +1278,56 @@ capability 和资源隔离。
 
 ## Tailwind utility 子集
 
+### External CSS 子集
+
+模板不能携带 inline `style` 或 `<style>`；扩展 manifest 的
+`contributes.declarativePanels[].style` 只能指向一个位于扩展目录内的 external CSS
+file。宿主读取该文件后调用 `compile_template_with_style`，编译错误进入 typed
+diagnostics；strict 模式失败，permissive 模式记录 warning 并回退为空 stylesheet。
+资源限制独立计数：默认最多 128 KiB source、2 048 rules、4 096 selectors、
+8 192 declarations。
+
+Selector 只支持同一元素上的：
+
+- tag，例如 `button`；
+- class，例如 `.primary` 或 `.primary.compact`；
+- id，例如 `#topics`；
+- 逗号分隔 selector group。
+
+不支持 at-rule、pseudo-class、pseudo-element、attribute selector、combinator、
+descendant / child selector、media query、`!important`、CSS variable、`url()`、
+`expression()` 或任意可执行内容。
+
+属性子集覆盖 GPUI 已能表达的核心样式：
+
+- 布局 / 尺寸：`display`、`flex-direction`、`flex-grow`、`flex-shrink`、
+  `align-items`、`align-self`、`justify-content`、`flex-wrap`、`gap`、`padding*`、
+  `margin*`、`width`、`height`、`min-*`、`max-*`、`flex-basis`；
+- 定位：`position`、`top`、`right`、`bottom`、`left`；
+- 外观：`background`、`color`、`border*`、`border-radius`、`opacity`；
+- 文本：`font-size`、`font-weight`、`line-height`、`text-align`；
+- 溢出：`overflow`、`overflow-x`、`overflow-y`；
+- 简易 grid 计数：`grid-template-columns` / `grid-template-rows` 只接受
+  1..=16 的轨道数量。
+
+长度只接受 `px` 与 `%`，数值必须有限、非负且不超过 4096（percent 不超过
+100）。`%` 仅用于 GPUI 支持相对长度的属性；padding、margin、border width、
+border radius、font size 等 absolute-only 属性继续拒绝 `%`。颜色支持
+`#rgb`、`#rrggbb`、区分大小写的 `rgb()` / `rgba()` 函数、`transparent`，以及
+有限 Tailwind token：`zinc-*`、`blue-600`、`emerald-400`、`white`。
+
+CSS 先解析并应用，Tailwind utility 后应用；因此 utility 可覆盖 CSS。同一
+property key 后写覆盖。不同 property 通过固定 enum order 应用，不实现完整浏览器
+cascade、specificity、inheritance 或 shorthand ordering。`border` 只支持
+width/style/color 的有限组合；`overflow` 支持 1 或 2 个值，第二个值映射到
+纵向溢出。
+
+`overflow: visible` / `scroll` 是合法样式值，但它们只映射 GPUI overflow，不实现
+浏览器 scrollbar、overscroll 或滚动脚本 API。需要可见 native thumb、稳定
+`ScrollHandle` 或受控滚动时必须使用 `<scroll>`。
+
+### Tailwind utility
+
 v1 支持：
 
 - 布局：`flex`、`flex-col`、`flex-row`、`flex-1`、
@@ -1340,6 +1426,7 @@ html5ever 前会安全展开 `<sql-editor />` 一类自定义标签，同时：
 | `limits.rs` | 编译资源限制和资源类型 |
 | `vnode.rs` | 可 serde 的输入无关 VNode 中间表示 |
 | `template.rs` | strict/permissive 编译、schema/class/identity 校验 |
+| `css/` | external CSS parser、selector/property 解析、style resolve 与 GPUI 转换 |
 | `diagnostic.rs` | typed、分 phase、去重的 diagnostics |
 | `binding.rs` | state → 文本 / attribute resolved VNode 和 missing-binding 诊断 |
 | `runtime/` | StateStore、Action、transaction 和 RuntimeEvent |
@@ -1362,6 +1449,8 @@ html5ever 前会安全展开 `<sql-editor />` 一类自定义标签，同时：
 | `tree_cache.rs` | TreeState cache、`tree-node` → `TreeItem` 转换、selection write-back subscription 与 live identity 清理 |
 | `stateful_nodes.rs` | 有状态输入 spec 与 live identity 收集 |
 | `input_cache.rs` | InputState cache、双向 binding subscription |
+| `code_editor_cache.rs` | code editor InputState、语言解析和 live identity 清理 |
+| `terminal_component.rs` | host-approved terminal session store、stale session 清理和 explicit shutdown |
 | `slider_cache.rs` | SliderState cache、双向 binding、Change / Release subscription 与 live identity 清理 |
 | `render_context.rs` | 递归组件渲染、style、action/input/slider/tree 与 keyed ScrollHandle 服务 |
 | `renderer.rs` | Runtime subscription、reconcile、View Render |
@@ -1377,7 +1466,8 @@ standalone v1 不实现：
 
 - 浏览器 DOM、WebView 或 HTML inline layout；
 - JavaScript、模板表达式或任意代码求值；
-- CSS selector、cascade、inheritance、`style`；
+- 完整 CSS：selector 组合、cascade、specificity、inheritance、at-rule、
+  CSS variable、`url()`，以及模板内 inline `style` / `<style>`；
 - 完整 Tailwind；
 - 完整 HTML 标准校验；
 - 浏览器 form submission/reset、constraint validation、autocomplete/inputmode，或

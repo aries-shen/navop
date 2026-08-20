@@ -3,8 +3,11 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::{
-    CompileLimits, ComponentRegistry, Diagnostic, DiagnosticCode, DiagnosticPhase, Diagnostics,
-    HtmlParseError, NodePath, VElement, VNode, html_input_adapter::adapt_html_inputs,
+    CompileLimits, ComponentRegistry, CssError, CssStylesheet, Diagnostic, DiagnosticCode,
+    DiagnosticPhase, DiagnosticSeverity, Diagnostics, HtmlParseError, NodePath, ResolvedCssStyle,
+    VElement, VNode,
+    css::{parse_css, resolve_style},
+    html_input_adapter::adapt_html_inputs,
     parse_classes, parse_html_with_limits,
 };
 
@@ -51,6 +54,7 @@ impl Default for CompileOptions {
 pub struct CompiledTemplate {
     source: String,
     root: VNode,
+    stylesheet: CssStylesheet,
     diagnostics: Diagnostics,
 }
 
@@ -61,6 +65,14 @@ impl CompiledTemplate {
 
     pub fn root(&self) -> &VNode {
         &self.root
+    }
+
+    pub fn stylesheet(&self) -> &CssStylesheet {
+        &self.stylesheet
+    }
+
+    pub fn resolved_style(&self, element: &VElement) -> ResolvedCssStyle {
+        resolve_style(&self.stylesheet, element)
     }
 
     pub fn diagnostics(&self) -> &Diagnostics {
@@ -90,8 +102,18 @@ pub fn compile_template(
     registry: &ComponentRegistry,
     options: CompileOptions,
 ) -> Result<CompiledTemplate, TemplateCompileError> {
+    compile_template_with_style(source, None, registry, options)
+}
+
+pub fn compile_template_with_style(
+    source: &str,
+    css_source: Option<&str>,
+    registry: &ComponentRegistry,
+    options: CompileOptions,
+) -> Result<CompiledTemplate, TemplateCompileError> {
     let root = parse_html_with_limits(source, options.limits)?;
     let (root, mut diagnostics) = adapt_html_inputs(root);
+    let stylesheet = parse_stylesheet(css_source, options, &mut diagnostics)?;
     diagnostics.extend(validate_template(&root, registry, options));
     if diagnostics.has_errors() {
         return Err(TemplateCompileError::Validation(diagnostics));
@@ -99,8 +121,52 @@ pub fn compile_template(
     Ok(CompiledTemplate {
         source: source.to_owned(),
         root,
+        stylesheet,
         diagnostics,
     })
+}
+
+fn parse_stylesheet(
+    css_source: Option<&str>,
+    options: CompileOptions,
+    diagnostics: &mut Diagnostics,
+) -> Result<CssStylesheet, TemplateCompileError> {
+    let Some(source) = css_source else {
+        return Ok(CssStylesheet::default());
+    };
+    match parse_css(source, options.limits) {
+        Ok(stylesheet) => Ok(stylesheet),
+        Err(error @ CssError::ResourceLimitExceeded { .. }) => Err(validation_error(
+            css_diagnostic(error, DiagnosticSeverity::Error),
+        )),
+        Err(error) => match options.validation {
+            ValidationMode::Strict => Err(validation_error(css_diagnostic(
+                error,
+                DiagnosticSeverity::Error,
+            ))),
+            ValidationMode::Permissive => {
+                diagnostics.push(css_diagnostic(error, DiagnosticSeverity::Warning));
+                Ok(CssStylesheet::default())
+            }
+        },
+    }
+}
+
+fn validation_error(diagnostic: Diagnostic) -> TemplateCompileError {
+    let mut diagnostics = Diagnostics::default();
+    diagnostics.push(diagnostic);
+    TemplateCompileError::Validation(diagnostics)
+}
+
+fn css_diagnostic(error: CssError, severity: DiagnosticSeverity) -> Diagnostic {
+    Diagnostic {
+        severity,
+        phase: DiagnosticPhase::Compile,
+        code: DiagnosticCode::UnsupportedCss,
+        message: error.to_string(),
+        path: None,
+        span: None,
+    }
 }
 
 fn validate_template(

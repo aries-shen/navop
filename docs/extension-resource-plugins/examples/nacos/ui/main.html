@@ -1,0 +1,14 @@
+<div id="nacos-provider" class="flex flex-col gap-2">
+    <span bind="provider_name">Nacos</span>
+    <span bind="provider_status">ready</span>
+    <input id="nacos-query" type="text" bind="query" placeholder="Search namespace or config" />
+    <button
+        id="nacos-refresh"
+        action="refresh-resources"
+        data-provider="nacos"
+        data-method="nacos/namespace/list"
+        variant="primary"
+    >
+        Refresh namespaces
+    </button>
+</div>

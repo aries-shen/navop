@@ -1,0 +1,14 @@
+<div id="rocketmq-provider" class="flex flex-col gap-2">
+    <span bind="provider_name">RocketMQ</span>
+    <span bind="provider_status">ready</span>
+    <input id="rocketmq-query" type="text" bind="query" placeholder="Search topics or groups" />
+    <button
+        id="rocketmq-refresh"
+        action="refresh-resources"
+        data-provider="rocketmq"
+        data-method="rocketmq/topic/list"
+        variant="primary"
+    >
+        Refresh topics
+    </button>
+</div>

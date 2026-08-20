@@ -5,6 +5,12 @@ pub struct StateStore {
     values: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StateOperation {
+    Set { key: String, value: String },
+    Remove { key: String },
+}
+
 impl StateStore {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.values.get(key).map(String::as_str)

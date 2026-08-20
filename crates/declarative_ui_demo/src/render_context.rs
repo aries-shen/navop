@@ -4,18 +4,21 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Entity, IntoElement, ParentElement, ScrollHandle, Styled, Window, div,
+    AnyElement, AnyView, App, Entity, IntoElement, ParentElement, ScrollHandle, Styled, Window, div,
 };
 use gpui_component::input::InputState;
 use gpui_component::slider::SliderState;
 
 use crate::{
     ActionEvent, ComponentProps, ComponentRegistry, Diagnostic, DiagnosticCode, DiagnosticPhase,
-    DiagnosticSeverity, Diagnostics, NodePath, Runtime, VElement, VNode, apply_modifiers,
+    DiagnosticSeverity, Diagnostics, NodePath, Runtime, VElement, VNode, apply_css,
+    apply_modifiers,
+    code_editor_cache::{CodeEditorCache, CodeEditorEnvironment},
     input_cache::{InputCache, InputEnvironment, InputRequest},
-    parse_classes,
+    parse_classes, resolve_style,
     slider_cache::{SliderCache, SliderEnvironment, SliderRequest},
     table_cache::{TableCache, TableEnvironment, TableRequest},
+    terminal_component::TerminalSessionStore,
     tree_cache::{TreeCache, TreeEnvironment, TreeRequest},
 };
 
@@ -24,7 +27,10 @@ pub(crate) type StateDispatcher = Rc<dyn Fn(String, String, &mut App)>;
 
 pub(crate) struct RenderEnvironment<'a> {
     pub(crate) registry: &'a ComponentRegistry,
+    pub(crate) stylesheet: &'a crate::CssStylesheet,
     pub(crate) input_cache: &'a mut InputCache,
+    pub(crate) code_editor_cache: &'a mut CodeEditorCache,
+    pub(crate) terminal_sessions: &'a mut TerminalSessionStore,
     pub(crate) slider_cache: &'a mut SliderCache,
     pub(crate) tree_cache: &'a mut TreeCache,
     pub(crate) table_cache: &'a mut TableCache,
@@ -38,7 +44,10 @@ pub(crate) struct RenderEnvironment<'a> {
 
 pub struct RenderContext<'a> {
     registry: &'a ComponentRegistry,
+    stylesheet: &'a crate::CssStylesheet,
     input_cache: &'a mut InputCache,
+    code_editor_cache: &'a mut CodeEditorCache,
+    terminal_sessions: &'a mut TerminalSessionStore,
     slider_cache: &'a mut SliderCache,
     tree_cache: &'a mut TreeCache,
     table_cache: &'a mut TableCache,
@@ -54,7 +63,10 @@ impl<'a> RenderContext<'a> {
     pub(crate) fn new(environment: RenderEnvironment<'a>) -> Self {
         Self {
             registry: environment.registry,
+            stylesheet: environment.stylesheet,
             input_cache: environment.input_cache,
+            code_editor_cache: environment.code_editor_cache,
+            terminal_sessions: environment.terminal_sessions,
             slider_cache: environment.slider_cache,
             tree_cache: environment.tree_cache,
             table_cache: environment.table_cache,
@@ -82,6 +94,8 @@ impl<'a> RenderContext<'a> {
     }
 
     pub fn style<E: Styled>(&mut self, element: E, props: &ComponentProps) -> E {
+        let css = resolve_style(self.stylesheet, &props.element);
+        let element = apply_css(element, &css);
         let parsed = parse_classes(&props.element.classes);
         self.record_unsupported_classes(props, &parsed.unsupported);
         apply_modifiers(element, &parsed.modifiers)
@@ -128,6 +142,22 @@ impl<'a> RenderContext<'a> {
             cx: self.cx,
         };
         self.input_cache.resolve(request, environment)
+    }
+
+    pub(crate) fn code_editor_state(
+        &mut self,
+        props: &ComponentProps,
+    ) -> Result<Entity<InputState>, crate::ComponentError> {
+        let environment = CodeEditorEnvironment {
+            window: self.window,
+            cx: self.cx,
+        };
+        self.code_editor_cache
+            .resolve(props, self.runtime.clone(), environment)
+    }
+
+    pub(crate) fn terminal_view(&self, session: &str) -> Result<AnyView, crate::ComponentError> {
+        self.terminal_sessions.view(session)
     }
 
     pub(crate) fn slider_state(&mut self, request: SliderRequest) -> Entity<SliderState> {

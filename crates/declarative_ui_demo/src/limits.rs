@@ -1,5 +1,10 @@
 use std::fmt;
 
+use crate::css::{
+    DEFAULT_MAX_CSS_DECLARATIONS, DEFAULT_MAX_CSS_RULES, DEFAULT_MAX_CSS_SELECTORS,
+    DEFAULT_MAX_CSS_SOURCE_BYTES,
+};
+
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_NODES: usize = 10_000;
 pub const DEFAULT_MAX_DEPTH: usize = 64;
@@ -13,6 +18,10 @@ pub struct CompileLimits {
     pub max_depth: usize,
     pub max_attributes: usize,
     pub max_classes: usize,
+    pub max_css_source_bytes: usize,
+    pub max_css_rules: usize,
+    pub max_css_selectors: usize,
+    pub max_css_declarations: usize,
 }
 
 impl CompileLimits {
@@ -22,6 +31,10 @@ impl CompileLimits {
         max_depth: DEFAULT_MAX_DEPTH,
         max_attributes: DEFAULT_MAX_ATTRIBUTES,
         max_classes: DEFAULT_MAX_CLASSES,
+        max_css_source_bytes: DEFAULT_MAX_CSS_SOURCE_BYTES,
+        max_css_rules: DEFAULT_MAX_CSS_RULES,
+        max_css_selectors: DEFAULT_MAX_CSS_SELECTORS,
+        max_css_declarations: DEFAULT_MAX_CSS_DECLARATIONS,
     };
 }
 

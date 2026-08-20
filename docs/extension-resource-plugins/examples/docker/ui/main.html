@@ -1,0 +1,14 @@
+<div id="docker-provider" class="flex flex-col gap-2">
+    <span bind="provider_name">Docker</span>
+    <span bind="provider_status">ready</span>
+    <input id="docker-query" type="text" bind="query" placeholder="Filter containers or images" />
+    <button
+        id="docker-refresh"
+        action="refresh-resources"
+        data-provider="docker"
+        data-method="docker/container/list"
+        variant="primary"
+    >
+        Refresh containers
+    </button>
+</div>

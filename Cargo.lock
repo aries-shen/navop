@@ -3838,6 +3838,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "extension-plugin-adapter"
+version = "0.1.0"
+dependencies = [
+ "declarative-ui-demo",
+ "extension-host",
+ "extension-protocol",
+ "extension-runtime",
+ "futures",
+ "gpui",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "extension-protocol"
 version = "0.1.0"
 dependencies = [

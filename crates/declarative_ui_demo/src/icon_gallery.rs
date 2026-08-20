@@ -153,7 +153,7 @@ fn parse_icon_size(value: &str) -> IconSize {
         "24" => IconSize::Large,
         "32" => IconSize::Display,
         "40" => IconSize::Hero,
-        "16" | _ => IconSize::Default,
+        _ => IconSize::Default,
     }
 }
 

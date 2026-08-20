@@ -7,7 +7,9 @@ use gpui::{
 use crate::{
     ActionEvent, BindingResolution, CompiledTemplate, ComponentRegistry, Diagnostic,
     DiagnosticCode, DiagnosticPhase, Diagnostics, DiffError, NodePath, Patch, Runtime,
-    RuntimeEvent, VNode, apply_patches, diff,
+    RuntimeEvent, VNode, apply_patches,
+    code_editor_cache::CodeEditorCache,
+    diff,
     input_cache::InputCache,
     render_context::{ActionDispatcher, RenderContext, RenderEnvironment},
     resolve_bindings_checked,
@@ -42,9 +44,11 @@ pub struct DeclarativeView {
     registry: ComponentRegistry,
     runtime: Entity<Runtime>,
     input_cache: InputCache,
+    code_editor_cache: CodeEditorCache,
     slider_cache: SliderCache,
     tree_cache: TreeCache,
     table_cache: crate::table_cache::TableCache,
+    terminal_sessions: crate::terminal_component::TerminalSessionStore,
     last_patches: Vec<Patch>,
     diagnostics: Diagnostics,
     warnings: Vec<String>,
@@ -67,9 +71,11 @@ impl DeclarativeView {
             registry: config.registry,
             runtime: config.runtime,
             input_cache: InputCache::default(),
+            code_editor_cache: CodeEditorCache::default(),
             slider_cache: SliderCache::default(),
             tree_cache: TreeCache::default(),
             table_cache: crate::table_cache::TableCache::default(),
+            terminal_sessions: Default::default(),
             last_patches: Vec::new(),
             diagnostics,
             warnings: Vec::new(),
@@ -107,6 +113,15 @@ impl DeclarativeView {
         self.last_error.as_ref().map(|error| error.message.as_str())
     }
 
+    /// Release every host-owned terminal session attached to this view.
+    ///
+    /// Provider markup cannot initiate shutdown. A trusted owner must call this
+    /// before dropping a panel if terminal sessions were injected by the host.
+    pub fn shutdown_terminal_sessions(&mut self, cx: &mut Context<Self>) {
+        self.terminal_sessions.shutdown(cx);
+        cx.notify();
+    }
+
     fn handle_runtime_event(&mut self, event: &RuntimeEvent, cx: &mut Context<Self>) {
         match event {
             RuntimeEvent::StateChanged(_) => self.reconcile_or_record(cx),
@@ -135,9 +150,11 @@ impl DeclarativeView {
         debug_assert_eq!(next, resolution.root);
         self.rendered = next;
         self.input_cache.retain_live(&self.rendered);
+        self.code_editor_cache.retain_live(&self.rendered);
         self.slider_cache.retain_live(&self.rendered);
         self.tree_cache.retain_live(&self.rendered);
         self.table_cache.retain_live(&self.rendered);
+        self.terminal_sessions.retain_live(&self.rendered, cx);
         self.last_patches = patches;
         Ok(())
     }
@@ -174,10 +191,13 @@ impl Render for DeclarativeView {
         let rendered = self.rendered.clone();
         let environment = RenderEnvironment {
             registry: &self.registry,
+            stylesheet: self.template.stylesheet(),
             input_cache: &mut self.input_cache,
+            code_editor_cache: &mut self.code_editor_cache,
             slider_cache: &mut self.slider_cache,
             tree_cache: &mut self.tree_cache,
             table_cache: &mut self.table_cache,
+            terminal_sessions: &mut self.terminal_sessions,
             runtime: self.runtime.clone(),
             dispatcher,
             diagnostics: &mut self.diagnostics,

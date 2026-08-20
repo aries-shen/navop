@@ -1,6 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "wasm-components")]
+use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "wasm-components")]
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use db_view::extension_menu::DbTreeExtensionMenuRegistry;
 use one_core::{
@@ -12,8 +16,9 @@ use crate::extension::manifest::{Manifest, WasmRuntimeKind};
 
 use super::registration::load_installed_composite_manifests;
 use super::types::{
-    ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
-    RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredKeybindingContribution,
+    ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDeclarativePanel,
+    RegisteredDocumentExporter, RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform,
+    RegisteredIpcRuntimeBinding, RegisteredKeybindingContribution,
     RegisteredRemoteFileEditorContribution, WasmRuntimeBinding,
 };
 
@@ -23,6 +28,8 @@ static WASM_CATALOG_LOG_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new()
 pub struct ExtensionRuntimeCatalog {
     pub(super) commands: CommandRegistry,
     pub(super) wasm_runtimes: BTreeMap<String, WasmRuntimeBinding>,
+    pub(super) ipc_runtimes: BTreeMap<String, RegisteredIpcRuntimeBinding>,
+    pub(super) declarative_panels: Vec<RegisteredDeclarativePanel>,
     pub(super) db_tree_menus: Vec<RegisteredDbTreeMenuContribution>,
     pub(super) toolbar_slots: SlotRegistry,
     pub(super) menu_slots: SlotRegistry,
@@ -59,6 +66,8 @@ impl ExtensionRuntimeCatalog {
         Self {
             commands: CommandRegistry::new(),
             wasm_runtimes: BTreeMap::new(),
+            ipc_runtimes: BTreeMap::new(),
+            declarative_panels: Vec::new(),
             db_tree_menus: Vec::new(),
             toolbar_slots: SlotRegistry::default(),
             menu_slots: SlotRegistry::default(),
@@ -146,6 +155,14 @@ impl ExtensionRuntimeCatalog {
 
     pub fn remote_file_editors(&self) -> &[RegisteredRemoteFileEditorContribution] {
         &self.remote_file_editors
+    }
+
+    pub fn ipc_runtime_bindings(&self) -> impl Iterator<Item = &RegisteredIpcRuntimeBinding> {
+        self.ipc_runtimes.values()
+    }
+
+    pub fn declarative_panels(&self) -> &[RegisteredDeclarativePanel] {
+        &self.declarative_panels
     }
 
     pub fn document_renderer_for_kind(

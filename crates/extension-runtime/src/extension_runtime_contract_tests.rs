@@ -6,12 +6,14 @@ use crate::{
     ExtensionRuntimeCatalog,
     extension::manifest::{
         ApiVersions, CommandContrib, CommandHandlerContrib, ContributesManifest,
-        DocumentExporterContrib, Engines, HtmlPreviewTransformContrib, Manifest, MenuCommandRef,
+        DeclarativePanelContrib, DeclarativePanelPlacement, DocumentExporterContrib, Engines,
+        HtmlPreviewTransformContrib, IpcEntry, IpcRuntime, IpcTransport, Manifest, MenuCommandRef,
         MenuContrib, RuntimeSection, WasmRuntime, WasmRuntimeKind,
         contributes::{
             RemoteFileEditorCommandContrib, RemoteFileEditorContrib, RemoteFileEditorLaunchMode,
         },
     },
+    types::ExtensionRuntimeError,
 };
 
 #[test]
@@ -178,6 +180,164 @@ fn runtime_catalog_registers_remote_file_editors() {
     );
     assert_eq!(vec!["notepad++.exe"], editors[0].command.program_candidates);
     assert_eq!(vec!["{file}"], editors[0].command.args);
+}
+
+#[test]
+fn runtime_catalog_registers_namespaced_declarative_panels() {
+    let mut first = base_manifest();
+    first.runtime.wasm.push(wasm_runtime("main"));
+    first
+        .contributes
+        .declarative_panels
+        .push(declarative_panel("resources", "main"));
+
+    let mut second = base_manifest();
+    second.id = "com.example.other".to_string();
+    second.manifest_dir = PathBuf::from("/tmp/com.example.other");
+    second.runtime.wasm.push(wasm_runtime("main"));
+    second
+        .contributes
+        .declarative_panels
+        .push(declarative_panel("resources", "main"));
+
+    let catalog = ExtensionRuntimeCatalog::from_manifests(vec![first, second]).unwrap();
+    let panels = catalog.declarative_panels();
+
+    assert_eq!(2, panels.len());
+    assert_eq!("com.example.tools::resources", panels[0].panel_key);
+    assert_eq!("com.example.tools::main", panels[0].runtime_id);
+    assert_eq!(
+        PathBuf::from("/tmp/com.example.tools/ui/resources.html"),
+        panels[0].template_path
+    );
+    assert_eq!(
+        Some(PathBuf::from("/tmp/com.example.tools/ui/resources.css")),
+        panels[0].style_path
+    );
+    assert_eq!(DeclarativePanelPlacement::HomeSidebar, panels[0].placement);
+    assert_eq!("com.example.other::resources", panels[1].panel_key);
+}
+
+#[test]
+fn runtime_catalog_rejects_duplicate_namespaced_declarative_panels() {
+    let mut first = base_manifest();
+    first.runtime.wasm.push(wasm_runtime("main"));
+    first
+        .contributes
+        .declarative_panels
+        .push(declarative_panel("resources", "main"));
+
+    let mut second = first.clone();
+    second.runtime.wasm = vec![wasm_runtime("secondary")];
+    second
+        .contributes
+        .declarative_panels
+        .push(declarative_panel("resources", "secondary"));
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![first, second]).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExtensionRuntimeError::DuplicateDeclarativePanel { id } if id == "com.example.tools::resources"
+    ));
+}
+
+#[test]
+fn runtime_catalog_rejects_declarative_panel_with_missing_runtime() {
+    let mut manifest = base_manifest();
+    manifest
+        .contributes
+        .declarative_panels
+        .push(declarative_panel("resources", "missing"));
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("unknown runtime_id"));
+}
+
+#[test]
+fn runtime_catalog_registers_resolved_ipc_runtime_binding() {
+    let mut manifest = base_manifest();
+    manifest.permissions = vec![
+        "net:tcp:127.0.0.1:9092".to_string(),
+        "secrets:read:kafka.*".to_string(),
+        "spawn:./runtime/bin/provider".to_string(),
+    ];
+    manifest.runtime.ipc.push(IpcRuntime {
+        id: "main".to_string(),
+        entry: IpcEntry {
+            command: "./bin/provider".to_string(),
+            args: vec!["--mode".to_string(), "kafka".to_string()],
+            working_dir: Some("runtime".to_string()),
+            env: std::collections::BTreeMap::from([("RUST_LOG".to_string(), "info".to_string())]),
+        },
+        transport: IpcTransport {
+            kind: "local_socket".to_string(),
+            connect_timeout_ms: Some(7_500),
+        },
+        auto_restart: true,
+        max_restart_attempts: 5,
+        shutdown_grace_ms: 2_500,
+    });
+
+    let catalog = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap();
+    let binding = catalog.ipc_runtime_bindings().next().unwrap();
+
+    assert_eq!("com.example.tools::main", binding.runtime_key);
+    assert_eq!(
+        PathBuf::from("/tmp/com.example.tools/runtime/bin/provider"),
+        binding.command
+    );
+    assert_eq!(
+        Some(PathBuf::from("/tmp/com.example.tools/runtime")),
+        binding.working_dir
+    );
+    assert_eq!(vec!["--mode", "kafka"], binding.args);
+    assert_eq!(
+        Some("info"),
+        binding.env.get("RUST_LOG").map(String::as_str)
+    );
+    assert_eq!("local_socket", binding.transport_kind);
+    assert_eq!(Some(7_500), binding.connect_timeout_ms);
+    assert!(binding.auto_restart);
+    assert_eq!(5, binding.max_restart_attempts);
+    assert_eq!(2_500, binding.shutdown_grace_ms);
+    assert_eq!(
+        vec![
+            "net:tcp:127.0.0.1:9092",
+            "secrets:read:kafka.*",
+            "spawn:./runtime/bin/provider"
+        ],
+        binding.permissions
+    );
+}
+
+#[test]
+fn runtime_catalog_preserves_allowlisted_absolute_ipc_command() {
+    let mut manifest = base_manifest();
+    manifest.permissions.push("spawn:/usr/bin/env".to_string());
+    manifest.runtime.ipc.push(IpcRuntime {
+        id: "main".to_string(),
+        entry: IpcEntry {
+            command: "/usr/bin/env".to_string(),
+            args: vec!["python3".to_string(), "./provider.py".to_string()],
+            working_dir: None,
+            env: std::collections::BTreeMap::new(),
+        },
+        transport: IpcTransport::default(),
+        auto_restart: false,
+        max_restart_attempts: 0,
+        shutdown_grace_ms: 1_000,
+    });
+
+    let catalog = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap();
+    let binding = catalog.ipc_runtime_bindings().next().unwrap();
+
+    assert_eq!(PathBuf::from("/usr/bin/env"), binding.command);
+    assert_eq!(
+        Some(PathBuf::from("/tmp/com.example.tools")),
+        binding.working_dir
+    );
 }
 
 #[test]
@@ -369,6 +529,19 @@ fn command(runtime_id: &str, command_id: &str) -> CommandContrib {
             runtime_id: runtime_id.to_string(),
             function: Some("run".to_string()),
         },
+    }
+}
+
+fn declarative_panel(id: &str, runtime_id: &str) -> DeclarativePanelContrib {
+    DeclarativePanelContrib {
+        id: id.to_string(),
+        title: "Resources".to_string(),
+        runtime_id: runtime_id.to_string(),
+        template: "ui/resources.html".to_string(),
+        style: Some("ui/resources.css".to_string()),
+        placement: DeclarativePanelPlacement::HomeSidebar,
+        icon: Some("boxes".to_string()),
+        activation: vec!["on_startup".to_string()],
     }
 }
 
