@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use declarative_ui_demo::NodePath;
 use extension_host::{DEFAULT_SESSION_REQUEST_TIMEOUT, SpawnTransport};
@@ -519,6 +520,95 @@ async fn closed_secondary_runtime_restarts_with_backoff_and_budget() {
     assert_eq!(3, calls.load(Ordering::SeqCst));
     // Both replaced sessions and the terminal crash-loop session are retired.
     assert_eq!(3, shutdowns.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn runtime_monitor_emits_health_transitions_and_removals() {
+    let (_root, manager, calls, _shutdowns, closed) =
+        activation_manager(&[("consumers", "secondary")]);
+    let manager = Arc::new(manager);
+    manager
+        .activate_panel("com.navop.kafka::consumers")
+        .await
+        .unwrap();
+    let monitor = RuntimeMonitor::new(
+        Arc::clone(&manager),
+        RuntimeMonitorConfig {
+            check_interval: Duration::from_millis(5),
+        },
+    );
+    let mut events = monitor.subscribe();
+    monitor.track("com.navop.kafka::secondary");
+
+    monitor.run_once().await;
+    let RuntimeMonitorEvent::HealthChanged { runtime_id, health } = events.recv().await.unwrap()
+    else {
+        panic!("expected initial health event");
+    };
+    assert_eq!("com.navop.kafka::secondary", runtime_id);
+    assert_eq!(RuntimeActivationState::Active, health.state);
+
+    // A stable snapshot is collapsed instead of flooding UI subscribers.
+    monitor.run_once().await;
+    assert!(events.try_recv().is_err());
+
+    closed.store(true, Ordering::SeqCst);
+    monitor.run_once().await;
+    let RuntimeMonitorEvent::HealthChanged { health, .. } = events.recv().await.unwrap() else {
+        panic!("expected restart health event");
+    };
+    assert_eq!(RuntimeActivationState::Active, health.state);
+    assert_eq!(1, health.restart_attempts);
+    assert_eq!(2, calls.load(Ordering::SeqCst));
+
+    manager
+        .deactivate_runtime("com.navop.kafka::secondary")
+        .await
+        .unwrap();
+    monitor.run_once().await;
+    let RuntimeMonitorEvent::RuntimeRemoved { runtime_id } = events.recv().await.unwrap() else {
+        panic!("expected runtime removal event");
+    };
+    assert_eq!("com.navop.kafka::secondary", runtime_id);
+
+    // Once removed, the monitor does not repeat removal notifications.
+    monitor.run_once().await;
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn runtime_monitor_task_starts_stops_and_rejects_double_start() {
+    let (_root, manager, _calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
+    let manager = Arc::new(manager);
+    manager
+        .activate_panel("com.navop.kafka::topics")
+        .await
+        .unwrap();
+    let monitor = RuntimeMonitor::new(
+        manager,
+        RuntimeMonitorConfig {
+            check_interval: Duration::from_millis(5),
+        },
+    );
+    monitor.track("com.navop.kafka::main");
+    let mut events = monitor.subscribe();
+
+    monitor.start().unwrap();
+    assert_eq!(
+        RuntimeMonitorError::AlreadyRunning,
+        monitor.start().unwrap_err()
+    );
+    let RuntimeMonitorEvent::HealthChanged { runtime_id, health } = events.recv().await.unwrap()
+    else {
+        panic!("expected monitor health event");
+    };
+    assert_eq!("com.navop.kafka::main", runtime_id);
+    assert_eq!(RuntimeActivationState::Active, health.state);
+
+    monitor.stop().await;
+    assert!(events.try_recv().is_err());
+    assert!(monitor.start().is_ok());
+    monitor.stop().await;
 }
 
 #[test]

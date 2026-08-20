@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::Arc,
     time::Duration,
 };
@@ -18,7 +19,10 @@ use extension_runtime::{
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use parking_lot::Mutex as SyncMutex;
-use tokio::{sync::Mutex, time::Instant};
+use tokio::{
+    sync::{Mutex, Notify, broadcast, mpsc},
+    time::{Instant, sleep},
+};
 
 use thiserror::Error;
 
@@ -135,7 +139,7 @@ pub fn process_session_factory() -> SessionFactory {
     })
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ActivationError {
     #[error("declarative panel `{panel_key}` is not registered")]
     PanelNotFound { panel_key: String },
@@ -896,5 +900,220 @@ impl ActivationManager {
         if let Some(runtime) = self.state.lock().runtimes.get_mut(runtime_id) {
             runtime.next_restart_at = None;
         }
+    }
+}
+
+/// Configuration for the independent host-side runtime monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeMonitorConfig {
+    pub check_interval: Duration,
+}
+
+impl Default for RuntimeMonitorConfig {
+    fn default() -> Self {
+        Self {
+            check_interval: Duration::from_secs(5),
+        }
+    }
+}
+
+/// A state snapshot or removal notification emitted by [`RuntimeMonitor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeMonitorEvent {
+    HealthChanged {
+        runtime_id: String,
+        health: RuntimeHealth,
+    },
+    RuntimeRemoved {
+        runtime_id: String,
+    },
+    CheckFailed {
+        runtime_id: String,
+        error: ActivationError,
+    },
+}
+
+/// Error returned when a monitor operation cannot be started.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RuntimeMonitorError {
+    #[error("runtime monitor is already running")]
+    AlreadyRunning,
+}
+
+/// Periodically invokes the pull-oriented activation supervisor.
+///
+/// The monitor deliberately owns no process state. It only schedules checks,
+/// serializes checks per runtime, collapses repeated snapshots, and publishes
+/// state transitions to consumers such as a GPUI activation status entity.
+impl fmt::Debug for RuntimeMonitor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeMonitor")
+            .field("manager", &self.manager.catalog)
+            .field("config", &self.config)
+            .field("tracked_runtimes", &self.tracked_runtimes())
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct RuntimeMonitor {
+    manager: Arc<ActivationManager>,
+    config: RuntimeMonitorConfig,
+    monitor_state: SyncMutex<BTreeMap<String, Option<RuntimeHealth>>>,
+    running: SyncMutex<Option<mpsc::Sender<()>>>,
+    stopped: Arc<Notify>,
+    events: broadcast::Sender<RuntimeMonitorEvent>,
+}
+
+impl RuntimeMonitor {
+    pub fn new(manager: Arc<ActivationManager>, config: RuntimeMonitorConfig) -> Self {
+        let (events, _) = broadcast::channel(128);
+        Self {
+            manager,
+            config,
+            monitor_state: SyncMutex::new(BTreeMap::new()),
+            running: SyncMutex::new(None),
+            stopped: Arc::new(Notify::new()),
+            events,
+        }
+    }
+
+    /// Subscribes to health state transitions and runtime removal events.
+    ///
+    /// A receiver is returned even while the monitor is stopped; new
+    /// subscriptions remain connected until their receiver is dropped.
+    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeMonitorEvent> {
+        self.events.subscribe()
+    }
+
+    /// Tracks a runtime without performing an immediate health check.
+    ///
+    /// Tracking is intentionally separate from activation. A tracked runtime
+    /// that has never been observed does not produce a removal event; once a
+    /// health snapshot has been observed, disappearance from the manager emits
+    /// `RuntimeRemoved` on the next cycle.
+    pub fn track(&self, runtime_id: impl Into<String>) {
+        self.monitor_state
+            .lock()
+            .entry(runtime_id.into())
+            .or_insert(None);
+    }
+
+    /// Stops tracking a runtime. This does not deactivate its provider.
+    pub fn untrack(&self, runtime_id: &str) {
+        self.monitor_state.lock().remove(runtime_id);
+    }
+
+    /// Returns the currently tracked runtime IDs in deterministic order.
+    pub fn tracked_runtimes(&self) -> BTreeSet<String> {
+        self.monitor_state.lock().keys().cloned().collect()
+    }
+
+    /// Runs the periodic monitor inline.
+    ///
+    /// This method is useful for deterministic tests and host runtimes that
+    /// already own a scheduler. It performs at most one supervision cycle.
+    pub async fn run_once(&self) {
+        let runtime_ids: Vec<String> = self.monitor_state.lock().keys().cloned().collect();
+        for runtime_id in runtime_ids {
+            if let Some(event) = self.check_once(&runtime_id).await {
+                let _ = self.events.send(event);
+            }
+        }
+    }
+
+    /// Starts one monitor task if no task is currently running.
+    pub fn start(&self) -> Result<(), RuntimeMonitorError> {
+        let mut running = self.running.lock();
+        if running.is_some() {
+            return Err(RuntimeMonitorError::AlreadyRunning);
+        }
+        let (stop_tx, mut stop_rx) = mpsc::channel(1);
+        running.replace(stop_tx);
+        drop(running);
+
+        let config = self.config;
+        let monitor = Arc::new(Self {
+            manager: Arc::clone(&self.manager),
+            config,
+            monitor_state: SyncMutex::new(self.monitor_state.lock().clone()),
+            running: SyncMutex::new(None),
+            stopped: Arc::clone(&self.stopped),
+            events: self.events.clone(),
+        });
+        let events = self.events.clone();
+        let stopped = Arc::clone(&self.stopped);
+
+        tokio::spawn(async move {
+            loop {
+                if monitor_should_stop(&mut stop_rx) {
+                    break;
+                }
+
+                for runtime_id in monitor.tracked_runtimes() {
+                    // Do not cancel an in-flight supervision check. The manager
+                    // and production ping requests are bounded, while monitor
+                    // checks are serialized here to prevent overlap per runtime.
+                    if let Some(event) = monitor.check_once(&runtime_id).await {
+                        let _ = events.send(event);
+                    }
+                }
+
+                tokio::select! {
+                    _ = stop_rx.recv() => break,
+                    _ = sleep(config.check_interval) => {}
+                }
+            }
+
+            stopped.notify_one();
+        });
+
+        Ok(())
+    }
+
+    /// Stops the monitor task and waits for it to acknowledge shutdown.
+    pub async fn stop(&self) {
+        let stop = self.running.lock().take();
+        if let Some(stop) = stop {
+            let _ = stop.send(()).await;
+        }
+        self.stopped.notified().await;
+    }
+
+    async fn check_once(&self, runtime_id: &str) -> Option<RuntimeMonitorEvent> {
+        match self.manager.check_runtime(runtime_id).await {
+            Ok(health) => {
+                let mut state = self.monitor_state.lock();
+                let last_health = state.entry(runtime_id.to_owned()).or_default();
+                if last_health.as_ref() == Some(&health) {
+                    return None;
+                }
+                last_health.replace(health.clone());
+                drop(state);
+                Some(RuntimeMonitorEvent::HealthChanged {
+                    runtime_id: runtime_id.to_owned(),
+                    health,
+                })
+            }
+            Err(ActivationError::RuntimeNotFound { .. }) => {
+                let mut state = self.monitor_state.lock();
+                let last_health = state.get_mut(runtime_id)?;
+                last_health.take()?;
+                drop(state);
+                Some(RuntimeMonitorEvent::RuntimeRemoved {
+                    runtime_id: runtime_id.to_owned(),
+                })
+            }
+            Err(error) => Some(RuntimeMonitorEvent::CheckFailed {
+                runtime_id: runtime_id.to_owned(),
+                error,
+            }),
+        }
+    }
+}
+
+fn monitor_should_stop(stop_rx: &mut mpsc::Receiver<()>) -> bool {
+    match stop_rx.try_recv() {
+        Ok(()) | Err(mpsc::error::TryRecvError::Disconnected) => true,
+        Err(mpsc::error::TryRecvError::Empty) => false,
     }
 }
