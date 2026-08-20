@@ -3552,11 +3552,14 @@ dependencies = [
  "extension-plugin-adapter",
  "extension-protocol",
  "extension-runtime",
+ "futures",
  "interprocess",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
  "uuid",
+ "zed-reqwest",
 ]
 
 [[package]]
