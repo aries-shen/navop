@@ -958,7 +958,7 @@ impl fmt::Debug for RuntimeMonitor {
 pub struct RuntimeMonitor {
     manager: Arc<ActivationManager>,
     config: RuntimeMonitorConfig,
-    monitor_state: SyncMutex<BTreeMap<String, Option<RuntimeHealth>>>,
+    monitor_state: Arc<SyncMutex<BTreeMap<String, Option<RuntimeHealth>>>>,
     running: SyncMutex<Option<mpsc::Sender<()>>>,
     stopped: Arc<Notify>,
     events: broadcast::Sender<RuntimeMonitorEvent>,
@@ -970,7 +970,7 @@ impl RuntimeMonitor {
         Self {
             manager,
             config,
-            monitor_state: SyncMutex::new(BTreeMap::new()),
+            monitor_state: Arc::new(SyncMutex::new(BTreeMap::new())),
             running: SyncMutex::new(None),
             stopped: Arc::new(Notify::new()),
             events,
@@ -1008,6 +1008,22 @@ impl RuntimeMonitor {
         self.monitor_state.lock().keys().cloned().collect()
     }
 
+    /// Returns the last observed health snapshot for a tracked runtime.
+    pub fn runtime_health(&self, runtime_id: &str) -> Option<RuntimeHealth> {
+        self.monitor_state.lock().get(runtime_id).cloned().flatten()
+    }
+
+    /// Returns all last-observed health snapshots in deterministic order.
+    pub fn runtime_healths(&self) -> BTreeMap<String, RuntimeHealth> {
+        self.monitor_state
+            .lock()
+            .iter()
+            .filter_map(|(runtime_id, health)| {
+                health.clone().map(|health| (runtime_id.clone(), health))
+            })
+            .collect()
+    }
+
     /// Runs the periodic monitor inline.
     ///
     /// This method is useful for deterministic tests and host runtimes that
@@ -1031,17 +1047,11 @@ impl RuntimeMonitor {
         running.replace(stop_tx);
         drop(running);
 
-        let config = self.config;
-        let monitor = Arc::new(Self {
-            manager: Arc::clone(&self.manager),
-            config,
-            monitor_state: SyncMutex::new(self.monitor_state.lock().clone()),
-            running: SyncMutex::new(None),
-            stopped: Arc::clone(&self.stopped),
-            events: self.events.clone(),
-        });
+        let manager = Arc::clone(&self.manager);
+        let monitor_state = Arc::clone(&self.monitor_state);
         let events = self.events.clone();
         let stopped = Arc::clone(&self.stopped);
+        let check_interval = self.config.check_interval;
 
         tokio::spawn(async move {
             loop {
@@ -1049,18 +1059,21 @@ impl RuntimeMonitor {
                     break;
                 }
 
-                for runtime_id in monitor.tracked_runtimes() {
+                let runtime_ids: Vec<String> = monitor_state.lock().keys().cloned().collect();
+                for runtime_id in runtime_ids {
                     // Do not cancel an in-flight supervision check. The manager
                     // and production ping requests are bounded, while monitor
                     // checks are serialized here to prevent overlap per runtime.
-                    if let Some(event) = monitor.check_once(&runtime_id).await {
+                    if let Some(event) =
+                        check_runtime_event(&manager, &monitor_state, &runtime_id).await
+                    {
                         let _ = events.send(event);
                     }
                 }
 
                 tokio::select! {
                     _ = stop_rx.recv() => break,
-                    _ = sleep(config.check_interval) => {}
+                    _ = sleep(check_interval) => {}
                 }
             }
 
@@ -1080,34 +1093,42 @@ impl RuntimeMonitor {
     }
 
     async fn check_once(&self, runtime_id: &str) -> Option<RuntimeMonitorEvent> {
-        match self.manager.check_runtime(runtime_id).await {
-            Ok(health) => {
-                let mut state = self.monitor_state.lock();
-                let last_health = state.entry(runtime_id.to_owned()).or_default();
-                if last_health.as_ref() == Some(&health) {
-                    return None;
-                }
-                last_health.replace(health.clone());
-                drop(state);
-                Some(RuntimeMonitorEvent::HealthChanged {
-                    runtime_id: runtime_id.to_owned(),
-                    health,
-                })
+        check_runtime_event(&self.manager, &self.monitor_state, runtime_id).await
+    }
+}
+
+async fn check_runtime_event(
+    manager: &ActivationManager,
+    monitor_state: &SyncMutex<BTreeMap<String, Option<RuntimeHealth>>>,
+    runtime_id: &str,
+) -> Option<RuntimeMonitorEvent> {
+    match manager.check_runtime(runtime_id).await {
+        Ok(health) => {
+            let mut state = monitor_state.lock();
+            let last_health = state.entry(runtime_id.to_owned()).or_default();
+            if last_health.as_ref() == Some(&health) {
+                return None;
             }
-            Err(ActivationError::RuntimeNotFound { .. }) => {
-                let mut state = self.monitor_state.lock();
-                let last_health = state.get_mut(runtime_id)?;
-                last_health.take()?;
-                drop(state);
-                Some(RuntimeMonitorEvent::RuntimeRemoved {
-                    runtime_id: runtime_id.to_owned(),
-                })
-            }
-            Err(error) => Some(RuntimeMonitorEvent::CheckFailed {
+            last_health.replace(health.clone());
+            drop(state);
+            Some(RuntimeMonitorEvent::HealthChanged {
                 runtime_id: runtime_id.to_owned(),
-                error,
-            }),
+                health,
+            })
         }
+        Err(ActivationError::RuntimeNotFound { .. }) => {
+            let mut state = monitor_state.lock();
+            let last_health = state.get_mut(runtime_id)?;
+            last_health.take()?;
+            drop(state);
+            Some(RuntimeMonitorEvent::RuntimeRemoved {
+                runtime_id: runtime_id.to_owned(),
+            })
+        }
+        Err(error) => Some(RuntimeMonitorEvent::CheckFailed {
+            runtime_id: runtime_id.to_owned(),
+            error,
+        }),
     }
 }
 

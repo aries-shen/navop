@@ -547,6 +547,14 @@ async fn runtime_monitor_emits_health_transitions_and_removals() {
     };
     assert_eq!("com.navop.kafka::secondary", runtime_id);
     assert_eq!(RuntimeActivationState::Active, health.state);
+    assert_eq!(
+        Some(health.clone()),
+        monitor.runtime_health("com.navop.kafka::secondary")
+    );
+    assert_eq!(
+        BTreeMap::from([("com.navop.kafka::secondary".into(), health.clone())]),
+        monitor.runtime_healths()
+    );
 
     // A stable snapshot is collapsed instead of flooding UI subscribers.
     monitor.run_once().await;
@@ -604,6 +612,10 @@ async fn runtime_monitor_task_starts_stops_and_rejects_double_start() {
     };
     assert_eq!("com.navop.kafka::main", runtime_id);
     assert_eq!(RuntimeActivationState::Active, health.state);
+    assert_eq!(
+        Some(health),
+        monitor.runtime_health("com.navop.kafka::main")
+    );
 
     monitor.stop().await;
     assert!(events.try_recv().is_err());
