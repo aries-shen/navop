@@ -12,6 +12,7 @@ use extension_plugin_adapter::{
     MapSecretResolver, ResourceOpenAuthorizer, UniversalProviderHost, process_session_config,
 };
 use extension_protocol::{
+    blob::{BlobCloseParams, BlobReadParams, MAX_BLOB_CHUNK_BYTES},
     declarative_ui::UiActionRequest,
     resource::{ResourceCloseParams, ResourceInvokeParams, ResourceOpenParams, ResourcePingParams},
     result_ref::ResultRef,
@@ -152,7 +153,14 @@ async fn spawn_http_fixture(listener: TcpListener) -> Arc<std::sync::Mutex<Vec<R
                     .to_string(),
                     "/orders" => json!({"orders":{"aliases":{},"settings":{}}}).to_string(),
                     "/_search" => {
-                        json!({"took":3,"hits":{"total":{"value":2},"hits":[]}}).to_string()
+                        let body =
+                            String::from_utf8_lossy(buffer.get(body_start..).unwrap_or_default())
+                                .to_string();
+                        if body.contains("\"_all\":\"large\"") {
+                            json!({"took":3,"hits":{"total":{"value":1},"hits":[{"_source":{"payload":"x".repeat(5 * 1024 * 1024)}}]}}).to_string()
+                        } else {
+                            json!({"took":3,"hits":{"total":{"value":2},"hits":[]}}).to_string()
+                        }
                     }
                     _ => "{\"error\":\"not found\"}".to_owned(),
                 };
@@ -457,6 +465,109 @@ async fn network_permission_is_enforced_before_provider_rpc() {
     );
     assert!(harness.records.lock().expect("records lock").is_empty());
     harness.session.shutdown().await;
+}
+
+#[tokio::test]
+async fn large_search_results_stream_through_bounded_blobs() {
+    let harness = harness(true).await;
+    let opened = harness
+        .client
+        .open_resource(&open_params(harness.port))
+        .await
+        .expect("open resource");
+
+    let small = harness
+        .client
+        .invoke_resource(&ResourceInvokeParams {
+            resource_id: opened.resource_id.clone(),
+            method: "elasticsearch/search".into(),
+            params: json!({"query":"alice"}),
+        })
+        .await
+        .expect("small search");
+    assert!(matches!(small.result, ResultRef::Inline { .. }));
+
+    let large = harness
+        .client
+        .invoke_resource(&ResourceInvokeParams {
+            resource_id: opened.resource_id.clone(),
+            method: "elasticsearch/search".into(),
+            params: json!({"query":"large"}),
+        })
+        .await
+        .expect("large search");
+    let ResultRef::Blob { id: blob_id } = large.result else {
+        panic!("large search should return a blob");
+    };
+
+    let first = harness
+        .client
+        .read_blob(&BlobReadParams {
+            blob_id: blob_id.clone(),
+            max_bytes: Some(64 * 1024),
+        })
+        .await
+        .expect("first blob chunk");
+    assert_eq!(64 * 1024, first.bytes_read);
+    assert!(!first.done);
+
+    let mut read_bytes = first.bytes_read as u64;
+    let mut completed = first.done;
+    while !completed {
+        let chunk = harness
+            .client
+            .read_blob(&BlobReadParams {
+                blob_id: blob_id.clone(),
+                max_bytes: Some(MAX_BLOB_CHUNK_BYTES),
+            })
+            .await
+            .expect("remaining blob chunk");
+        assert!(chunk.bytes_read > 0);
+        assert!(chunk.bytes_read <= MAX_BLOB_CHUNK_BYTES);
+        read_bytes += chunk.bytes_read as u64;
+        completed = chunk.done;
+    }
+    assert!(read_bytes > 64 * 1024);
+
+    harness
+        .client
+        .close_blob(&BlobCloseParams {
+            blob_id: blob_id.clone(),
+        })
+        .await
+        .expect("close blob");
+    let closed = harness
+        .client
+        .read_blob(&BlobReadParams {
+            blob_id,
+            max_bytes: Some(1024),
+        })
+        .await
+        .expect_err("closed blob");
+    assert!(matches!(
+        closed,
+        extension_host::HostError::Protocol(ref error)
+            if error.code == extension_protocol::error::error_codes::RESOURCE_CLOSED
+    ));
+
+    harness
+        .client
+        .close_resource(&ResourceCloseParams {
+            resource_id: opened.resource_id,
+        })
+        .await
+        .expect("close resource");
+    harness.session.shutdown().await;
+
+    let records = harness.records.lock().expect("records lock");
+    let request_bodies = records
+        .iter()
+        .map(|record| record.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!request_bodies.contains("token-value"));
+    drop(records);
+    drop(harness.root);
 }
 
 #[tokio::test]

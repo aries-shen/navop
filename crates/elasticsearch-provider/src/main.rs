@@ -5,7 +5,9 @@
 //! before `resource/open`, and API keys are resolved through the reverse Host
 //! API after the extension manifest's `secrets:read:*` permission is checked.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use extension_protocol::{
+    blob::{BlobCloseParams, BlobReadParams, BlobReadResult, should_stream_blob},
     conn::SecretRef,
     declarative_ui::{UiActionRequest, UiStateOperation, UiStatePatch},
     envelope::{Request, RequestId, Response, RpcMessage},
@@ -26,10 +28,12 @@ use interprocess::local_socket::{
     tokio::{Stream, prelude::*},
 };
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Duration;
 use url::Url;
+use uuid::Uuid;
 
 const SOCKET_ENV_VAR: &str = "ONETCLI_EXT_SOCKET";
 const PROVIDER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -38,6 +42,7 @@ const RESOURCE_ID: &str = "elasticsearch-resource";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOTAL_BLOB_BYTES: usize = 32 * 1024 * 1024;
 
 type ProviderResult = Result<Value, Box<ProtocolError>>;
 
@@ -49,7 +54,15 @@ struct ElasticsearchResource {
 
 struct ProviderState {
     resource: Option<ElasticsearchResource>,
+    blobs: HashMap<String, ProviderBlob>,
     next_reverse_request_id: AtomicI64,
+}
+
+#[derive(Debug)]
+struct ProviderBlob {
+    data: Vec<u8>,
+    offset: usize,
+    closed: bool,
 }
 
 struct IpcParts<R, W>
@@ -65,8 +78,82 @@ impl ProviderState {
     fn new() -> Self {
         Self {
             resource: None,
+            blobs: HashMap::new(),
             next_reverse_request_id: AtomicI64::new(1),
         }
+    }
+
+    fn total_blob_bytes(&self) -> usize {
+        self.blobs.values().map(|blob| blob.data.len()).sum()
+    }
+
+    fn store_blob(&mut self, data: Vec<u8>) -> Option<String> {
+        if data.len() > MAX_TOTAL_BLOB_BYTES
+            || self.total_blob_bytes().saturating_add(data.len()) > MAX_TOTAL_BLOB_BYTES
+        {
+            return None;
+        }
+        let blob_id = format!("es-blob-{}", Uuid::new_v4());
+        self.blobs.insert(
+            blob_id.clone(),
+            ProviderBlob {
+                data,
+                offset: 0,
+                closed: false,
+            },
+        );
+        Some(blob_id)
+    }
+
+    fn blob_result(&mut self, value: Value) -> Result<ResourceInvokeResult, Box<ProtocolError>> {
+        let data = serde_json::to_vec(&value)
+            .map_err(|error| boxed_invalid_params(format!("failed to encode result: {error}")))?;
+        if !should_stream_blob(data.len() as u64) {
+            return Ok(ResourceInvokeResult {
+                result: ResultRef::Inline { value },
+            });
+        }
+        let Some(blob_id) = self.store_blob(data) else {
+            return Err(boxed_error(
+                extension_protocol::error::error_codes::DATA_VALUE_OUT_OF_RANGE,
+                "Elasticsearch result exceeds the provider blob budget",
+            ));
+        };
+        Ok(ResourceInvokeResult {
+            result: ResultRef::Blob {
+                id: blob_id.clone(),
+            },
+        })
+    }
+
+    fn read_blob(&mut self, params: BlobReadParams) -> Result<BlobReadResult, Box<ProtocolError>> {
+        let max_bytes = params.effective_max_bytes() as usize;
+        let blob = self.blobs.get_mut(&params.blob_id).ok_or_else(|| {
+            boxed_error(
+                extension_protocol::error::error_codes::RESOURCE_CLOSED,
+                "blob is closed or unknown",
+            )
+        })?;
+        if blob.closed {
+            return Err(boxed_error(
+                extension_protocol::error::error_codes::RESOURCE_CLOSED,
+                "blob is closed",
+            ));
+        }
+        let start = blob.offset.min(blob.data.len());
+        let end = start.saturating_add(max_bytes).min(blob.data.len());
+        let bytes_read = end.saturating_sub(start) as u32;
+        let done = end == blob.data.len() && bytes_read > 0;
+        blob.offset = end;
+        Ok(BlobReadResult {
+            data: BASE64.encode(&blob.data[start..end]),
+            bytes_read,
+            done,
+        })
+    }
+
+    fn close_blob(&mut self, params: BlobCloseParams) {
+        self.blobs.remove(&params.blob_id);
     }
 }
 
@@ -317,6 +404,8 @@ where
                 .with_method(method::RESOURCE_PING)
                 .with_method(method::RESOURCE_INVOKE)
                 .with_method(method::RESOURCE_CLOSE)
+                .with_method(method::BLOB_READ)
+                .with_method(method::BLOB_CLOSE)
                 .with_method(method::UI_ACTION),
         )
         .map_err(|error| boxed_invalid_params(error.to_string())),
@@ -375,6 +464,39 @@ where
             }
             Ok(Value::Null)
         }
+        method::BLOB_OPEN => Err(boxed_error(
+            error_codes::METHOD_NOT_FOUND,
+            "Elasticsearch results are opened by resource invoke",
+        )),
+        method::BLOB_READ => {
+            let params: BlobReadParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            match state.read_blob(params) {
+                Ok(result) => serde_json::to_value(result)
+                    .map_err(|error| boxed_invalid_params(error.to_string())),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
+        method::BLOB_CLOSE => {
+            let params: BlobCloseParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            state.close_blob(params);
+            Ok(Value::Null)
+        }
         method::RESOURCE_INVOKE => {
             let params: ResourceInvokeParams = match serde_json::from_value(request.params) {
                 Ok(value) => value,
@@ -388,20 +510,20 @@ where
             let Some(resource) = state.resource.as_ref() else {
                 return (Response::err(request.id, *resource_error()), false);
             };
-            execute(resource, &params.method, &params.params)
-                .await
-                .map(|value| {
-                    let value = match params.method.as_str() {
-                        "elasticsearch/index/list" => normalize_indices(value),
-                        "elasticsearch/index/get" => normalize_index(value),
-                        "elasticsearch/search" => normalize_search(value),
-                        _ => value,
-                    };
-                    serde_json::to_value(ResourceInvokeResult {
-                        result: ResultRef::Inline { value },
-                    })
-                })
-                .and_then(|value| value.map_err(|error| boxed_invalid_params(error.to_string())))
+            let value = match execute(resource, &params.method, &params.params).await {
+                Ok(value) => match params.method.as_str() {
+                    "elasticsearch/index/list" => normalize_indices(value),
+                    "elasticsearch/index/get" => normalize_index(value),
+                    "elasticsearch/search" => normalize_search(value),
+                    _ => value,
+                },
+                Err(error) => return (Response::err(request.id, *error), false),
+            };
+            let result = match state.blob_result(value) {
+                Ok(result) => result,
+                Err(error) => return (Response::err(request.id, *error), false),
+            };
+            serde_json::to_value(result).map_err(|error| boxed_invalid_params(error.to_string()))
         }
         method::RESOURCE_CLOSE => {
             let params: ResourceCloseParams = match serde_json::from_value(request.params) {
@@ -417,6 +539,7 @@ where
                 return (Response::err(request.id, *resource_error()), false);
             }
             state.resource = None;
+            state.blobs.clear();
             Ok(Value::Null)
         }
         method::UI_ACTION => {
@@ -436,6 +559,7 @@ where
         }
         method::SHUTDOWN => {
             state.resource = None;
+            state.blobs.clear();
             Ok(Value::Null)
         }
         _ => Err(boxed_error(
