@@ -394,6 +394,37 @@ async fn runtime_health_reports_active_and_degraded_sessions() {
 }
 
 #[tokio::test]
+async fn managed_client_acquisition_tracks_restart_generations() {
+    let (_root, manager, calls, _shutdowns, closed) =
+        activation_manager(&[("consumers", "secondary")]);
+    manager
+        .activate_panel("com.navop.kafka::consumers")
+        .await
+        .unwrap();
+
+    let first_generation = manager
+        .runtime_generation("com.navop.kafka::secondary")
+        .unwrap();
+
+    closed.store(true, Ordering::SeqCst);
+    assert!(
+        manager
+            .universal_plugin_client("com.navop.kafka::secondary")
+            .is_err()
+    );
+
+    manager
+        .check_runtime("com.navop.kafka::secondary")
+        .await
+        .unwrap();
+    let second_generation = manager
+        .runtime_generation("com.navop.kafka::secondary")
+        .unwrap();
+    assert_eq!(first_generation + 1, second_generation);
+    assert_eq!(2, calls.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn check_runtime_does_not_restart_open_sessions() {
     let (_root, manager, calls, shutdowns, _closed) = activation_manager(&[("topics", "main")]);
     manager

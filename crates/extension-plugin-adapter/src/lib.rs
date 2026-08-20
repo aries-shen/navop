@@ -24,8 +24,8 @@ pub mod universal_host;
 
 pub use activation::{
     ActivationError, ActivationHandle, ActivationManager, ManagedRpcSession,
-    RuntimeActivationState, RuntimeHealth, SessionContext, SessionFactory, SupervisionPolicy,
-    process_session_factory,
+    ManagedUniversalPluginClient, RuntimeActivationState, RuntimeHealth, SessionContext,
+    SessionFactory, SupervisionPolicy, process_session_factory,
 };
 
 pub use provider_permissions::{

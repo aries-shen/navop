@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+use crate::provider_permissions::ResourceOpenAuthorizer;
 use extension_host::{HostError, ProcessRpcSession};
 use extension_runtime::{
     ExtensionRuntimeCatalog, RegisteredIpcRuntimeBinding, extension::manifest::current_host_version,
@@ -159,6 +160,8 @@ pub enum ActivationError {
     SessionStart(String),
     #[error("failed to activate runtime `{runtime_id}`")]
     InvalidRuntime { runtime_id: String },
+    #[error("runtime `{runtime_id}` has no active session")]
+    RuntimeNotReady { runtime_id: String },
 }
 
 /// Host-owned restart timing policy.
@@ -229,6 +232,23 @@ pub struct ActivationHandle {
     pub panel_key: String,
     pub runtime_id: String,
     pub state: RuntimeActivationState,
+}
+
+/// A typed client bound to one activation-owned session generation.
+///
+/// The generation lets callers detect that a supervisor has replaced a closed
+/// process and reacquire a client instead of silently using the old transport.
+#[derive(Clone)]
+pub struct ManagedUniversalPluginClient {
+    pub runtime_id: String,
+    pub generation: u64,
+    client: extension_host::UniversalPluginClient,
+}
+
+impl ManagedUniversalPluginClient {
+    pub fn client(&self) -> &extension_host::UniversalPluginClient {
+        &self.client
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,6 +514,62 @@ impl ActivationManager {
         Ok(())
     }
 
+    /// Returns a typed client for the current activated session generation.
+    ///
+    /// A client acquired here remains bound to that process generation. After
+    /// a supervisor restart, compare `generation` and acquire a new client.
+    pub fn universal_plugin_client(
+        &self,
+        runtime_id: &str,
+    ) -> Result<ManagedUniversalPluginClient, ActivationError> {
+        let binding = self
+            .catalog
+            .ipc_runtime_bindings()
+            .find(|binding| binding.runtime_key == runtime_id)
+            .cloned()
+            .ok_or_else(|| ActivationError::RuntimeNotFound {
+                runtime_id: runtime_id.to_owned(),
+            })?;
+        let authorizer = Arc::new(
+            ResourceOpenAuthorizer::new(binding.permissions.iter().cloned()).into_host_authorizer(),
+        );
+
+        let (generation, session) =
+            {
+                let state = self.state.lock();
+                let runtime = state.runtimes.get(runtime_id).ok_or_else(|| {
+                    ActivationError::RuntimeNotFound {
+                        runtime_id: runtime_id.to_owned(),
+                    }
+                })?;
+                (
+                    runtime.start_generation,
+                    runtime
+                        .session
+                        .clone()
+                        .ok_or_else(|| ActivationError::RuntimeNotReady {
+                            runtime_id: runtime_id.to_owned(),
+                        })?,
+                )
+            };
+        if session.is_closed() {
+            return Err(ActivationError::RuntimeNotReady {
+                runtime_id: runtime_id.to_owned(),
+            });
+        }
+        let client = session
+            .universal_plugin_client(Some(authorizer))
+            .ok_or_else(|| ActivationError::RuntimeNotReady {
+                runtime_id: runtime_id.to_owned(),
+            })?;
+
+        Ok(ManagedUniversalPluginClient {
+            runtime_id: runtime_id.to_owned(),
+            generation,
+            client,
+        })
+    }
+
     pub async fn deactivate_runtime(&self, runtime_id: &str) -> Result<(), ActivationError> {
         let runtime = {
             let mut state = self.state.lock();
@@ -554,6 +630,18 @@ impl ActivationManager {
             .get(runtime_id)
             .map(|runtime| runtime.state)
             .ok_or(ActivationError::RuntimeNotFound {
+                runtime_id: runtime_id.to_owned(),
+            })
+    }
+
+    /// Returns the current process generation for restart-aware client use.
+    pub fn runtime_generation(&self, runtime_id: &str) -> Result<u64, ActivationError> {
+        self.state
+            .lock()
+            .runtimes
+            .get(runtime_id)
+            .map(|runtime| runtime.start_generation)
+            .ok_or_else(|| ActivationError::RuntimeNotFound {
                 runtime_id: runtime_id.to_owned(),
             })
     }
