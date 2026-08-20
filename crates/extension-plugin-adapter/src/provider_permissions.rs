@@ -3,6 +3,7 @@
 //! Manifest validation defines the syntax of a permission. This module enforces
 //! runtime connection requests after parsing provider-controlled configuration.
 
+use extension_host::{HostError, HostResult};
 use extension_protocol::{
     conn::SecretRef,
     error::{ProtocolError, error_codes},
@@ -101,6 +102,15 @@ impl ResourceOpenAuthorizer {
             .ok_or(ProviderPermissionError::InvalidUrl)?;
         self.permissions
             .authorize_endpoint(&NetworkEndpoint::parse(url)?)
+    }
+
+    pub fn into_host_authorizer(
+        self,
+    ) -> impl Fn(&ResourceOpenParams) -> HostResult<()> + Send + Sync {
+        move |params| {
+            self.authorize(params)
+                .map_err(|error| HostError::protocol(error.into()))
+        }
     }
 }
 

@@ -7,6 +7,7 @@ use extension_protocol::{
         UiDialogKind, UiDialogRequest, UiDialogResult, UiWindowOperation, UiWindowRequest,
     },
     envelope::{Response, RpcMessage},
+    error::{ProtocolError, error_codes},
     job::{JobStartParams, JobState},
     lifecycle::InitResult,
     resource::{ResourceInvokeParams, ResourceOpenParams},
@@ -75,6 +76,33 @@ async fn fake_extension(
             break;
         }
     }
+}
+
+#[tokio::test]
+async fn open_authorizer_rejects_before_sending_resource_open() {
+    let (client, mut observed) = test_client(&[method::RESOURCE_OPEN]).await;
+    let authorizer = Arc::new(|_params: &ResourceOpenParams| -> HostResult<()> {
+        Err(HostError::protocol(ProtocolError::new(
+            error_codes::PERMISSION_DENIED,
+            "extension is not permitted to connect to this network endpoint",
+        )))
+    });
+    let client = client.with_open_authorizer(authorizer);
+
+    let error = client
+        .open_resource(&ResourceOpenParams {
+            resource_type: "elasticsearch".into(),
+            config: json!({"url": "http://127.0.0.1:9201"}),
+            metadata: None,
+        })
+        .await
+        .expect_err("permission denial");
+
+    let HostError::Protocol(protocol) = error else {
+        panic!("expected protocol permission denial, got {error:?}");
+    };
+    assert_eq!(error_codes::PERMISSION_DENIED, protocol.code);
+    assert!(observed.try_recv().is_err());
 }
 
 async fn test_client(

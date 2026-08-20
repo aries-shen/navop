@@ -28,7 +28,8 @@ pub use activation::{
 };
 
 pub use provider_permissions::{
-    NetworkEndpoint, ProviderPermissionError, ProviderPermissionSet, SecretReference,
+    NetworkEndpoint, ProviderPermissionError, ProviderPermissionSet, ResourceOpenAuthorizer,
+    SecretReference,
 };
 pub use universal_host::{MapSecretResolver, SecretResolver, UniversalProviderHost};
 

@@ -4,8 +4,6 @@
 //! `ResourceInvokeParams::method` 或 `JobStartParams::method` 传递 namespaced
 //! method，不在宿主侧扩展成领域枚举。
 
-use std::sync::Arc;
-
 use extension_protocol::declarative_ui::{validate_ui_dialog_request, validate_ui_window_request};
 use extension_protocol::{
     declarative_ui::{
@@ -22,18 +20,30 @@ use extension_protocol::{
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
+use std::sync::Arc;
 
 use crate::{HostError, HostResult, ProcessRpcSession};
+
+pub type OpenAuthorizer = Arc<dyn Fn(&ResourceOpenParams) -> HostResult<()> + Send + Sync>;
 
 /// 在一个已协商的进程 session 上调用通用资源、任务与 Declarative UI 协议。
 #[derive(Clone)]
 pub struct UniversalPluginClient {
     session: Arc<ProcessRpcSession>,
+    open_authorizer: Option<OpenAuthorizer>,
 }
 
 impl UniversalPluginClient {
     pub fn new(session: Arc<ProcessRpcSession>) -> Self {
-        Self { session }
+        Self {
+            session,
+            open_authorizer: None,
+        }
+    }
+
+    pub fn with_open_authorizer(mut self, authorizer: OpenAuthorizer) -> Self {
+        self.open_authorizer = Some(authorizer);
+        self
     }
 
     pub fn session(&self) -> &Arc<ProcessRpcSession> {
@@ -44,6 +54,9 @@ impl UniversalPluginClient {
         &self,
         params: &ResourceOpenParams,
     ) -> HostResult<ResourceOpenResult> {
+        if let Some(authorizer) = &self.open_authorizer {
+            authorizer(params)?;
+        }
         self.request(method::RESOURCE_OPEN, params).await
     }
 
