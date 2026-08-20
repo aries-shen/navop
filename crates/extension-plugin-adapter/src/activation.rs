@@ -48,11 +48,30 @@ pub type HostApiFactory =
 /// so ownership semantics can be tested without spawning a child process.
 pub trait ManagedRpcSession: Send + Sync {
     fn shutdown<'a>(&'a self) -> BoxFuture<'a, ()>;
+
+    fn universal_plugin_client(
+        &self,
+        _open_authorizer: Option<extension_host::OpenAuthorizer>,
+    ) -> Option<extension_host::UniversalPluginClient> {
+        None
+    }
 }
 
 impl ManagedRpcSession for ProcessRpcSession {
     fn shutdown<'a>(&'a self) -> BoxFuture<'a, ()> {
         ProcessRpcSession::shutdown(self).boxed()
+    }
+
+    fn universal_plugin_client(
+        &self,
+        open_authorizer: Option<extension_host::OpenAuthorizer>,
+    ) -> Option<extension_host::UniversalPluginClient> {
+        let session = Arc::new(self.clone_session());
+        let client = extension_host::UniversalPluginClient::new(session);
+        Some(match open_authorizer {
+            Some(authorizer) => client.with_open_authorizer(authorizer),
+            None => client,
+        })
     }
 }
 

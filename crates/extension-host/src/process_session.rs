@@ -81,8 +81,17 @@ impl ProcessRpcSessionConfig {
 }
 
 struct ProcessRpcSessionOwner {
-    client: JsonRpcClient,
-    process: Option<ProcessHandle>,
+    client: Option<Arc<StdMutex<Option<JsonRpcClient>>>>,
+    process: Option<Arc<StdMutex<Option<ProcessHandle>>>>,
+}
+
+impl Clone for ProcessRpcSessionOwner {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            process: self.process.clone(),
+        }
+    }
 }
 
 /// 一个与业务无关的 native child process JSON-RPC session。
@@ -99,8 +108,10 @@ pub struct ProcessRpcSession {
 impl ProcessRpcSession {
     /// 启动子进程、建立 transport、执行 init 握手并返回 session。
     pub async fn start(config: ProcessRpcSessionConfig) -> HostResult<Self> {
-        let mut process = crate::process::spawn(config.spawn.clone()).await?;
-        let stream = process.take_stream().ok_or_else(|| {
+        let mut spawned = crate::process::spawn(config.spawn.clone()).await?;
+        let stream = spawned.take_stream();
+        let process = Some(Arc::new(StdMutex::new(Some(spawned))));
+        let stream = stream.ok_or_else(|| {
             HostError::Config(format!(
                 "process `{}` did not return a connected transport",
                 config.label
@@ -114,16 +125,23 @@ impl ProcessRpcSession {
         } else {
             JsonRpcClient::start(transport)
         };
-        Self::start_with_client(client, Some(process), config).await
+        Self::start_with_client(client, process, config).await
     }
 
     pub(crate) async fn start_with_client(
         mut client: JsonRpcClient,
-        process: Option<ProcessHandle>,
+        process: Option<Arc<StdMutex<Option<ProcessHandle>>>>,
         config: ProcessRpcSessionConfig,
     ) -> HostResult<Self> {
         let notifications = client.take_notifications();
-        let handle = client.handle();
+        let client = Some(Arc::new(StdMutex::new(Some(client))));
+        let handle = client
+            .as_ref()
+            .and_then(|client| {
+                let guard = client.lock().expect("client owner mutex poisoned");
+                guard.as_ref().map(JsonRpcClient::handle)
+            })
+            .expect("client owner is present during construction");
         let session = negotiate(&handle, config.negotiation).await?;
 
         Ok(Self {
@@ -170,6 +188,28 @@ impl ProcessRpcSession {
         &self.session
     }
 
+    /// Clone this session without transferring ownership.
+    ///
+    /// All clones share the same JSON-RPC transport. Only one owner should
+    /// invoke `shutdown`; activation managers therefore retain their original
+    /// managed session and use clones only for typed request facades.
+    pub fn clone_session(&self) -> Self {
+        let owner = self
+            .owner
+            .lock()
+            .expect("process owner mutex poisoned")
+            .clone();
+        Self {
+            handle: self.handle.clone(),
+            session: self.session.clone(),
+            owner: StdMutex::new(owner),
+            notifications: StdMutex::new(None),
+            request_timeout: self.request_timeout,
+            shutdown_grace_ms: self.shutdown_grace_ms,
+            label: self.label.clone(),
+        }
+    }
+
     pub fn supports(&self, capability: &str) -> bool {
         self.session.has_feature(capability)
     }
@@ -205,8 +245,17 @@ impl ProcessRpcSession {
             .expect("process owner mutex poisoned")
             .take();
         if let Some(ProcessRpcSessionOwner { client, process }) = owner {
-            client.shutdown().await;
-            drop(process);
+            if let Some(client) =
+                client.and_then(|client| client.lock().expect("client owner mutex poisoned").take())
+            {
+                client.shutdown().await;
+            }
+            if let Some(process) = process {
+                let _ = process
+                    .lock()
+                    .expect("process handle mutex poisoned")
+                    .take();
+            }
         }
     }
 }

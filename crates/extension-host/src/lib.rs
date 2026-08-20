@@ -34,7 +34,7 @@ pub use runtime::{
     IpcExtensionRuntime,
 };
 pub use transport::{FramedTransport, ReadFramed, WriteFramed};
-pub use universal_plugin::UniversalPluginClient;
+pub use universal_plugin::{OpenAuthorizer, UniversalPluginClient};
 
 /// Default request timeout in milliseconds.
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;

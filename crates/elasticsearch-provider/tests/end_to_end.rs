@@ -198,6 +198,7 @@ struct TestHarness {
     root: tempfile::TempDir,
     records: Arc<std::sync::Mutex<Vec<RecordedRequest>>>,
     port: u16,
+    cloned_session: extension_host::ProcessRpcSession,
 }
 
 async fn harness(secret_allowed: bool) -> TestHarness {
@@ -258,6 +259,8 @@ async fn harness(secret_allowed: bool) -> TestHarness {
             .await
             .expect("start provider"),
     );
+    let cloned_session = session.clone_session();
+    assert!(!cloned_session.is_closed());
     let authorizer = Arc::new(ResourceOpenAuthorizer::new(permissions).into_host_authorizer());
     let client = UniversalPluginClient::new(Arc::clone(&session)).with_open_authorizer(authorizer);
     TestHarness {
@@ -266,6 +269,7 @@ async fn harness(secret_allowed: bool) -> TestHarness {
         root,
         records,
         port,
+        cloned_session,
     }
 }
 
@@ -392,6 +396,7 @@ async fn provider_performs_authenticated_read_only_http_operations() {
         .expect("close");
     harness.session.shutdown().await;
     assert!(harness.session.is_closed());
+    assert!(harness.cloned_session.is_closed());
 
     let records = harness.records.lock().expect("records lock");
     assert_eq!(5, records.len());
