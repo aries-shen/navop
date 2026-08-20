@@ -7,6 +7,7 @@
 
 use extension_protocol::{
     conn::SecretRef,
+    declarative_ui::{UiActionRequest, UiStateOperation, UiStatePatch},
     envelope::{Request, RequestId, Response, RpcMessage},
     error::{ProtocolError, error_codes},
     framing::{recv_msg_async, send_msg_async},
@@ -419,19 +420,19 @@ where
             Ok(Value::Null)
         }
         method::UI_ACTION => {
-            let request_id = request
-                .params
-                .get("request_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let action = request
-                .params
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            ui_patch(&request_id, &action)
+            let params: UiActionRequest = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            let Some(resource) = state.resource.as_ref() else {
+                return (Response::err(request.id, *resource_error()), false);
+            };
+            ui_patch(resource, &params).await
         }
         method::SHUTDOWN => {
             state.resource = None;
@@ -449,21 +450,35 @@ where
     (response, should_exit)
 }
 
-fn ui_patch(request_id: &str, action: &str) -> ProviderResult {
-    if action != "refresh-resources" {
+async fn ui_patch(resource: &ElasticsearchResource, request: &UiActionRequest) -> ProviderResult {
+    if request.action != "refresh-resources" {
         return Err(boxed_error(
             error_codes::METHOD_NOT_FOUND,
-            format!("unknown UI action `{action}`"),
+            format!("unknown UI action `{}`", request.action),
         ));
     }
-    Ok(json!({
-        "expected_revision": 7,
-        "operations": [
-            {"operation": "set", "key": "provider_status", "value": "ready"},
-            {"operation": "set", "key": "indices_json", "value": "{\"indices\":[]}"},
-            {"operation": "set", "key": "last_request_id", "value": request_id}
-        ]
-    }))
+    let indices = execute(resource, "elasticsearch/index/list", &Value::Null).await?;
+    let normalized = normalize_indices(indices);
+    let indices_json = serde_json::to_string(&normalized)
+        .map_err(|error| boxed_invalid_params(error.to_string()))?;
+    let patch = UiStatePatch {
+        expected_revision: request.expected_revision,
+        operations: vec![
+            UiStateOperation::Set {
+                key: "provider_status".to_owned(),
+                value: "ready".to_owned(),
+            },
+            UiStateOperation::Set {
+                key: "indices_json".to_owned(),
+                value: indices_json,
+            },
+            UiStateOperation::Set {
+                key: "last_request_id".to_owned(),
+                value: request.request_id.clone(),
+            },
+        ],
+    };
+    serde_json::to_value(patch).map_err(|error| boxed_invalid_params(error.to_string()))
 }
 
 fn boxed_error(

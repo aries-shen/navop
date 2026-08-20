@@ -364,6 +364,24 @@ async fn provider_performs_authenticated_read_only_http_operations() {
         .await
         .expect("UI patch");
     let serialized_patch = serde_json::to_string(&patch).expect("serialize patch");
+    assert_eq!(Some(7), patch.expected_revision);
+    let indices_json = patch
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            extension_protocol::declarative_ui::UiStateOperation::Set { key, value }
+                if key == "indices_json" =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .expect("indices UI state");
+    let indices: Value = serde_json::from_str(indices_json).expect("deserialize indices state");
+    assert_eq!(
+        "orders",
+        indices["indices"][0]["name"].as_str().expect("name")
+    );
 
     harness
         .client
@@ -376,7 +394,7 @@ async fn provider_performs_authenticated_read_only_http_operations() {
     assert!(harness.session.is_closed());
 
     let records = harness.records.lock().expect("records lock");
-    assert_eq!(4, records.len());
+    assert_eq!(5, records.len());
     assert!(
         records
             .iter()
@@ -397,6 +415,10 @@ async fn provider_performs_authenticated_read_only_http_operations() {
     assert_eq!(
         ("POST", "/_search"),
         (records[3].method.as_str(), records[3].target.as_str())
+    );
+    assert_eq!(
+        ("GET", "/_cat/indices?format=json"),
+        (records[4].method.as_str(), records[4].target.as_str())
     );
     assert!(
         records
