@@ -14,6 +14,9 @@ use extension_plugin_adapter::{
 use extension_protocol::{
     blob::{BlobCloseParams, BlobReadParams, MAX_BLOB_CHUNK_BYTES},
     declarative_ui::UiActionRequest,
+    job::{
+        JobCloseParams, JobResultParams, JobStartParams, JobState, JobStatusParams, ProgressPercent,
+    },
     resource::{ResourceCloseParams, ResourceInvokeParams, ResourceOpenParams, ResourcePingParams},
     result_ref::ResultRef,
 };
@@ -156,6 +159,9 @@ async fn spawn_http_fixture(listener: TcpListener) -> Arc<std::sync::Mutex<Vec<R
                         let body =
                             String::from_utf8_lossy(buffer.get(body_start..).unwrap_or_default())
                                 .to_string();
+                        if body.contains("\"_all\":\"delayed\"") {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
                         if body.contains("\"_all\":\"large\"") {
                             json!({"took":3,"hits":{"total":{"value":1},"hits":[{"_source":{"payload":"x".repeat(5 * 1024 * 1024)}}]}}).to_string()
                         } else {
@@ -186,6 +192,68 @@ async fn spawn_http_fixture(listener: TcpListener) -> Arc<std::sync::Mutex<Vec<R
         }
     });
     records
+}
+
+#[tokio::test]
+async fn async_search_can_be_cancelled_while_running() {
+    let harness = harness(true).await;
+    let opened = harness
+        .client
+        .open_resource(&open_params(harness.port))
+        .await
+        .expect("open resource");
+    let job = harness
+        .client
+        .start_job(&JobStartParams {
+            resource_id: Some(opened.resource_id.clone()),
+            method: "elasticsearch/search/async".into(),
+            params: json!({"query":"delayed"}),
+        })
+        .await
+        .expect("start delayed job");
+    assert_eq!(JobState::Running, job.state);
+
+    harness
+        .client
+        .cancel_job(&extension_protocol::job::JobCancelParams {
+            job_id: job.job_id.clone(),
+        })
+        .await
+        .expect("cancel job");
+    let status = harness
+        .client
+        .job_status(&JobStatusParams {
+            job_id: job.job_id.clone(),
+        })
+        .await
+        .expect("cancelled job status");
+    assert_eq!(JobState::Cancelled, status.state);
+
+    let result = harness
+        .client
+        .job_result(&JobResultParams {
+            job_id: job.job_id.clone(),
+        })
+        .await
+        .expect_err("cancelled job result");
+    assert!(matches!(
+        result,
+        extension_host::HostError::Protocol(ref error)
+            if error.code == extension_protocol::error::error_codes::REQUEST_CANCELLED
+    ));
+    harness
+        .client
+        .close_job(&JobCloseParams { job_id: job.job_id })
+        .await
+        .expect("close cancelled job");
+    harness
+        .client
+        .close_resource(&ResourceCloseParams {
+            resource_id: opened.resource_id,
+        })
+        .await
+        .expect("close resource");
+    harness.session.shutdown().await;
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -290,6 +358,26 @@ fn open_params(port: u16) -> ResourceOpenParams {
         }),
         metadata: None,
     }
+}
+
+async fn wait_for_job_success(
+    client: &extension_host::UniversalPluginClient,
+    job_id: &str,
+) -> extension_protocol::job::JobStatusResult {
+    for _ in 0..100 {
+        let status = client
+            .job_status(&JobStatusParams {
+                job_id: job_id.to_owned(),
+            })
+            .await
+            .expect("job status");
+        if status.state == JobState::Succeeded {
+            return status;
+        }
+        assert_eq!(JobState::Running, status.state, "job failed: {status:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("job did not complete within the test deadline");
 }
 
 #[tokio::test]
@@ -464,6 +552,97 @@ async fn network_permission_is_enforced_before_provider_rpc() {
         protocol.code
     );
     assert!(harness.records.lock().expect("records lock").is_empty());
+    harness.session.shutdown().await;
+}
+
+#[tokio::test]
+async fn async_search_uses_managed_job_and_blob_lifecycles() {
+    let harness = harness(true).await;
+    let opened = harness
+        .client
+        .open_resource(&open_params(harness.port))
+        .await
+        .expect("open resource");
+
+    let small = harness
+        .client
+        .start_job(&JobStartParams {
+            resource_id: Some(opened.resource_id.clone()),
+            method: "elasticsearch/search/async".into(),
+            params: json!({"query":"alice"}),
+        })
+        .await
+        .expect("start small job");
+    assert_eq!(JobState::Running, small.state);
+    let small_status = wait_for_job_success(&harness.client, &small.job_id).await;
+    assert_eq!(
+        Some(ProgressPercent::new(100).expect("valid progress")),
+        small_status.progress_percent
+    );
+    let small_result = harness
+        .client
+        .job_result(&JobResultParams {
+            job_id: small.job_id.clone(),
+        })
+        .await
+        .expect("small job result");
+    assert!(matches!(small_result.result, ResultRef::Inline { .. }));
+    harness
+        .client
+        .close_job(&JobCloseParams {
+            job_id: small.job_id,
+        })
+        .await
+        .expect("close small job");
+
+    let large = harness
+        .client
+        .start_job(&JobStartParams {
+            resource_id: Some(opened.resource_id.clone()),
+            method: "elasticsearch/search/async".into(),
+            params: json!({"query":"large"}),
+        })
+        .await
+        .expect("start large job");
+    wait_for_job_success(&harness.client, &large.job_id).await;
+    let large_result = harness
+        .client
+        .job_result(&JobResultParams {
+            job_id: large.job_id.clone(),
+        })
+        .await
+        .expect("large job result");
+    let ResultRef::Blob { id: blob_id } = large_result.result else {
+        panic!("large job result should use a blob");
+    };
+    harness
+        .client
+        .close_job(&JobCloseParams {
+            job_id: large.job_id.clone(),
+        })
+        .await
+        .expect("close large job");
+    let error = harness
+        .client
+        .read_blob(&BlobReadParams {
+            blob_id,
+            max_bytes: Some(1024),
+        })
+        .await
+        .expect_err("job-owned blob released");
+    assert!(matches!(
+        error,
+        extension_host::HostError::Protocol(ref protocol)
+            if protocol.code == extension_protocol::error::error_codes::RESOURCE_CLOSED
+    ));
+
+    harness
+        .client
+        .close_resource(&ResourceCloseParams {
+            resource_id: opened.resource_id,
+        })
+        .await
+        .expect("close resource");
     harness.session.shutdown().await;
 }
 

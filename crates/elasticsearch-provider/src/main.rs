@@ -14,6 +14,10 @@ use extension_protocol::{
     error::{ProtocolError, error_codes},
     framing::{recv_msg_async, send_msg_async},
     host::ResolveSecretParams,
+    job::{
+        JobCancelParams, JobCloseParams, JobResultParams, JobResultResult, JobStartParams,
+        JobStartResult, JobState, JobStatusParams, JobStatusResult, ProgressPercent,
+    },
     lifecycle::InitResult,
     method,
     resource::{
@@ -31,6 +35,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use url::Url;
 use uuid::Uuid;
@@ -43,10 +48,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOTAL_BLOB_BYTES: usize = 32 * 1024 * 1024;
+const MAX_JOBS: usize = 64;
 
 type ProviderResult = Result<Value, Box<ProtocolError>>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ElasticsearchResource {
     base_url: String,
     api_key: Vec<u8>,
@@ -55,6 +61,7 @@ struct ElasticsearchResource {
 struct ProviderState {
     resource: Option<ElasticsearchResource>,
     blobs: HashMap<String, ProviderBlob>,
+    jobs: HashMap<String, ProviderJob>,
     next_reverse_request_id: AtomicI64,
 }
 
@@ -63,6 +70,16 @@ struct ProviderBlob {
     data: Vec<u8>,
     offset: usize,
     closed: bool,
+}
+
+#[derive(Debug)]
+struct ProviderJob {
+    state: JobState,
+    progress_percent: Option<ProgressPercent>,
+    message: Option<String>,
+    result: Option<JobResultResult>,
+    completion: Option<mpsc::Receiver<Result<Value, Box<ProtocolError>>>>,
+    cancellation: Option<oneshot::Sender<()>>,
 }
 
 struct IpcParts<R, W>
@@ -79,6 +96,7 @@ impl ProviderState {
         Self {
             resource: None,
             blobs: HashMap::new(),
+            jobs: HashMap::new(),
             next_reverse_request_id: AtomicI64::new(1),
         }
     }
@@ -154,6 +172,217 @@ impl ProviderState {
 
     fn close_blob(&mut self, params: BlobCloseParams) {
         self.blobs.remove(&params.blob_id);
+    }
+
+    fn start_job(
+        &mut self,
+        params: JobStartParams,
+        resource: ElasticsearchResource,
+    ) -> Result<JobStartResult, Box<ProtocolError>> {
+        if params.resource_id.as_deref() != Some(RESOURCE_ID) {
+            return Err(resource_error());
+        }
+        if params.method != "elasticsearch/search/async" {
+            return Err(boxed_error(
+                error_codes::METHOD_NOT_FOUND,
+                format!("unknown Elasticsearch job method `{}`", params.method),
+            ));
+        }
+        if self.jobs.len() >= MAX_JOBS {
+            return Err(boxed_error(
+                error_codes::RESOURCE_BUSY,
+                "Elasticsearch job limit reached",
+            ));
+        }
+        search_body(&params.params)?;
+        let job_id = format!("es-job-{}", Uuid::new_v4());
+        let (completion_tx, completion_rx) = mpsc::channel(1);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::select! {
+                result = execute(&resource, "elasticsearch/search", &params.params) => {
+                    let _ = completion_tx.send(result).await;
+                }
+                _ = cancel_rx => {}
+            }
+        });
+        self.jobs.insert(
+            job_id.clone(),
+            ProviderJob {
+                state: JobState::Running,
+                progress_percent: None,
+                message: Some("search running".to_owned()),
+                result: None,
+                completion: Some(completion_rx),
+                cancellation: Some(cancel_tx),
+            },
+        );
+        Ok(JobStartResult {
+            job_id,
+            state: JobState::Running,
+        })
+    }
+
+    fn poll_job(&mut self, job_id: &str) {
+        let outcome = {
+            let Some(job) = self.jobs.get_mut(job_id) else {
+                return;
+            };
+            if job.state != JobState::Running {
+                return;
+            }
+            let Some(mut completion) = job.completion.take() else {
+                job.state = JobState::Failed;
+                job.message = Some("search worker is unavailable".to_owned());
+                return;
+            };
+            match completion.try_recv() {
+                Ok(Ok(value)) => Some(Ok(value)),
+                Ok(Err(error)) => Some(Err(error.message)),
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    job.completion = Some(completion);
+                    None
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    Some(Err("search worker terminated".to_owned()))
+                }
+            }
+        };
+
+        let Some(outcome) = outcome else {
+            return;
+        };
+        match outcome {
+            Ok(value) => self.complete_job(job_id, value),
+            Err(message) => {
+                if let Some(job) = self.jobs.get_mut(job_id) {
+                    job.state = JobState::Failed;
+                    job.progress_percent = None;
+                    job.message = Some(message);
+                    job.result = None;
+                }
+            }
+        }
+    }
+
+    fn complete_job(&mut self, job_id: &str, value: Value) {
+        let value = normalize_search(value);
+        let data = match serde_json::to_vec(&value) {
+            Ok(data) => data,
+            Err(error) => {
+                if let Some(job) = self.jobs.get_mut(job_id) {
+                    job.state = JobState::Failed;
+                    job.message = Some(error.to_string());
+                    job.result = None;
+                }
+                return;
+            }
+        };
+        let result_ref = if should_stream_blob(data.len() as u64) {
+            match self.store_blob(data) {
+                Some(blob_id) => ResultRef::Blob { id: blob_id },
+                None => {
+                    if let Some(job) = self.jobs.get_mut(job_id) {
+                        job.state = JobState::Failed;
+                        job.progress_percent = None;
+                        job.message = Some(
+                            "Elasticsearch job result exceeds the provider blob budget".to_owned(),
+                        );
+                        job.result = None;
+                    }
+                    return;
+                }
+            }
+        } else {
+            ResultRef::Inline { value }
+        };
+        if let Some(job) = self.jobs.get_mut(job_id) {
+            job.state = JobState::Succeeded;
+            job.progress_percent = Some(ProgressPercent::new(100).expect("valid progress"));
+            job.message = Some("search completed".to_owned());
+            job.result = Some(JobResultResult { result: result_ref });
+        }
+    }
+
+    fn job_status(&self, params: JobStatusParams) -> Result<JobStatusResult, Box<ProtocolError>> {
+        let job = self
+            .jobs
+            .get(&params.job_id)
+            .ok_or_else(|| boxed_error(error_codes::RESOURCE_CLOSED, "job is closed or unknown"))?;
+        Ok(JobStatusResult {
+            job_id: params.job_id,
+            state: job.state,
+            progress_percent: job.progress_percent,
+            message: job.message.clone(),
+        })
+    }
+
+    fn cancel_job(&mut self, params: JobCancelParams) -> Result<(), Box<ProtocolError>> {
+        let Some(job) = self.jobs.get_mut(&params.job_id) else {
+            return Err(boxed_error(
+                error_codes::RESOURCE_CLOSED,
+                "job is closed or unknown",
+            ));
+        };
+        if job.state == JobState::Running {
+            job.state = JobState::Cancelled;
+            job.progress_percent = None;
+            job.message = Some("search cancelled".to_owned());
+            job.result = None;
+            job.completion = None;
+            if let Some(cancel) = job.cancellation.take() {
+                let _ = cancel.send(());
+            }
+        }
+        Ok(())
+    }
+
+    fn job_result(&self, params: JobResultParams) -> Result<JobResultResult, Box<ProtocolError>> {
+        let job = self
+            .jobs
+            .get(&params.job_id)
+            .ok_or_else(|| boxed_error(error_codes::RESOURCE_CLOSED, "job is closed or unknown"))?;
+        match job.state {
+            JobState::Succeeded => {}
+            JobState::Running => {
+                return Err(boxed_error(
+                    error_codes::RESOURCE_BUSY,
+                    "job result is not ready",
+                ));
+            }
+            JobState::Cancelled => {
+                return Err(boxed_error(
+                    error_codes::REQUEST_CANCELLED,
+                    "job was cancelled",
+                ));
+            }
+            state => {
+                return Err(boxed_error(
+                    error_codes::INTERNAL_ERROR,
+                    format!("job failed with state `{state:?}`"),
+                ));
+            }
+        }
+        job.result
+            .clone()
+            .ok_or_else(|| boxed_error(error_codes::INTERNAL_ERROR, "job result is unavailable"))
+    }
+
+    fn close_job(&mut self, params: JobCloseParams) -> Result<(), Box<ProtocolError>> {
+        if let Some(mut job) = self.jobs.remove(&params.job_id) {
+            if job.state == JobState::Running {
+                if let Some(cancel) = job.cancellation.take() {
+                    let _ = cancel.send(());
+                }
+            }
+            if let Some(JobResultResult {
+                result: ResultRef::Blob { id },
+            }) = job.result
+            {
+                self.blobs.remove(&id);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -406,6 +635,11 @@ where
                 .with_method(method::RESOURCE_CLOSE)
                 .with_method(method::BLOB_READ)
                 .with_method(method::BLOB_CLOSE)
+                .with_method(method::JOB_START)
+                .with_method(method::JOB_STATUS)
+                .with_method(method::JOB_CANCEL)
+                .with_method(method::JOB_RESULT)
+                .with_method(method::JOB_CLOSE)
                 .with_method(method::UI_ACTION),
         )
         .map_err(|error| boxed_invalid_params(error.to_string())),
@@ -497,6 +731,89 @@ where
             state.close_blob(params);
             Ok(Value::Null)
         }
+        method::JOB_START => {
+            let params: JobStartParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            let Some(resource) = state.resource.clone() else {
+                return (Response::err(request.id, *resource_error()), false);
+            };
+            match state.start_job(params, resource) {
+                Ok(result) => serde_json::to_value(result)
+                    .map_err(|error| boxed_invalid_params(error.to_string())),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
+        method::JOB_STATUS => {
+            let params: JobStatusParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            state.poll_job(&params.job_id);
+            match state.job_status(params) {
+                Ok(result) => serde_json::to_value(result)
+                    .map_err(|error| boxed_invalid_params(error.to_string())),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
+        method::JOB_CANCEL => {
+            let params: JobCancelParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            match state.cancel_job(params) {
+                Ok(()) => Ok(Value::Null),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
+        method::JOB_RESULT => {
+            let params: JobResultParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            state.poll_job(&params.job_id);
+            match state.job_result(params) {
+                Ok(result) => serde_json::to_value(result)
+                    .map_err(|error| boxed_invalid_params(error.to_string())),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
+        method::JOB_CLOSE => {
+            let params: JobCloseParams = match serde_json::from_value(request.params) {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
+                        false,
+                    );
+                }
+            };
+            match state.close_job(params) {
+                Ok(()) => Ok(Value::Null),
+                Err(error) => return (Response::err(request.id, *error), false),
+            }
+        }
         method::RESOURCE_INVOKE => {
             let params: ResourceInvokeParams = match serde_json::from_value(request.params) {
                 Ok(value) => value,
@@ -540,6 +857,7 @@ where
             }
             state.resource = None;
             state.blobs.clear();
+            state.jobs.clear();
             Ok(Value::Null)
         }
         method::UI_ACTION => {
@@ -560,6 +878,7 @@ where
         method::SHUTDOWN => {
             state.resource = None;
             state.blobs.clear();
+            state.jobs.clear();
             Ok(Value::Null)
         }
         _ => Err(boxed_error(
