@@ -19,6 +19,7 @@ struct LegacySidebarButton {
     id: &'static str,
     icon: IconName,
     label: String,
+    show_label: bool,
     collapsed: bool,
     selected: bool,
 }
@@ -44,6 +45,7 @@ impl HomePage {
                     id: "legacy-more-connection-types",
                     icon: IconName::Ellipsis,
                     label: t!("Home.more_connection_types").to_string(),
+                    show_label: false,
                     collapsed,
                     selected: is_overflow_connection_type(self.selected_filter),
                 },
@@ -82,6 +84,7 @@ impl HomePage {
                 id: "legacy-more-applications",
                 icon: IconName::Ellipsis,
                 label: t!("Home.more_applications").to_string(),
+                show_label: false,
                 collapsed,
                 selected: false,
             },
@@ -220,6 +223,7 @@ impl HomePage {
                 id: legacy_application_id(application),
                 icon: legacy_application_icon(application),
                 label: application.label(),
+                show_label: true,
                 collapsed,
                 selected: false,
             },
@@ -240,12 +244,13 @@ impl HomePage {
             id,
             icon,
             label,
+            show_label,
             collapsed,
             selected,
         } = button;
         let listener = cx.listener(move |home, _, window, cx| on_click(home, window, cx));
         if collapsed {
-            IconButton::new(id, Icon::new(icon).color())
+            IconButton::new(id, Icon::new(icon).mono())
                 .hit_size(Size::Size(cx.theme().geometry.layout.global_rail_item))
                 .glyph_size(IconSize::Medium)
                 .selected(selected)
@@ -254,11 +259,14 @@ impl HomePage {
                 .on_click(listener)
                 .into_any_element()
         } else {
+            let tooltip = label.clone();
             Button::new(id)
-                .icon(Icon::new(icon).color())
-                .label(label)
+                .icon(Icon::new(icon).mono())
                 .w_full()
-                .justify_start()
+                .when(show_label, |button| button.label(label).justify_start())
+                .when(!show_label, |button| {
+                    button.justify_center().tooltip(tooltip)
+                })
                 .selected(selected)
                 .when(selected, |button| button.bg(cx.theme().list_active))
                 .on_click(listener)
@@ -364,16 +372,16 @@ fn legacy_application_id(application: NavigationApplication) -> &'static str {
 
 fn legacy_application_icon(application: NavigationApplication) -> IconName {
     match application {
-        NavigationApplication::AiWorkbench => IconName::AI,
-        NavigationApplication::Team => IconName::TeamColor,
-        NavigationApplication::Notes => IconName::NotesColor,
+        NavigationApplication::AiWorkbench => IconName::AILine,
+        NavigationApplication::Team => IconName::TeamLine,
+        NavigationApplication::Notes => IconName::NotesLine,
         #[cfg(feature = "api-testing")]
         NavigationApplication::ApiTesting => IconName::Network,
         NavigationApplication::JsonFormatter => IconName::Json,
         NavigationApplication::SessionLogs => IconName::Terminal,
         NavigationApplication::CredentialVault => IconName::Key,
-        NavigationApplication::Extensions => IconName::ExtensionsColor,
-        NavigationApplication::Settings => IconName::SettingColor,
+        NavigationApplication::Extensions => IconName::ExtensionsLine,
+        NavigationApplication::Settings => IconName::Settings,
     }
 }
 

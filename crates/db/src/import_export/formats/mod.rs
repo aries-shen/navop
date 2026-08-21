@@ -1,14 +1,18 @@
 use crate::DatabasePlugin;
+use crate::connection::{DbConnection, DbError};
 use crate::import_export::ImportConfig;
+use crate::types::{ColumnInfo, TableCellValue};
 
 pub mod csv;
 mod import_execution;
 pub mod json;
+mod json_import;
 pub mod sql;
-mod sql_export;
+pub(crate) mod sql_export;
 pub mod txt;
 pub mod xml;
 mod xml_codec;
+mod xml_import;
 
 pub use csv::CsvFormatHandler;
 pub use json::JsonFormatHandler;
@@ -22,6 +26,51 @@ pub(super) fn format_import_table_reference(
     table: &str,
 ) -> String {
     plugin.format_table_reference(&config.database, config.schema.as_deref(), table)
+}
+
+pub(super) async fn load_import_columns(
+    plugin: &dyn DatabasePlugin,
+    connection: &dyn DbConnection,
+    config: &ImportConfig,
+    table: &str,
+) -> anyhow::Result<Vec<ColumnInfo>> {
+    match plugin
+        .list_columns(connection, &config.database, config.schema.clone(), table)
+        .await
+    {
+        Ok(columns) => Ok(columns),
+        Err(error) if is_not_supported(&error) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn format_import_text_value(
+    plugin: &dyn DatabasePlugin,
+    value: &Option<String>,
+    column_name: &str,
+    table_columns: &[ColumnInfo],
+) -> String {
+    let column = table_columns
+        .iter()
+        .find(|column| column.name == column_name)
+        .or_else(|| {
+            table_columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(column_name))
+        });
+    let value = value.as_ref().map_or(TableCellValue::Null, |value| {
+        TableCellValue::Text(value.clone())
+    });
+    plugin.format_table_change_value(&value, column)
+}
+
+fn is_not_supported(error: &anyhow::Error) -> bool {
+    error.to_string().contains("operation not supported:")
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<DbError>()
+                .is_some_and(|error| matches!(error, DbError::NotSupported(_)))
+        })
 }
 
 #[cfg(test)]

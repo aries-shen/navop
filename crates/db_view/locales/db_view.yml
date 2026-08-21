@@ -617,6 +617,26 @@ ConnectionForm:
     en: Test connection failed
     zh-CN: 测试连接失败
     zh-HK: 測試連線失敗
+  oracle_driver_mode:
+    en: Oracle driver
+    zh-CN: Oracle 驱动
+    zh-HK: Oracle 驅動
+  oracle_driver_native:
+    en: Native Oracle Client
+    zh-CN: 原生 Oracle 客户端
+    zh-HK: 原生 Oracle 客戶端
+  oracle_driver_native_desc:
+    en: Requires Oracle Instant Client to be downloaded and installed.
+    zh-CN: 需要下载并安装 Oracle Instant Client。
+    zh-HK: 需要下載並安裝 Oracle Instant Client。
+  oracle_driver_go:
+    en: Pure Go Oracle driver
+    zh-CN: 纯 Go Oracle 驱动
+    zh-HK: 純 Go Oracle 驅動
+  oracle_driver_go_desc:
+    en: Does not require Oracle Instant Client, but requires the Oracle Go driver extension.
+    zh-CN: 无需 Oracle Instant Client，但需要安装 Oracle Go 驱动扩展。
+    zh-HK: 無需 Oracle Instant Client，但需要安裝 Oracle Go 驅動擴充套件。
   oracle_client_required:
     en: "Oracle Client is not available: %{error}"
     zh-CN: "未检测到可用的 Oracle Client：%{error}"
@@ -3333,6 +3353,22 @@ Compare:
     en: Target Tables
     zh-CN: 目标表
     zh-HK: 目標表
+  select_target_table:
+    en: Select target table
+    zh-CN: 选择目标表
+    zh-HK: 選擇目標表
+  auto_match_target_tables:
+    en: Multiple source tables are automatically matched to target tables by name
+    zh-CN: 多表模式会按同名表自动匹配目标表
+    zh-HK: 多表模式會按同名表自動匹配目標表
+  matched_target_tables:
+    en: "Matched %{matched}/%{total} tables"
+    zh-CN: "已匹配 %{matched}/%{total} 张表"
+    zh-HK: "已匹配 %{matched}/%{total} 張表"
+  missing_target_tables:
+    en: "Missing same-name target tables: %{tables}"
+    zh-CN: "目标端缺少同名表：%{tables}"
+    zh-HK: "目標端缺少同名表：%{tables}"
   no_tables:
     en: No tables
     zh-CN: 暂无表

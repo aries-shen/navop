@@ -3465,6 +3465,130 @@ mod tests {
         MySqlPlugin::new()
     }
 
+    fn column(name: &str, data_type: &str, is_primary_key: bool) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            is_nullable: !is_primary_key,
+            is_primary_key,
+            default_value: None,
+            comment: None,
+            charset: None,
+            collation: None,
+        }
+    }
+
+    #[test]
+    fn test_generate_table_changes_sql_formats_mysql_bit_values_as_literals() {
+        let plugin = create_plugin();
+        let request = TableSaveRequest {
+            database: "comi_app_test".to_string(),
+            schema: None,
+            table: "test_bit".to_string(),
+            columns: vec![
+                column("bit_name", "MYSQL_TYPE_BIT", true),
+                column("text_value", "varchar(20)", false),
+            ],
+            index_infos: vec![],
+            changes: vec![TableRowChange::Updated {
+                original_data: vec!["1".into(), "old".into()],
+                changes: vec![
+                    TableCellChange {
+                        column_index: 0,
+                        column_name: "bit_name".to_string(),
+                        old_value: "1".into(),
+                        new_value: "0".into(),
+                    },
+                    TableCellChange {
+                        column_index: 1,
+                        column_name: "text_value".to_string(),
+                        old_value: "old".into(),
+                        new_value: "1".into(),
+                    },
+                ],
+                rowid: None,
+            }],
+        };
+
+        assert_eq!(
+            "UPDATE `comi_app_test`.`test_bit` SET `bit_name` = 0, `text_value` = '1' WHERE `bit_name` = 1 LIMIT 1;",
+            plugin.generate_table_changes_sql(&request)
+        );
+    }
+
+    #[test]
+    fn test_generate_table_changes_sql_formats_mysql_bit_insert_and_preserves_null() {
+        let plugin = create_plugin();
+        let request = TableSaveRequest {
+            database: "comi_app_test".to_string(),
+            schema: None,
+            table: "test_bit".to_string(),
+            columns: vec![
+                column("id", "tinyint", true),
+                column("bit_name", "bit(1)", false),
+                column("text_value", "varchar(20)", false),
+            ],
+            index_infos: vec![],
+            changes: vec![TableRowChange::Added {
+                data: vec!["1".into(), "b'1'".into(), "1".into()],
+            }],
+        };
+
+        assert_eq!(
+            "INSERT INTO `comi_app_test`.`test_bit` (`id`, `bit_name`, `text_value`) VALUES (1, b'1', '1');",
+            plugin.generate_table_changes_sql(&request)
+        );
+
+        let null_request = TableSaveRequest {
+            changes: vec![TableRowChange::Updated {
+                original_data: vec!["1".into(), "1".into(), "1".into()],
+                changes: vec![TableCellChange {
+                    column_index: 1,
+                    column_name: "bit_name".to_string(),
+                    old_value: "1".into(),
+                    new_value: TableCellValue::Null,
+                }],
+                rowid: None,
+            }],
+            ..request
+        };
+
+        assert_eq!(
+            "UPDATE `comi_app_test`.`test_bit` SET `bit_name` = NULL WHERE `id` = 1 LIMIT 1;",
+            plugin.generate_table_changes_sql(&null_request)
+        );
+    }
+
+    #[test]
+    fn test_generate_table_changes_sql_decodes_mysql_binary_base64() {
+        let plugin = create_plugin();
+        let request = TableSaveRequest {
+            database: "app".to_string(),
+            schema: None,
+            table: "files".to_string(),
+            columns: vec![
+                column("id", "int", true),
+                column("payload", "varbinary(16)", false),
+            ],
+            index_infos: vec![],
+            changes: vec![TableRowChange::Updated {
+                original_data: vec!["1".into(), "AQI=".into()],
+                changes: vec![TableCellChange {
+                    column_index: 1,
+                    column_name: "payload".to_string(),
+                    old_value: "AQI=".into(),
+                    new_value: "3q2+7w==".into(),
+                }],
+                rowid: None,
+            }],
+        };
+
+        assert_eq!(
+            "UPDATE `app`.`files` SET `payload` = X'deadbeef' WHERE `id` = 1 LIMIT 1;",
+            plugin.generate_table_changes_sql(&request)
+        );
+    }
+
     fn cell(value: &str) -> Option<String> {
         Some(value.to_string())
     }

@@ -1018,6 +1018,36 @@ pub struct TelnetLoginStep {
     pub send: String,
 }
 
+/// 按下退格键时发送给 Telnet 服务端的控制字符。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelnetBackspaceCode {
+    /// BS（Backspace，0x08）。
+    Backspace,
+    /// DEL（Delete，0x7F），保持历史默认行为。
+    #[default]
+    Delete,
+}
+
+impl TelnetBackspaceCode {
+    const ALL: [Self; 2] = [Self::Backspace, Self::Delete];
+
+    pub const fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Backspace => "BS (0x08)",
+            Self::Delete => "DEL (0x7F)",
+        }
+    }
+
+    fn is_default(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
 /// Telnet 连接参数
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelnetParams {
@@ -1035,6 +1065,9 @@ pub struct TelnetParams {
     /// 当前设备缺少引用的钥匙串时，仅本次连接提示输入密码。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_password: Option<bool>,
+    /// 按下退格键时发送的控制字符；旧连接默认继续使用 DEL（0x7F）。
+    #[serde(default, skip_serializing_if = "TelnetBackspaceCode::is_default")]
+    pub backspace_code: TelnetBackspaceCode,
     /// 可选登录脚本；旧连接没有该字段时保持为空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub login_script: Vec<TelnetLoginStep>,
@@ -1203,6 +1236,7 @@ impl Default for TelnetParams {
             credential_reference: None,
             prompt_username: None,
             prompt_password: None,
+            backspace_code: TelnetBackspaceCode::default(),
             login_script: Vec::new(),
         }
     }
@@ -2563,6 +2597,16 @@ fn decrypt_json_passwords(json_str: &str) -> String {
     }
 }
 
+pub(crate) fn re_encrypt_sensitive_json(
+    json_str: &str,
+    old_key: &str,
+    new_key: &str,
+) -> anyhow::Result<String> {
+    let mut value: Value = serde_json::from_str(json_str)?;
+    re_encrypt_value(&mut value, old_key, new_key)?;
+    Ok(serde_json::to_string(&value)?)
+}
+
 /// 判断字段名是否为敏感字段
 fn is_sensitive_field(key: &str) -> bool {
     key == "password"
@@ -2575,6 +2619,45 @@ fn is_sensitive_field(key: &str) -> bool {
         || key.ends_with("_passphrase")
         || key.ends_with("_private_key")
         || key.ends_with("_private_key_content")
+}
+
+fn re_encrypt_value(
+    value: &mut Value,
+    old_key: &str,
+    new_key: &str,
+) -> Result<(), crypto::CryptoError> {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if is_sensitive_field(key) {
+                    re_encrypt_string(value, old_key, new_key)?;
+                } else {
+                    re_encrypt_value(value, old_key, new_key)?;
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                re_encrypt_value(value, old_key, new_key)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn re_encrypt_string(
+    value: &mut Value,
+    old_key: &str,
+    new_key: &str,
+) -> Result<(), crypto::CryptoError> {
+    let Value::String(secret) = value else {
+        return Ok(());
+    };
+    if !secret.is_empty() {
+        *secret = crypto::re_encrypt_data(secret, old_key, new_key)?;
+    }
+    Ok(())
 }
 
 /// 递归遍历 JSON Value，加密敏感字段
@@ -3318,6 +3401,7 @@ mod serial_tests {
             credential_reference: None,
             prompt_username: None,
             prompt_password: None,
+            backspace_code: Default::default(),
             login_script: vec![
                 TelnetLoginStep {
                     expect: "login:".to_string(),
@@ -3340,10 +3424,25 @@ mod serial_tests {
             .expect("旧 Telnet 连接缺少 login_script 时应可反序列化");
         assert_eq!(params.host, "10.0.0.1");
         assert_eq!(params.port, 23);
+        assert_eq!(params.backspace_code, TelnetBackspaceCode::Delete);
         assert!(params.login_script.is_empty());
 
         let json = serde_json::to_string(&params).expect("TelnetParams 应可序列化");
+        assert!(!json.contains("backspace_code"));
         assert!(!json.contains("login_script"));
+    }
+
+    #[test]
+    fn telnet_params_roundtrip_with_backspace_code() {
+        let mut params = TelnetParams::default();
+        params.host = "switch.example.com".to_string();
+        params.backspace_code = TelnetBackspaceCode::Backspace;
+
+        let json = serde_json::to_string(&params).expect("TelnetParams 应可序列化");
+        assert!(json.contains(r#""backspace_code":"backspace""#));
+
+        let parsed: TelnetParams = serde_json::from_str(&json).expect("TelnetParams 应可反序列化");
+        assert_eq!(parsed.backspace_code, TelnetBackspaceCode::Backspace);
     }
 
     #[test]
@@ -3354,6 +3453,7 @@ mod serial_tests {
             credential_reference: None,
             prompt_username: None,
             prompt_password: None,
+            backspace_code: Default::default(),
             login_script: vec![TelnetLoginStep {
                 expect: "Username:".to_string(),
                 send: "admin".to_string(),
@@ -3387,6 +3487,7 @@ mod serial_tests {
             }),
             prompt_username: Some(true),
             prompt_password: Some(true),
+            backspace_code: Default::default(),
             login_script: Vec::new(),
         };
 
@@ -3405,6 +3506,7 @@ mod serial_tests {
             credential_reference: None,
             prompt_username: None,
             prompt_password: None,
+            backspace_code: Default::default(),
             login_script: vec![
                 TelnetLoginStep {
                     expect: r"(?i)(?:login|username)\s*:".to_string(),
@@ -3441,6 +3543,7 @@ mod serial_tests {
             credential_reference: None,
             prompt_username: None,
             prompt_password: None,
+            backspace_code: Default::default(),
             login_script: vec![
                 TelnetLoginStep {
                     expect: r"(?i)(?:login|username)\s*:".to_string(),

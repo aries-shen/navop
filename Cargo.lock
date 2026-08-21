@@ -3417,6 +3417,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dsa"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c8573b60d07b5b5cecadc1f978c9b71d5504151e703cbb0439ee4ad301338f3"
+dependencies = [
+ "crypto-bigint",
+ "crypto-common 0.2.2",
+ "crypto-primes",
+ "der 0.8.0",
+ "digest 0.11.3",
+ "rfc6979",
+ "sha2 0.11.0",
+ "signature 3.0.0",
+ "zeroize",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7337,7 +7354,7 @@ checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "main"
-version = "0.10.7"
+version = "0.10.8"
 dependencies = [
  "agent_runtime",
  "ai_chat_view",
@@ -8701,6 +8718,8 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "windows 0.61.3",
+ "zeroize",
 ]
 
 [[package]]
@@ -10676,6 +10695,7 @@ dependencies = [
  "anyhow",
  "cocoa 0.26.0",
  "connection-form",
+ "dunce",
  "futures",
  "gpui",
  "gpui-component",
@@ -10689,6 +10709,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "windows 0.61.3",
  "windows_rdp_host",
 ]
 
@@ -12416,6 +12437,7 @@ dependencies = [
  "argon2 0.6.0-rc.8",
  "bcrypt-pbkdf",
  "ctutils",
+ "dsa",
  "ed25519-dalek 3.0.0",
  "hex",
  "hmac 0.13.0",

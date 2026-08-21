@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[cfg(not(target_os = "macos"))]
+use dunce::canonicalize;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use gpui::ExternalPaths;
 use gpui::{ClipboardEntry, ClipboardItem, Context, Window};
 use remote_desktop::{RemoteDesktopInput, RemoteDesktopProtocol};
@@ -50,14 +51,14 @@ fn validate_remote_clipboard_paths_in_root(
     paths: &[String],
 ) -> anyhow::Result<Vec<PathBuf>> {
     anyhow::ensure!(!paths.is_empty(), "remote clipboard file list is empty");
-    let canonical_root = std::fs::canonicalize(staging_root).map_err(|error| {
+    let canonical_root = canonicalize(staging_root).map_err(|error| {
         anyhow::anyhow!("remote clipboard staging root is unavailable: {error}")
     })?;
     let mut validated = Vec::with_capacity(paths.len());
     for raw_path in paths {
         let path = PathBuf::from(raw_path);
         anyhow::ensure!(path.is_absolute(), "remote clipboard path is not absolute");
-        let canonical_path = std::fs::canonicalize(&path)
+        let canonical_path = canonicalize(&path)
             .map_err(|error| anyhow::anyhow!("remote clipboard path is unavailable: {error}"))?;
         anyhow::ensure!(
             canonical_path != canonical_root && canonical_path.starts_with(&canonical_root),
@@ -76,7 +77,17 @@ fn write_remote_clipboard_files(
     super::clipboard_macos::write_files_to_system_clipboard(paths)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn write_remote_clipboard_files(
+    paths: &[PathBuf],
+    _cx: &mut Context<RemoteDesktopView>,
+) -> anyhow::Result<()> {
+    // GPUI's Windows backend currently ignores ExternalPaths, so publish the
+    // downloaded files as a native CF_HDROP payload here.
+    super::clipboard_windows::write_files_to_system_clipboard(paths)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn write_remote_clipboard_files(
     paths: &[PathBuf],
     cx: &mut Context<RemoteDesktopView>,

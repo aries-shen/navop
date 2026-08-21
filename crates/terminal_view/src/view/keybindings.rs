@@ -27,6 +27,10 @@ pub(super) const TERMINAL_SEARCH_BACKWARD_SHORTCUT: &str = "cmd-g";
 #[cfg(not(target_os = "macos"))]
 pub(super) const TERMINAL_SEARCH_BACKWARD_SHORTCUT: &str = "ctrl-shift-g";
 pub(super) const TERMINAL_TOGGLE_VI_MODE_SHORTCUT: &str = "f7";
+// Escape is terminal input (for example, Vim uses it to leave insert mode).
+// ClearSelection remains available from the context menu and can still be
+// assigned by users, but must not consume Escape by default.
+pub(super) const TERMINAL_CLEAR_SELECTION_DEFAULTS: &[&str] = &[];
 pub(super) fn terminal_shortcut_label(shortcut: &str) -> SharedString {
     Kbd::format(&Keystroke::parse(shortcut).expect("终端快捷键定义非法")).into()
 }
@@ -36,6 +40,7 @@ pub fn init(cx: &mut App) {
     crate::settings::init_settings(cx);
     crate::public_mcp::init(cx);
     init_broadcast_input_registry(cx);
+    crate::quick_command_sync::init_quick_command_sync(cx);
     workspace_explorer::init(cx);
     cx.bind_keys(init_keybindings(cx));
 }
@@ -86,9 +91,13 @@ pub(super) fn init_keybindings(cx: &App) -> Vec<KeyBinding> {
         .map(|key| KeyBinding::new(&key, ClearScreen, Some(TERMINAL_CONTEXT))),
     );
     keybindings.extend(
-        shortcuts_for(cx, action_id::TERMINAL_CLEAR_SELECTION, &["escape"])
-            .into_iter()
-            .map(|key| KeyBinding::new(&key, ClearSelection, Some(TERMINAL_CONTEXT))),
+        shortcuts_for(
+            cx,
+            action_id::TERMINAL_CLEAR_SELECTION,
+            TERMINAL_CLEAR_SELECTION_DEFAULTS,
+        )
+        .into_iter()
+        .map(|key| KeyBinding::new(&key, ClearSelection, Some(TERMINAL_CONTEXT))),
     );
     keybindings.extend(
         shortcuts_for(
@@ -195,7 +204,7 @@ pub(super) fn refreshable_keybindings(cx: &App) -> Vec<KeyBinding> {
     keybindings.extend(rebind_keybindings(
         cx,
         action_id::TERMINAL_CLEAR_SELECTION,
-        &["escape"],
+        TERMINAL_CLEAR_SELECTION_DEFAULTS,
         Some(TERMINAL_CONTEXT),
         ClearSelection,
     ));
@@ -282,7 +291,10 @@ pub(super) fn is_terminal_action_shortcut(keystroke: &Keystroke, cx: &App) -> bo
             action_id::TERMINAL_CLEAR_SCREEN,
             vec![TERMINAL_CLEAR_SCREEN_SHORTCUT],
         ),
-        (action_id::TERMINAL_CLEAR_SELECTION, vec!["escape"]),
+        (
+            action_id::TERMINAL_CLEAR_SELECTION,
+            TERMINAL_CLEAR_SELECTION_DEFAULTS.to_vec(),
+        ),
         (
             action_id::TERMINAL_SEARCH_FORWARD,
             vec![TERMINAL_SEARCH_FORWARD_SHORTCUT],
@@ -312,4 +324,14 @@ pub(super) fn is_terminal_action_shortcut(keystroke: &Keystroke, cx: &App) -> bo
     .any(|(action_id, defaults)| {
         keystroke_matches_shortcuts(keystroke, &shortcuts_for(cx, action_id, &defaults))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TERMINAL_CLEAR_SELECTION_DEFAULTS;
+
+    #[test]
+    fn clear_selection_does_not_consume_escape_by_default() {
+        assert!(TERMINAL_CLEAR_SELECTION_DEFAULTS.is_empty());
+    }
 }

@@ -6,6 +6,7 @@ use std::borrow::Cow;
 
 use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
+use one_core::storage::TelnetBackspaceCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyMods {
@@ -137,7 +138,6 @@ fn plain_special_key(key: &str, mods: KeyMods, mode: &TermMode) -> Option<&'stat
             "tab" => Some("\x09"),
             "escape" => Some("\x1b"),
             "enter" => Some("\x0d"),
-            "backspace" | "back" => Some("\x7f"),
             "home" if app_cursor => Some("\x1bOH"),
             "home" => Some("\x1b[H"),
             "end" if app_cursor => Some("\x1bOF"),
@@ -159,7 +159,6 @@ fn plain_special_key(key: &str, mods: KeyMods, mode: &TermMode) -> Option<&'stat
         KeyMods::Shift => match key {
             "tab" => Some("\x1b[Z"),
             "enter" => Some("\x0a"),
-            "backspace" | "back" => Some("\x7f"),
             "home" if alt_screen => Some("\x1b[1;2H"),
             "end" if alt_screen => Some("\x1b[1;2F"),
             "pageup" if alt_screen => Some("\x1b[5;2~"),
@@ -168,11 +167,9 @@ fn plain_special_key(key: &str, mods: KeyMods, mode: &TermMode) -> Option<&'stat
         },
         KeyMods::Alt => match key {
             "enter" => Some("\x1b\x0d"),
-            "backspace" | "back" => Some("\x1b\x7f"),
             _ => None,
         },
         KeyMods::Ctrl => match key {
-            "backspace" | "back" => Some("\x08"),
             "space" => Some("\x00"),
             _ => None,
         },
@@ -254,6 +251,29 @@ fn alt_meta_sequence(ks: &Keystroke, mods: KeyMods) -> Option<String> {
     Some(format!("\x1b{key}"))
 }
 
+fn backspace_sequence(
+    key: &str,
+    mods: KeyMods,
+    backspace_code: TelnetBackspaceCode,
+) -> Option<&'static str> {
+    if !matches!(key, "backspace" | "back") {
+        return None;
+    }
+
+    match mods {
+        KeyMods::None | KeyMods::Shift => Some(match backspace_code {
+            TelnetBackspaceCode::Backspace => "\x08",
+            TelnetBackspaceCode::Delete => "\x7f",
+        }),
+        KeyMods::Alt => Some(match backspace_code {
+            TelnetBackspaceCode::Backspace => "\x1b\x08",
+            TelnetBackspaceCode::Delete => "\x1b\x7f",
+        }),
+        KeyMods::Ctrl => Some("\x08"),
+        _ => None,
+    }
+}
+
 /// 将按键转换为终端转义序列。
 ///
 /// 对于普通可打印字符返回 `None`，调用方应使用原始字符写入 PTY。
@@ -262,8 +282,27 @@ pub fn to_esc_str(
     term_mode: &TermMode,
     use_alt_as_meta: bool,
 ) -> Option<Cow<'static, str>> {
+    to_esc_str_with_backspace(
+        keystroke,
+        term_mode,
+        use_alt_as_meta,
+        TelnetBackspaceCode::default(),
+    )
+}
+
+/// 将按键转换为终端转义序列，并为退格键应用指定的控制字符。
+pub fn to_esc_str_with_backspace(
+    keystroke: &Keystroke,
+    term_mode: &TermMode,
+    use_alt_as_meta: bool,
+    backspace_code: TelnetBackspaceCode,
+) -> Option<Cow<'static, str>> {
     let key = keystroke.key.as_str();
     let mods = KeyMods::from_keystroke(keystroke);
+
+    if let Some(seq) = backspace_sequence(key, mods, backspace_code) {
+        return Some(Cow::Borrowed(seq));
+    }
 
     if let Some(seq) = plain_special_key(key, mods, term_mode) {
         return Some(Cow::Borrowed(seq));
@@ -288,12 +327,37 @@ pub fn to_esc_str(
     None
 }
 
+/// Returns symbol input that should bypass the platform IME and be sent
+/// directly to the PTY.
+///
+/// Non-ASCII input sources (notably Chinese IMEs) can keep punctuation such as
+/// `*` in marked-text state until another key commits it. Terminals need that
+/// punctuation immediately, while alphabetic keys must still be left available
+/// to the IME for actual composition.
+pub fn direct_symbol_input(keystroke: &Keystroke) -> Option<&str> {
+    let modifiers = keystroke.modifiers;
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        return None;
+    }
+    if keystroke.key == "space" {
+        return None;
+    }
+
+    let key_char = keystroke.key_char.as_deref()?;
+    (!key_char.is_empty()
+        && key_char
+            .chars()
+            .all(|ch| !ch.is_control() && !ch.is_alphanumeric() && !ch.is_whitespace()))
+    .then_some(key_char)
+}
+
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::term::TermMode;
     use gpui::Keystroke;
+    use one_core::storage::TelnetBackspaceCode;
 
-    use super::to_esc_str;
+    use super::{to_esc_str, to_esc_str_with_backspace};
 
     #[test]
     fn app_cursor_arrow_mapping() {
@@ -342,12 +406,31 @@ mod tests {
     }
 
     #[test]
-    fn backspace_emits_del_by_default() {
-        let bs = Keystroke::parse("backspace").unwrap();
+    fn escape_emits_escape_character() {
+        let escape = Keystroke::parse("escape").unwrap();
         assert_eq!(
-            to_esc_str(&bs, &TermMode::NONE, false).unwrap().as_ref(),
-            "\x7f"
+            to_esc_str(&escape, &TermMode::NONE, false)
+                .unwrap()
+                .as_ref(),
+            "\x1b"
         );
+    }
+
+    #[test]
+    fn backspace_emits_del_by_default_for_plain_shift_and_alt() {
+        for (keystroke, expected) in [
+            ("backspace", "\x7f"),
+            ("shift-backspace", "\x7f"),
+            ("alt-backspace", "\x1b\x7f"),
+        ] {
+            let backspace = Keystroke::parse(keystroke).unwrap();
+            assert_eq!(
+                to_esc_str(&backspace, &TermMode::NONE, false)
+                    .unwrap()
+                    .as_ref(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -355,6 +438,44 @@ mod tests {
         let bs = Keystroke::parse("ctrl-backspace").unwrap();
         assert_eq!(
             to_esc_str(&bs, &TermMode::NONE, false).unwrap().as_ref(),
+            "\x08"
+        );
+    }
+
+    #[test]
+    fn configured_backspace_emits_bs_for_plain_shift_and_alt() {
+        for (keystroke, expected) in [
+            ("backspace", "\x08"),
+            ("shift-backspace", "\x08"),
+            ("alt-backspace", "\x1b\x08"),
+        ] {
+            let backspace = Keystroke::parse(keystroke).unwrap();
+            assert_eq!(
+                to_esc_str_with_backspace(
+                    &backspace,
+                    &TermMode::NONE,
+                    false,
+                    TelnetBackspaceCode::Backspace,
+                )
+                .unwrap()
+                .as_ref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn configured_backspace_preserves_ctrl_backspace_as_bs() {
+        let backspace = Keystroke::parse("ctrl-backspace").unwrap();
+        assert_eq!(
+            to_esc_str_with_backspace(
+                &backspace,
+                &TermMode::NONE,
+                false,
+                TelnetBackspaceCode::Delete,
+            )
+            .unwrap()
+            .as_ref(),
             "\x08"
         );
     }
@@ -485,6 +606,26 @@ mod tests {
                 .unwrap()
                 .as_ref(),
             "\x1b[1;3D"
+        );
+    }
+
+    #[test]
+    fn symbol_input_can_bypass_ime_without_commit_keys() {
+        assert_eq!(
+            super::direct_symbol_input(&Keystroke::parse("8->*").unwrap()),
+            Some("*")
+        );
+        assert_eq!(
+            super::direct_symbol_input(&Keystroke::parse("a").unwrap()),
+            None
+        );
+        assert_eq!(
+            super::direct_symbol_input(&Keystroke::parse("space").unwrap()),
+            None
+        );
+        assert_eq!(
+            super::direct_symbol_input(&Keystroke::parse("ctrl-8->*").unwrap()),
+            None
         );
     }
 }

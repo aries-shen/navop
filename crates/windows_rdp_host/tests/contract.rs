@@ -120,6 +120,17 @@ fn c_abi_is_versioned_fixed_width_and_opaque() {
             "NAVOP_RDP_CREATE_STAGE_SET_PARENT UINT32_C(7)",
             "NAVOP_RDP_CREATE_STAGE_EVENT_SUBSCRIPTION UINT32_C(8)",
             "NAVOP_RDP_CREATE_STAGE_EXCEPTION UINT32_C(9)",
+            "NAVOP_RDP_STAGE_CONNECT_GET_CONNECTED UINT32_C(10)",
+            "NAVOP_RDP_STAGE_CONNECT_SET_SERVER UINT32_C(11)",
+            "NAVOP_RDP_STAGE_CONNECT_GET_ADVANCED_SETTINGS UINT32_C(12)",
+            "NAVOP_RDP_STAGE_CONNECT_SET_RDP_PORT UINT32_C(13)",
+            "NAVOP_RDP_STAGE_CONNECT_POLICY UINT32_C(14)",
+            "NAVOP_RDP_STAGE_CONNECT_SET_DESKTOP_WIDTH UINT32_C(15)",
+            "NAVOP_RDP_STAGE_CONNECT_SET_DESKTOP_HEIGHT UINT32_C(16)",
+            "NAVOP_RDP_STAGE_CONNECT_SET_COLOR_DEPTH UINT32_C(17)",
+            "NAVOP_RDP_STAGE_CONNECT_INVOKE UINT32_C(18)",
+            "NAVOP_RDP_STAGE_CONNECT_DISPLAY_DESKTOP_SCALE_FACTOR UINT32_C(19)",
+            "NAVOP_RDP_STAGE_CONNECT_DISPLAY_DEVICE_SCALE_FACTOR UINT32_C(20)",
             "typedef struct NavopRdpProbeOptions",
             "typedef struct NavopRdpProbeResult",
             "typedef struct NavopRdpCreateOptions",
@@ -364,6 +375,9 @@ fn cpp_and_rust_freeze_the_same_struct_layout() {
             "size_of::<NavopRdpLastError>()",
             "align_of::<NavopRdpLastError>()",
             "CREATE_STAGE_EXCEPTION",
+            "STAGE_CONNECT_GET_CONNECTED",
+            "STAGE_CONNECT_DISPLAY_DESKTOP_SCALE_FACTOR",
+            "STAGE_CONNECT_DISPLAY_DEVICE_SCALE_FACTOR",
             "size_of::<NavopRdpProbeOptions>()",
             "align_of::<NavopRdpProbeOptions>()",
             "size_of::<NavopRdpProbeResult>()",
@@ -905,11 +919,17 @@ fn native_credentials_validate_copy_and_wipe_on_every_exit_path() {
             "credential_field_available<NavopRdpBorrowedUtf16>",
             "validate_borrowed_utf16(username)",
             "validate_borrowed_utf16(domain)",
+            "validate_borrowed_utf16(gateway_username)",
+            "validate_borrowed_utf16(gateway_domain)",
             "SensitiveUtf16Buffer server_password;",
             "SensitiveUtf16Buffer gateway_password;",
             "server_password.copy_from(credentials->server_password)",
             "gateway_password.copy_from(credentials->gateway_password)",
             "apply_active_x_credentials(",
+            "server_password.borrowed()",
+            "gateway_username",
+            "gateway_domain",
+            "gateway_password.borrowed()",
             "return NAVOP_RDP_RESULT_OK;",
             "catch (...)",
             "NAVOP_RDP_RESULT_INTERNAL_ERROR",
@@ -936,6 +956,12 @@ fn native_credentials_validate_copy_and_wipe_on_every_exit_path() {
             "put_Domain(",
             "resources->state.non_scriptable->put_ClearTextPassword(",
             "put_ClearTextPassword(",
+            "CComQIPtr<IMsRdpClient7>",
+            "get_TransportSettings2(",
+            "IMsRdpClientTransportSettings2",
+            "put_GatewayUsername(",
+            "put_GatewayDomain(",
+            "put_GatewayPassword(",
             "class SensitiveBstr",
             "SecureZeroMemory(",
             "SysFreeString(",
@@ -949,9 +975,20 @@ fn native_credentials_validate_copy_and_wipe_on_every_exit_path() {
         "NavopRdpResult apply_active_x_credentials(",
         "\n}\n\nNavopRdpResult get_active_x_connection_state(",
         &[
+            "NavopRdpBorrowedUtf16 gateway_username",
+            "NavopRdpBorrowedUtf16 gateway_domain",
+            "NavopRdpBorrowedSecret gateway_password",
             "trace_native_stage(\"credentials.set_password.before\")",
             "resources->state.non_scriptable->put_ClearTextPassword(",
             "trace_native_hresult(\n            \"credentials.set_password.after\"",
+            "client7->get_TransportSettings2(&transport)",
+            "trace_native_stage(\"credentials.gateway.username.before\")",
+            "transport->put_GatewayUsername(gateway_username_bstr)",
+            "trace_native_stage(\"credentials.gateway.domain.before\")",
+            "transport->put_GatewayDomain(gateway_domain_bstr)",
+            "trace_native_stage(\"credentials.gateway.password.before\")",
+            "transport->put_GatewayPassword(",
+            "gateway_password_bstr.get()",
         ],
     );
     assert_excludes_all(
@@ -1349,7 +1386,26 @@ fn active_x_connection_policy_consumes_the_complete_normalized_options() {
         active_x_source,
         "NavopRdpResult connect_active_x(",
         "\n}\n\nNavopRdpResult apply_active_x_credentials(",
-        &["configure_active_x_connection_policy(", "Connect()"],
+        &[
+            "connect.get_connected.before",
+            "connect.get_connected.after",
+            "connect.server.before",
+            "connect.server.after",
+            "connect.get_advanced_settings.before",
+            "connect.get_advanced_settings.after",
+            "connect.rdp_port.before",
+            "connect.rdp_port.after",
+            "configure_active_x_connection_policy(",
+            "connect.desktop_width.before",
+            "connect.desktop_width.after",
+            "connect.desktop_height.before",
+            "connect.desktop_height.after",
+            "connect.color_depth.before",
+            "connect.color_depth.after",
+            "connect.invoke.before",
+            "Connect()",
+            "connect.invoke.after",
+        ],
     );
     assert_excludes_all(
         active_x_source,
@@ -2231,6 +2287,12 @@ fn active_x_connect_aligns_initial_display_properties_with_axhost() {
             "connect.display.desktop_scale_factor",
             "connect.display.device_scale_factor",
             "connect.display.span_monitors.best_effort_unsupported",
+            "static_cast<ULONG>(options.desktop_scale_factor)",
+            "static_cast<ULONG>(options.device_scale_factor)",
+            "result == E_FAIL",
+            "connect.display.extended_property.unsupported",
+            "NAVOP_RDP_STAGE_CONNECT_DISPLAY_DESKTOP_SCALE_FACTOR",
+            "NAVOP_RDP_STAGE_CONNECT_DISPLAY_DEVICE_SCALE_FACTOR",
         ],
     );
     assert_contains_all(
@@ -2354,6 +2416,49 @@ fn active_x_connect_order_and_borrowed_endpoint_contract_are_frozen() {
             "does not retain data after the call returns",
         ],
     );
+}
+
+#[test]
+fn native_input_policy_sets_keyboard_hook_mode_through_secured_settings() {
+    let runtime_policy = &format!("{HOST_CRATE}/native/connection_policy_runtime.cpp");
+    assert_tokens_in_scope(
+        runtime_policy,
+        "NavopRdpResult configure_input_policy(",
+        "NavopRdpResult configure_performance_policy(",
+        &[
+            "CComQIPtr<IMsRdpClient7> client7(context.client);",
+            "CComPtr<IMsRdpClientSecuredSettings2> secured_settings3;",
+            "connect.input.get_secured_settings3.before",
+            "client7->get_SecuredSettings3(&secured_settings3)",
+            "connect.input.get_secured_settings3.after",
+            "connect.input.keyboard_hook_mode.before",
+            "secured_settings3->put_KeyboardHookMode(",
+            "options.keyboard_hook_mode",
+            "connect.input.keyboard_hook_mode.after",
+            "hresult == DISP_E_UNKNOWNNAME",
+            "connect.input.keyboard_hook_mode.unsupported",
+            "get_advanced_settings8(",
+            "L\"EnableWindowsKey\"",
+            "L\"GrabFocusOnConnect\"",
+        ],
+    );
+
+    let contents = read(runtime_policy);
+    let (_, input_policy) = contents
+        .split_once("NavopRdpResult configure_input_policy(")
+        .unwrap_or_else(|| panic!("{runtime_policy} must define configure_input_policy"));
+    let (input_policy, _) = input_policy
+        .split_once("NavopRdpResult configure_performance_policy(")
+        .unwrap_or_else(|| panic!("{runtime_policy} must define configure_performance_policy"));
+    for forbidden in [
+        "L\"KeyboardHookMode\"",
+        "NativeRdpDispatchTarget keyboard_hook",
+    ] {
+        assert!(
+            !input_policy.contains(forbidden),
+            "{runtime_policy} input policy must not contain `{forbidden}`"
+        );
+    }
 }
 
 #[test]
@@ -2550,6 +2655,7 @@ fn build_is_windows_hosted_msvc_only_and_ci_runs_host_tests() {
     assert_contains_all(
         script_path,
         &[
+            "$supportedVisualStudioVersionRange = \"[17.0,19.0)\"",
             "cargo build --locked -p windows-rdp-probe --target $RustTarget",
             HOST_TEST,
             "cargo test --locked -p remote_desktop_view ",
@@ -2715,6 +2821,8 @@ fn active_x_policy_sections_run_explicitly_in_frozen_order() {
 fn native_dispatch_helpers_own_variant_and_bstr_lifecycles() {
     let dispatch_source = &format!("{HOST_CRATE}/native/dispatch_property.cpp");
     let internal_header = &format!("{HOST_CRATE}/native/host_internal.h");
+    let policy_source = &format!("{HOST_CRATE}/native/connection_policy.cpp");
+    let display_source = &format!("{HOST_CRATE}/native/connection_policy_display.cpp");
 
     // bool conversion must use an independent converted VARIANT, never an
     // in-place VariantChangeType on the source value.
@@ -2765,6 +2873,75 @@ fn native_dispatch_helpers_own_variant_and_bstr_lifecycles() {
             "HRESULT set_dispatch_bool(",
             "HRESULT set_dispatch_long(",
             "HRESULT set_dispatch_utf16(",
+        ],
+    );
+    // Version-dependent display enhancements may be absent from an older
+    // mstscax.dll. Dispatch properties ignore only an absent name. Extended
+    // scale properties also tolerate the compatibility HRESULTs returned by
+    // controls that expose the interface without implementing the property.
+    assert_tokens_in_scope(
+        policy_source,
+        "NavopRdpResult set_optional_dispatch_bool_if_supported(",
+        "\n}\n\nNavopRdpResult configure_active_x_connection_policy(",
+        &[
+            "set_dispatch_bool(",
+            "trace_native_hresult(",
+            "result == DISP_E_UNKNOWNNAME",
+            "return NAVOP_RDP_RESULT_OK;",
+            "if (FAILED(result))",
+            "record_last_hresult(",
+            "static_cast<int32_t>(result)",
+            "return NAVOP_RDP_RESULT_OK;",
+        ],
+    );
+    assert_tokens_in_scope(
+        policy_source,
+        "NavopRdpResult set_required_dispatch_bool(",
+        "NavopRdpResult set_required_dispatch_long(",
+        &[
+            "set_dispatch_bool(",
+            "return required_dispatch_result(owner, target, result);",
+        ],
+    );
+    assert_tokens_in_scope(
+        display_source,
+        "NavopRdpResult optional_extended_property_result(",
+        "NavopRdpResult configure_extended_scale_factors(",
+        &[
+            "result == DISP_E_UNKNOWNNAME",
+            "result == E_NOTIMPL",
+            "result == E_NOINTERFACE",
+            "result == E_FAIL",
+            "connect.display.extended_property.unsupported",
+            "return NAVOP_RDP_RESULT_OK;",
+            "if (FAILED(result))",
+            "record_last_stage_hresult(",
+            "static_cast<int32_t>(result)",
+            "return NAVOP_RDP_RESULT_OK;",
+        ],
+    );
+    assert_tokens_in_scope(
+        display_source,
+        "NavopRdpResult configure_extended_scale_factors(",
+        "\nNavopRdpResult configure_display_policy(",
+        &[
+            "L\"DesktopScaleFactor\"",
+            "optional_extended_property_result(",
+            "NAVOP_RDP_STAGE_CONNECT_DISPLAY_DESKTOP_SCALE_FACTOR",
+            "L\"DeviceScaleFactor\"",
+            "NAVOP_RDP_STAGE_CONNECT_DISPLAY_DEVICE_SCALE_FACTOR",
+        ],
+    );
+    assert_tokens_in_scope(
+        display_source,
+        "NavopRdpResult configure_display_policy(",
+        "return configure_extended_scale_factors(",
+        &[
+            "L\"SmartSizing\"",
+            "set_optional_dispatch_bool_if_supported(",
+            "non_scriptable5->put_UseMultimon(",
+            "L\"ContainerHandledFullScreen\"",
+            "set_optional_dispatch_bool_if_supported(",
         ],
     );
 }

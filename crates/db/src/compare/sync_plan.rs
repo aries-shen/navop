@@ -486,9 +486,9 @@ fn external_dependency_warnings_by_table(
     let mut warnings_by_table = HashMap::new();
     let mut seen = HashSet::new();
     for dependency in dependencies {
-        if !plan_tables.contains(&dependency.table)
-            || plan_tables.contains(&dependency.referenced_table)
-        {
+        let child_in_plan = plan_tables.contains(&dependency.table);
+        let parent_in_plan = plan_tables.contains(&dependency.referenced_table);
+        if !child_in_plan || parent_in_plan {
             continue;
         }
         let warning = format!(
@@ -994,6 +994,8 @@ fn generate_add_foreign_key_sql(
     foreign_key: &super::ForeignKeySchema,
     target_database: &str,
     target_schema: Option<&str>,
+    source_database: Option<&str>,
+    source_schema: Option<&str>,
     dialect: &dyn SyncSqlDialect,
 ) -> String {
     let columns = foreign_key
@@ -1002,11 +1004,14 @@ fn generate_add_foreign_key_sql(
         .map(|column| dialect.quote_identifier(column))
         .collect::<Vec<_>>()
         .join(", ");
-    let ref_table = dialect.format_table_reference(
-        target_database,
-        foreign_key.ref_schema.as_deref().or(target_schema),
-        &foreign_key.ref_table,
+    let referenced_schema = map_foreign_key_reference_schema(
+        foreign_key.ref_schema.as_deref(),
+        source_database,
+        source_schema,
+        target_schema,
     );
+    let ref_table =
+        dialect.format_table_reference(target_database, referenced_schema, &foreign_key.ref_table);
     let ref_columns = foreign_key
         .ref_columns
         .iter()
@@ -1030,6 +1035,26 @@ fn generate_add_foreign_key_sql(
     }
     sql.push(';');
     sql
+}
+
+fn map_foreign_key_reference_schema<'a>(
+    referenced_schema: Option<&'a str>,
+    source_database: Option<&str>,
+    source_schema: Option<&str>,
+    target_schema: Option<&'a str>,
+) -> Option<&'a str> {
+    let Some(referenced_schema) = referenced_schema else {
+        return target_schema;
+    };
+
+    let is_source_namespace = source_database
+        .is_some_and(|source| referenced_schema.eq_ignore_ascii_case(source))
+        || source_schema.is_some_and(|source| referenced_schema.eq_ignore_ascii_case(source));
+    if is_source_namespace {
+        target_schema
+    } else {
+        Some(referenced_schema)
+    }
 }
 
 fn foreign_key_action_sql(value: Option<&str>) -> Option<String> {
@@ -1854,6 +1879,8 @@ pub fn build_schema_sync_plan_with_plugin_options(
         result,
         target_database,
         target_schema,
+        None,
+        None,
         &target_db_type,
         &target_db_type,
         &PluginSyncSqlDialect(plugin),
@@ -1895,6 +1922,34 @@ pub fn build_schema_sync_plan_with_plugin_options_for_source(
         result,
         target_database,
         target_schema,
+        None,
+        None,
+        source_db_type,
+        &target_db_type,
+        &PluginSyncSqlDialect(plugin),
+        options,
+    )
+}
+
+/// Option-aware schema sync plan builder that also maps source-qualified
+/// foreign-key references into the target database/schema namespace.
+pub fn build_schema_sync_plan_with_plugin_options_for_source_namespace(
+    result: &SchemaCompareResult,
+    target_database: &str,
+    target_schema: Option<&str>,
+    source_database: Option<&str>,
+    source_schema: Option<&str>,
+    source_db_type: &DatabaseType,
+    plugin: &dyn DatabasePlugin,
+    options: SchemaSyncPlanOptions,
+) -> SyncPlan {
+    let target_db_type = plugin.name();
+    build_schema_sync_plan_with_dialect(
+        result,
+        target_database,
+        target_schema,
+        source_database,
+        source_schema,
         source_db_type,
         &target_db_type,
         &PluginSyncSqlDialect(plugin),
@@ -1906,6 +1961,8 @@ fn build_schema_sync_plan_with_dialect(
     result: &SchemaCompareResult,
     target_database: &str,
     target_schema: Option<&str>,
+    source_database: Option<&str>,
+    source_schema: Option<&str>,
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
     dialect: &dyn SyncSqlDialect,
@@ -2066,6 +2123,8 @@ fn build_schema_sync_plan_with_dialect(
                                     foreign_key,
                                     target_database,
                                     target_schema,
+                                    source_database,
+                                    source_schema,
                                     dialect,
                                 ),
                                 kind: SyncStatementKind::AlterTable,
@@ -2568,6 +2627,8 @@ fn build_schema_sync_plan_with_dialect(
                                         foreign_key,
                                         target_database,
                                         target_schema,
+                                        source_database,
+                                        source_schema,
                                         dialect,
                                     ),
                                     kind: SyncStatementKind::AlterTable,
@@ -4510,6 +4571,70 @@ mod tests {
     }
 
     #[test]
+    fn test_mysql_schema_sync_plan_maps_source_database_foreign_key_to_target_database() {
+        use super::super::{
+            DiffStatus, ForeignKeySchema, SchemaCompareResult, TableDiff, TableSchema,
+        };
+
+        let source_fk = ForeignKeySchema {
+            name: "qrtz_blob_triggers_ibfk_1".to_string(),
+            columns: vec!["TRIGGER_NAME".to_string()],
+            ref_table: "QRTZ_TRIGGERS".to_string(),
+            ref_schema: Some("comi_app_test".to_string()),
+            ref_columns: vec!["TRIGGER_NAME".to_string()],
+            on_delete: None,
+            on_update: None,
+        };
+        let result = SchemaCompareResult {
+            routine_diffs: vec![],
+            trigger_diffs: vec![],
+            table_failures: vec![],
+            table_diffs: vec![TableDiff {
+                name: "QRTZ_BLOB_TRIGGERS".to_string(),
+                status: DiffStatus::Added,
+                source: Some(TableSchema {
+                    name: "QRTZ_BLOB_TRIGGERS".to_string(),
+                    foreign_keys: vec![source_fk],
+                    ..Default::default()
+                }),
+                target: None,
+                column_diffs: vec![],
+                index_diffs: vec![],
+                foreign_key_diffs: vec![],
+                comment_changed: false,
+                object_type: Default::default(),
+                changes: vec![],
+                table_options_changed: false,
+            }],
+            added_count: 1,
+            removed_count: 0,
+            modified_count: 0,
+        };
+        let plugin = crate::mysql::MySqlPlugin::new();
+        let plan = build_schema_sync_plan_with_plugin_options_for_source_namespace(
+            &result,
+            "sync_test",
+            None,
+            Some("comi_app_test"),
+            None,
+            &DatabaseType::MySQL,
+            &plugin,
+            SchemaSyncPlanOptions::default(),
+        );
+
+        assert!(plan.statements.iter().any(|statement| {
+            statement
+                .sql
+                .contains("REFERENCES `sync_test`.`QRTZ_TRIGGERS`")
+        }));
+        assert!(
+            plan.statements
+                .iter()
+                .all(|statement| !statement.sql.contains("REFERENCES `comi_app_test`."))
+        );
+    }
+
+    #[test]
     fn test_mysql_schema_sync_plan_rebuilds_modified_index() {
         use super::super::{
             DiffStatus, IndexDiff, IndexSchema, SchemaCompareResult, TableDiff, TableSchema,
@@ -5348,8 +5473,8 @@ mod tests {
     #[test]
     fn test_mysql_schema_sync_plan_adds_foreign_keys_after_added_table() {
         use super::super::{
-            ColumnSchema, DiffStatus, ForeignKeySchema, IndexSchema, SchemaCompareResult,
-            TableDiff, TableSchema,
+            ColumnSchema, DiffStatus, ForeignKeySchema, IndexSchema, SchemaCompareOptions,
+            TableSchema, compare_schemas,
         };
 
         let source = TableSchema {
@@ -5372,11 +5497,18 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            indexes: vec![IndexSchema {
-                name: "PRIMARY".to_string(),
-                columns: vec!["id".to_string()],
-                unique: true,
-            }],
+            indexes: vec![
+                IndexSchema {
+                    name: "PRIMARY".to_string(),
+                    columns: vec!["id".to_string()],
+                    unique: true,
+                },
+                IndexSchema {
+                    name: "idx_order_items_order".to_string(),
+                    columns: vec!["order_id".to_string()],
+                    unique: false,
+                },
+            ],
             foreign_keys: vec![ForeignKeySchema {
                 name: "fk_order_items_order".to_string(),
                 columns: vec!["order_id".to_string()],
@@ -5389,27 +5521,12 @@ mod tests {
             comment: None,
             ..Default::default()
         };
-        let result = SchemaCompareResult {
-            routine_diffs: vec![],
-            trigger_diffs: vec![],
-            table_failures: vec![],
-            table_diffs: vec![TableDiff {
-                name: "order_items".to_string(),
-                status: DiffStatus::Added,
-                source: Some(source),
-                target: None,
-                column_diffs: vec![],
-                index_diffs: vec![],
-                foreign_key_diffs: vec![],
-                comment_changed: false,
-                object_type: Default::default(),
-                changes: vec![],
-                table_options_changed: false,
-            }],
-            added_count: 1,
-            removed_count: 0,
-            modified_count: 0,
-        };
+        let result =
+            compare_schemas(vec![source], vec![], SchemaCompareOptions::default()).unwrap();
+        let table_diff = &result.table_diffs[0];
+        assert_eq!(table_diff.status, DiffStatus::Added);
+        assert_eq!(table_diff.index_diffs.len(), 2);
+        assert_eq!(table_diff.foreign_key_diffs.len(), 1);
         let plugin = crate::mysql::MySqlPlugin::new();
 
         let plan = build_schema_sync_plan_with_plugin(&result, "app", None, &plugin);
@@ -5423,6 +5540,7 @@ mod tests {
         assert!(sql[0].starts_with("CREATE TABLE `app`.`order_items`"));
         assert!(sql[0].contains("PRIMARY KEY (`id`)"));
         assert!(!sql[0].contains("UNIQUE INDEX `PRIMARY`"));
+        assert!(sql[0].contains("INDEX `idx_order_items_order` (`order_id`)"));
         assert_eq!(
             sql[1],
             "ALTER TABLE `app`.`order_items` ADD CONSTRAINT `fk_order_items_order` FOREIGN KEY (`order_id`) REFERENCES `app`.`orders` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT;"

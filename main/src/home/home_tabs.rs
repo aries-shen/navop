@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_sidebar_places_credential_vault_between_notes_and_extensions() {
+    fn more_applications_places_json_formatter_after_credential_vault() {
         use crate::navigation_quick_open::{
             NavigationApplication, overflow_navigation_applications,
         };
@@ -469,7 +469,7 @@ mod tests {
             vec![
                 NavigationApplication::SessionLogs,
                 NavigationApplication::CredentialVault,
-                NavigationApplication::Extensions,
+                NavigationApplication::JsonFormatter,
             ]
         );
     }
@@ -1331,6 +1331,23 @@ impl HomePage {
                     |win, cx| {
                         let settings = cx.new(|cx| SettingsPanel::new(win, cx));
                         TabItem::new("settings", "home", settings)
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    pub(crate) fn add_sync_settings_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_container = self.active_tab_container(cx);
+        window.defer(cx, move |window, cx| {
+            tab_container.update(cx, |tc, cx| {
+                tc.activate_or_add_tab_lazy(
+                    "settings-sync",
+                    |win, cx| {
+                        let settings = cx.new(|cx| SettingsPanel::new_sync(win, cx));
+                        TabItem::new("settings-sync", "home", settings)
                     },
                     window,
                     cx,

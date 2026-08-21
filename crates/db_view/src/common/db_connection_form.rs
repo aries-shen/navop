@@ -49,6 +49,45 @@ use tracing::info;
 
 use super::connection_proxy::{self, ProxyValidationError};
 
+const ORACLE_GO_DRIVER_ID: &str = "oracle-go";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OracleDriverMode {
+    #[default]
+    Native,
+    Go,
+}
+
+fn database_type_for_oracle_driver_mode(
+    current: &DatabaseType,
+    mode: OracleDriverMode,
+) -> DatabaseType {
+    match (current, mode) {
+        (DatabaseType::Oracle, OracleDriverMode::Go) => DatabaseType::external(ORACLE_GO_DRIVER_ID),
+        (DatabaseType::Oracle, OracleDriverMode::Native) => DatabaseType::Oracle,
+        (DatabaseType::External { driver_id }, OracleDriverMode::Native)
+            if driver_id == ORACLE_GO_DRIVER_ID =>
+        {
+            DatabaseType::Oracle
+        }
+        (DatabaseType::External { driver_id }, OracleDriverMode::Go)
+            if driver_id == ORACLE_GO_DRIVER_ID =>
+        {
+            current.clone()
+        }
+        _ => current.clone(),
+    }
+}
+
+fn oracle_driver_mode_for_database_type(database_type: &DatabaseType) -> OracleDriverMode {
+    match database_type {
+        DatabaseType::External { driver_id } if driver_id == ORACLE_GO_DRIVER_ID => {
+            OracleDriverMode::Go
+        }
+        _ => OracleDriverMode::Native,
+    }
+}
+
 /// Form select item for dropdown fields
 #[derive(Clone, Debug)]
 pub struct FormSelectItem {
@@ -1292,6 +1331,7 @@ pub struct DbConnectionForm {
     /// Oracle client detection status: Ok(version) / Err(error).
     oracle_client_status: Entity<Option<Result<String, String>>>,
     oracle_client_checking: Entity<bool>,
+    oracle_driver_mode: OracleDriverMode,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1300,6 +1340,7 @@ impl DbConnectionForm {
         let config = connection_proxy::with_proxy_tab(config);
         let focus_handle = cx.focus_handle();
         let current_db_type = cx.new(|_| config.db_type.clone());
+        let oracle_driver_mode = oracle_driver_mode_for_database_type(&config.db_type);
 
         // Initialize field values, inputs, and selects
         let mut field_values = Vec::new();
@@ -1477,6 +1518,7 @@ impl DbConnectionForm {
             sync_enabled,
             oracle_client_status,
             oracle_client_checking,
+            oracle_driver_mode,
             _subscriptions: subscriptions,
         };
 
@@ -1484,8 +1526,12 @@ impl DbConnectionForm {
         form
     }
 
+    fn effective_database_type(&self, cx: &App) -> DatabaseType {
+        database_type_for_oracle_driver_mode(self.current_db_type.read(cx), self.oracle_driver_mode)
+    }
+
     fn refresh_oracle_client_status(&self, cx: &mut Context<Self>) {
-        if *self.current_db_type.read(cx) != DatabaseType::Oracle {
+        if self.effective_database_type(cx) != DatabaseType::Oracle {
             self.oracle_client_checking.update(cx, |checking, cx| {
                 *checking = false;
                 cx.notify();
@@ -1522,7 +1568,7 @@ impl DbConnectionForm {
     }
 
     fn oracle_client_guide_text(&self, cx: &App) -> Option<String> {
-        if *self.current_db_type.read(cx) != DatabaseType::Oracle {
+        if self.effective_database_type(cx) != DatabaseType::Oracle {
             return None;
         }
 
@@ -1542,7 +1588,7 @@ impl DbConnectionForm {
     }
 
     fn oracle_client_download_url(&self, cx: &App) -> Option<&'static str> {
-        if *self.current_db_type.read(cx) != DatabaseType::Oracle {
+        if self.effective_database_type(cx) != DatabaseType::Oracle {
             return None;
         }
 
@@ -1626,6 +1672,9 @@ impl DbConnectionForm {
         });
 
         if let Ok(params) = connection.to_db_connection() {
+            self.oracle_driver_mode = oracle_driver_mode_for_database_type(&params.database_type);
+            self.refresh_oracle_client_status(cx);
+
             self.credential_picker.update(cx, |picker, cx| {
                 picker.set_reference(params.credential_reference.clone(), window, cx)
             });
@@ -1798,7 +1847,7 @@ impl DbConnectionForm {
             }
         }
 
-        let db_type = self.current_db_type.read(cx).clone();
+        let db_type = self.effective_database_type(cx);
 
         let port_str = self.get_field_value("port", cx);
 
@@ -1933,7 +1982,7 @@ impl DbConnectionForm {
     }
 
     fn validate_oracle_client(&self, cx: &App) -> Result<(), String> {
-        if *self.current_db_type.read(cx) != DatabaseType::Oracle {
+        if self.effective_database_type(cx) != DatabaseType::Oracle {
             return Ok(());
         }
 
@@ -2014,7 +2063,7 @@ impl DbConnectionForm {
                 return;
             }
         };
-        let db_type = self.current_db_type.read(cx).clone();
+        let db_type = self.effective_database_type(cx);
 
         self.is_testing.update(cx, |testing, cx| {
             *testing = true;
@@ -2470,6 +2519,8 @@ impl DbConnectionForm {
 
         let is_general_tab = self.active_tab == 0;
         let db_type = self.config.db_type.clone();
+        let is_builtin_oracle = db_type == DatabaseType::Oracle;
+        let is_native_oracle = self.effective_database_type(cx) == DatabaseType::Oracle;
         let has_main_credentials = current_tab_fields
             .iter()
             .any(|field| matches!(field.name.as_str(), "username" | "password"));
@@ -2633,10 +2684,126 @@ impl DbConnectionForm {
                                             .text_color(cx.theme().muted_foreground)
                                             .child(t!("ConnectionForm.cloud_sync_desc").to_string()),
                                     ),
+                        ),
+                    )
+                })
+                .when(is_builtin_oracle, |form| {
+                    let is_native = self.oracle_driver_mode == OracleDriverMode::Native;
+                    let is_go = self.oracle_driver_mode == OracleDriverMode::Go;
+
+                    form.child(
+                        field()
+                            .label(t!("ConnectionForm.oracle_driver_mode").to_string())
+                            .items_center()
+                            .label_justify_end()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .gap_3()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .child(
+                                                Radio::new("oracle-driver-mode-native")
+                                                    .label(
+                                                        t!(
+                                                            "ConnectionForm.oracle_driver_native"
+                                                        )
+                                                        .to_string(),
+                                                    )
+                                                    .checked(is_native)
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.oracle_driver_mode =
+                                                                OracleDriverMode::Native;
+                                                            this.refresh_oracle_client_status(cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Popover::new("oracle-driver-native-help")
+                                                    .trigger(
+                                                        Button::new("oracle-driver-native-help-btn")
+                                                            .icon(IconName::Info)
+                                                            .ghost()
+                                                            .xsmall()
+                                                            .tooltip(
+                                                                t!(
+                                                                    "ConnectionForm.oracle_driver_native_desc"
+                                                                )
+                                                                .to_string(),
+                                                            ),
+                                                    )
+                                                    .content(|_, _, _| {
+                                                        div()
+                                                            .text_sm()
+                                                            .max_w(px(320.))
+                                                            .child(
+                                                                t!(
+                                                                    "ConnectionForm.oracle_driver_native_desc"
+                                                                )
+                                                                .to_string(),
+                                                            )
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .child(
+                                                Radio::new("oracle-driver-mode-go")
+                                                    .label(
+                                                        t!("ConnectionForm.oracle_driver_go")
+                                                            .to_string(),
+                                                    )
+                                                    .checked(is_go)
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.oracle_driver_mode =
+                                                                OracleDriverMode::Go;
+                                                            this.refresh_oracle_client_status(cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Popover::new("oracle-driver-go-help")
+                                                    .trigger(
+                                                        Button::new("oracle-driver-go-help-btn")
+                                                            .icon(IconName::Info)
+                                                            .ghost()
+                                                            .xsmall()
+                                                            .tooltip(
+                                                                t!(
+                                                                    "ConnectionForm.oracle_driver_go_desc"
+                                                                )
+                                                                .to_string(),
+                                                            ),
+                                                    )
+                                                    .content(|_, _, _| {
+                                                        div()
+                                                            .text_sm()
+                                                            .max_w(px(320.))
+                                                            .child(
+                                                                t!(
+                                                                    "ConnectionForm.oracle_driver_go_desc"
+                                                                )
+                                                                .to_string(),
+                                                            )
+                                                    }),
+                                            ),
+                                    ),
                             ),
                     )
                 })
-                .when(db_type == DatabaseType::Oracle, |form| {
+                .when(is_builtin_oracle && is_native_oracle, |form| {
                     let has_error = matches!(&oracle_client_status, Some(Err(_)));
                     let oracle_client_guide = oracle_client_guide.clone();
 
@@ -2666,7 +2833,7 @@ impl DbConnectionForm {
                                             })
                                             .when(!is_checking, |div| match &oracle_client_status {
                                                 Some(Ok(version)) => div
-                                                    .text_color(cx.theme().primary_foreground)
+                                                    .text_color(cx.theme().success)
                                                     .child(
                                                         t!(
                                                             "ConnectionForm.oracle_client_available",
@@ -2675,7 +2842,7 @@ impl DbConnectionForm {
                                                         .to_string(),
                                                     ),
                                                 Some(Err(error)) => div
-                                                    .text_color(cx.theme().danger_foreground)
+                                                    .text_color(cx.theme().danger)
                                                     .child(
                                                         t!(
                                                             "ConnectionForm.oracle_client_unavailable",
@@ -3302,6 +3469,45 @@ mod tests {
         let config = DbFormConfig::oracle();
 
         assert!(config.tab_groups.iter().all(|group| group.name != "ssl"));
+    }
+
+    #[test]
+    fn oracle_driver_mode_maps_to_expected_database_type() {
+        assert_eq!(
+            DatabaseType::Oracle,
+            database_type_for_oracle_driver_mode(&DatabaseType::Oracle, OracleDriverMode::Native)
+        );
+        assert_eq!(
+            DatabaseType::external(ORACLE_GO_DRIVER_ID),
+            database_type_for_oracle_driver_mode(&DatabaseType::Oracle, OracleDriverMode::Go)
+        );
+        assert_eq!(
+            DatabaseType::MySQL,
+            database_type_for_oracle_driver_mode(&DatabaseType::MySQL, OracleDriverMode::Go)
+        );
+        assert_eq!(
+            DatabaseType::Oracle,
+            database_type_for_oracle_driver_mode(
+                &DatabaseType::external(ORACLE_GO_DRIVER_ID),
+                OracleDriverMode::Native
+            )
+        );
+    }
+
+    #[test]
+    fn oracle_driver_mode_restores_from_database_type() {
+        assert_eq!(
+            OracleDriverMode::Native,
+            oracle_driver_mode_for_database_type(&DatabaseType::Oracle)
+        );
+        assert_eq!(
+            OracleDriverMode::Go,
+            oracle_driver_mode_for_database_type(&DatabaseType::external(ORACLE_GO_DRIVER_ID))
+        );
+        assert_eq!(
+            OracleDriverMode::Native,
+            oracle_driver_mode_for_database_type(&DatabaseType::MySQL)
+        );
     }
 
     #[test]
