@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
@@ -77,6 +78,7 @@ use crate::local_terminal_profiles::{
 use crate::new_connection::NewConnectionWindow;
 use crate::setting_tab::GlobalCurrentUser;
 use crate::team_management::{build_team_management_url, resolve_team_management_url};
+use crate::universal_plugins::{UniversalPluginService, UniversalPluginStatus};
 use crate::user_avatar::render_user_avatar;
 use remote_desktop_view::remote_desktop_form::{
     RemoteDesktopFormWindow, RemoteDesktopFormWindowConfig,
@@ -143,6 +145,10 @@ pub struct HomePage {
     sidebar_collapsed: bool,
     persistent_sidebar_expanded: bool,
     pub(crate) workspaces: Vec<Workspace>,
+    pub(crate) universal_plugin_panels: Vec<crate::universal_plugins::UniversalPanelDescriptor>,
+    pub(crate) universal_plugin_status: BTreeMap<String, UniversalPluginStatus>,
+    pub(crate) activating_universal_panels: HashSet<String>,
+    pub(crate) universal_plugin_activation_error: Option<String>,
     pub(crate) connections: Vec<StoredConnection>,
     pub(crate) tab_container: Entity<TabContainer>,
     search_input: Entity<InputState>,
@@ -236,6 +242,7 @@ mod sidebar_navigation;
 mod sync_route;
 mod team_permissions;
 mod toolbar;
+mod universal_panels;
 mod workspace;
 mod workspace_filter;
 

@@ -317,6 +317,20 @@ fn legacy_ai_workbench_uses_the_original_color_icon() {
 }
 
 #[test]
+fn universal_plugin_sidebar_uses_host_owned_lazy_activation() {
+    let sidebar_navigation = include_str!("../sidebar_navigation.rs");
+    let universal_panels = include_str!("../universal_panels.rs");
+
+    assert!(sidebar_navigation.contains("panel.placement == UniversalPanelPlacement::HomeSidebar"));
+    assert!(sidebar_navigation.contains("this.activate_universal_panel(&panel_key, window, cx);"));
+    assert!(universal_panels.contains("self.deactivate_universal_panel(panel_key, cx);"));
+    assert!(universal_panels.contains("Tokio::spawn(cx, async move {"));
+    assert!(universal_panels.contains("service.activate_panel(&activation_panel_key).await"));
+    assert!(!universal_panels.contains("ActivationManager::new"));
+    assert!(!universal_panels.contains("ProcessRpcSession::start"));
+}
+
+#[test]
 fn modern_home_cards_are_small_and_fill_each_row() {
     let home = include_str!("../../home_tab.rs");
     let content = include_str!("../content.rs");
