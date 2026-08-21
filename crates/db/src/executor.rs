@@ -1,12 +1,6 @@
 use crate::types::FieldType;
-use one_core::storage::DatabaseType;
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::{
-    ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect,
-    PostgreSqlDialect, SQLiteDialect,
-};
-use sqlparser::tokenizer::{Location, Token, Tokenizer};
-use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// SQL 脚本来源
@@ -56,156 +50,6 @@ impl Default for ExecOptions {
     }
 }
 
-pub(crate) fn apply_query_max_rows(
-    db_type: DatabaseType,
-    sql: &str,
-    max_rows: Option<usize>,
-    is_query: bool,
-) -> Cow<'_, str> {
-    let Some(max_rows) = max_rows.filter(|rows| *rows > 0) else {
-        return Cow::Borrowed(sql);
-    };
-    let Some(tokens) = simple_select_tokens(&db_type, sql) else {
-        return Cow::Borrowed(sql);
-    };
-    if !is_query || has_existing_row_limit(&tokens) {
-        return Cow::Borrowed(sql);
-    }
-
-    match db_type {
-        DatabaseType::MSSQL => apply_mssql_top(sql, max_rows, &tokens),
-        // Oracle result limits are enforced while fetching rows from OCI.
-        // Rewriting here would break pre-12c servers and can alter valid SQL
-        // such as statements containing FOR UPDATE, comments, or complex CTEs.
-        DatabaseType::Oracle => Cow::Borrowed(sql),
-        _ => append_query_clause(sql, &format!("LIMIT {max_rows}")),
-    }
-}
-
-fn apply_mssql_top<'a>(sql: &'a str, max_rows: usize, tokens: &[SqlToken]) -> Cow<'a, str> {
-    let Some(index) = mssql_top_insert_index(&tokens) else {
-        return Cow::Borrowed(sql);
-    };
-
-    let mut rewritten = String::with_capacity(sql.len() + 16);
-    rewritten.push_str(&sql[..index]);
-    rewritten.push_str(&format!(" TOP ({max_rows})"));
-    rewritten.push_str(&sql[index..]);
-    Cow::Owned(rewritten)
-}
-
-fn append_query_clause<'a>(sql: &'a str, clause: &str) -> Cow<'a, str> {
-    let trimmed_end = sql.trim_end();
-    let trailing_ws = &sql[trimmed_end.len()..];
-    let (body, terminator) = trimmed_end
-        .strip_suffix(';')
-        .map(|body| (body.trim_end(), ";"))
-        .unwrap_or((trimmed_end, ""));
-    Cow::Owned(format!("{body} {clause}{terminator}{trailing_ws}"))
-}
-
-fn simple_select_tokens(db_type: &DatabaseType, sql: &str) -> Option<Vec<SqlToken>> {
-    let tokens = significant_tokens(db_type, sql)?;
-    tokens
-        .first()
-        .is_some_and(|token| token.depth == 0 && word_eq(&token.token, "SELECT"))
-        .then_some(tokens)
-}
-
-fn has_existing_row_limit(tokens: &[SqlToken]) -> bool {
-    tokens.iter().any(|token| {
-        token.depth == 0
-            && (word_eq(&token.token, "LIMIT")
-                || word_eq(&token.token, "FETCH")
-                || word_eq(&token.token, "FORMAT")
-                || word_eq(&token.token, "ROWNUM")
-                || word_eq(&token.token, "TOP"))
-    })
-}
-
-fn mssql_top_insert_index(tokens: &[SqlToken]) -> Option<usize> {
-    let select = tokens
-        .iter()
-        .position(|token| token.depth == 0 && word_eq(&token.token, "SELECT"))?;
-    let mut insert_after = select;
-    let next = tokens.get(select + 1);
-    if next.is_some_and(|token| word_eq(&token.token, "ALL") || word_eq(&token.token, "DISTINCT")) {
-        insert_after = select + 1;
-    }
-    if tokens
-        .get(insert_after + 1)
-        .is_some_and(|token| word_eq(&token.token, "TOP"))
-    {
-        return None;
-    }
-    Some(tokens[insert_after].end)
-}
-
-#[derive(Debug)]
-struct SqlToken {
-    token: Token,
-    depth: usize,
-    end: usize,
-}
-
-fn significant_tokens(db_type: &DatabaseType, sql: &str) -> Option<Vec<SqlToken>> {
-    let dialect = tokenizer_dialect(db_type);
-    let mut tokenizer = Tokenizer::new(dialect.as_ref(), sql);
-    let tokens = tokenizer.tokenize_with_location().ok()?;
-    let mut depth = 0usize;
-    let mut output = Vec::new();
-    for token in tokens {
-        match token.token {
-            Token::Whitespace(_) | Token::EOF => {}
-            Token::LParen => depth += 1,
-            Token::RParen => depth = depth.saturating_sub(1),
-            _ => output.push(SqlToken {
-                end: byte_index_for_location(sql, token.span.end),
-                token: token.token,
-                depth,
-            }),
-        }
-    }
-    Some(output)
-}
-
-fn tokenizer_dialect(db_type: &DatabaseType) -> Box<dyn sqlparser::dialect::Dialect> {
-    match db_type {
-        DatabaseType::MySQL => Box::new(MySqlDialect {}),
-        DatabaseType::PostgreSQL => Box::new(PostgreSqlDialect {}),
-        DatabaseType::SQLite => Box::new(SQLiteDialect {}),
-        DatabaseType::DuckDB => Box::new(DuckDbDialect {}),
-        DatabaseType::MSSQL => Box::new(MsSqlDialect {}),
-        DatabaseType::Oracle => Box::new(OracleDialect {}),
-        DatabaseType::ClickHouse => Box::new(ClickHouseDialect {}),
-        DatabaseType::External { .. } => Box::new(GenericDialect {}),
-    }
-}
-
-fn word_eq(token: &Token, expected: &str) -> bool {
-    matches!(
-        token,
-        Token::Word(word)
-            if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected)
-    )
-}
-
-fn byte_index_for_location(sql: &str, location: Location) -> usize {
-    let (mut line, mut column) = (1, 1);
-    for (index, ch) in sql.char_indices() {
-        if line == location.line && column == location.column {
-            return index;
-        }
-        if ch == '\n' {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
-    sql.len()
-}
-
 /// Result of a single SQL statement execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -246,6 +90,19 @@ pub struct QueryColumnMeta {
     pub field_type: FieldType,
     /// Whether the column is nullable
     pub nullable: bool,
+    /// Character set used for text bytes in this result column.
+    ///
+    /// This is runtime/wire metadata and may differ from the table column's
+    /// declared charset when the server applies `character_set_results`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_charset: Option<String>,
+    /// Collation reported for this result column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_collation: Option<String>,
+    /// Raw MySQL result-column collation ID, retained for diagnostics and
+    /// forward compatibility when the local collation table is older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_collation_id: Option<u16>,
 }
 
 impl QueryColumnMeta {
@@ -257,11 +114,26 @@ impl QueryColumnMeta {
             db_type: db_type_str,
             field_type,
             nullable: true,
+            result_charset: None,
+            result_collation: None,
+            result_collation_id: None,
         }
     }
 
     pub fn with_nullable(mut self, nullable: bool) -> Self {
         self.nullable = nullable;
+        self
+    }
+
+    pub fn with_result_encoding(
+        mut self,
+        charset: Option<impl Into<String>>,
+        collation: Option<impl Into<String>>,
+        collation_id: Option<u16>,
+    ) -> Self {
+        self.result_charset = charset.map(Into::into);
+        self.result_collation = collation.map(Into::into);
+        self.result_collation_id = collation_id;
         self
     }
 }
@@ -297,6 +169,109 @@ pub struct QueryResult {
     /// Execution time in milliseconds
     #[serde(with = "elapsed_ms_serde")]
     pub elapsed_ms: u128,
+}
+
+/// A validated, typed view over one query result cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryCellRef<'a> {
+    Null,
+    Text(&'a str),
+    Binary(&'a [u8]),
+}
+
+/// Structural errors that make a [`QueryResult`] ambiguous or unsafe to consume.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum QueryResultError {
+    #[error("query result column metadata has length {actual}, expected {expected}")]
+    ColumnMetaWidth { actual: usize, expected: usize },
+    #[error("query result row {row_index} has width {actual}, expected {expected}")]
+    RowWidth {
+        row_index: usize,
+        actual: usize,
+        expected: usize,
+    },
+    #[error("binary cell ({row_index}, {column_index}) is out of bounds")]
+    BinaryCellOutOfBounds {
+        row_index: usize,
+        column_index: usize,
+    },
+    #[error("duplicate binary cell ({row_index}, {column_index})")]
+    DuplicateBinaryCell {
+        row_index: usize,
+        column_index: usize,
+    },
+}
+
+/// Validated typed access to a [`QueryResult`].
+///
+/// Binary sidecar values are authoritative over the string display value stored in `rows`.
+pub struct QueryResultView<'a> {
+    result: &'a QueryResult,
+    binary_by_cell: HashMap<(usize, usize), &'a [u8]>,
+}
+
+impl QueryResult {
+    /// Validate the result shape once and build an indexed typed view for lossless cell access.
+    pub fn typed_view(&self) -> Result<QueryResultView<'_>, QueryResultError> {
+        let column_count = self.columns.len();
+        if !self.column_meta.is_empty() && self.column_meta.len() != column_count {
+            return Err(QueryResultError::ColumnMetaWidth {
+                actual: self.column_meta.len(),
+                expected: column_count,
+            });
+        }
+
+        for (row_index, row) in self.rows.iter().enumerate() {
+            if row.len() != column_count {
+                return Err(QueryResultError::RowWidth {
+                    row_index,
+                    actual: row.len(),
+                    expected: column_count,
+                });
+            }
+        }
+
+        let mut binary_by_cell = HashMap::with_capacity(self.binary_cells.len());
+        for cell in &self.binary_cells {
+            if cell.row_index >= self.rows.len() || cell.column_index >= column_count {
+                return Err(QueryResultError::BinaryCellOutOfBounds {
+                    row_index: cell.row_index,
+                    column_index: cell.column_index,
+                });
+            }
+            if binary_by_cell
+                .insert((cell.row_index, cell.column_index), cell.bytes.as_slice())
+                .is_some()
+            {
+                return Err(QueryResultError::DuplicateBinaryCell {
+                    row_index: cell.row_index,
+                    column_index: cell.column_index,
+                });
+            }
+        }
+
+        Ok(QueryResultView {
+            result: self,
+            binary_by_cell,
+        })
+    }
+}
+
+impl<'a> QueryResultView<'a> {
+    pub fn cell(&self, row_index: usize, column_index: usize) -> Option<QueryCellRef<'a>> {
+        if let Some(bytes) = self.binary_by_cell.get(&(row_index, column_index)) {
+            return Some(QueryCellRef::Binary(bytes));
+        }
+
+        self.result
+            .rows
+            .get(row_index)?
+            .get(column_index)?
+            .as_deref()
+            .map_or(Some(QueryCellRef::Null), |text| {
+                Some(QueryCellRef::Text(text))
+            })
+    }
 }
 
 /// Execution result for non-query statements
@@ -343,81 +318,6 @@ mod elapsed_ms_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use one_core::storage::DatabaseType;
-
-    #[test]
-    fn query_max_rows_adds_limit_for_limit_dialects() {
-        let sql = apply_query_max_rows(DatabaseType::MySQL, "select * from users", Some(25), true);
-        assert_eq!("select * from users LIMIT 25", sql);
-    }
-
-    #[test]
-    fn query_max_rows_keeps_existing_limit() {
-        let sql = apply_query_max_rows(
-            DatabaseType::PostgreSQL,
-            "select * from users limit 5",
-            Some(25),
-            true,
-        );
-        assert_eq!("select * from users limit 5", sql);
-    }
-
-    #[test]
-    fn query_max_rows_adds_mssql_top() {
-        let sql = apply_query_max_rows(
-            DatabaseType::MSSQL,
-            "select distinct id from users",
-            Some(25),
-            true,
-        );
-        assert_eq!("select distinct TOP (25) id from users", sql);
-    }
-
-    #[test]
-    fn query_max_rows_keeps_oracle_sql_unchanged() {
-        for sql in ["select * from users", "select * from users;"] {
-            assert_eq!(
-                sql,
-                apply_query_max_rows(DatabaseType::Oracle, sql, Some(25), true)
-            );
-        }
-    }
-
-    #[test]
-    fn query_max_rows_ignores_non_queries_and_unbounded_options() {
-        assert_eq!(
-            "update users set name = 'a'",
-            apply_query_max_rows(
-                DatabaseType::MySQL,
-                "update users set name = 'a'",
-                Some(25),
-                false,
-            )
-        );
-        assert_eq!(
-            "select * from users",
-            apply_query_max_rows(DatabaseType::MySQL, "select * from users", None, true)
-        );
-        assert_eq!(
-            "select * from users",
-            apply_query_max_rows(DatabaseType::MySQL, "select * from users", Some(0), true)
-        );
-        assert_eq!(
-            "show tables",
-            apply_query_max_rows(DatabaseType::MySQL, "show tables", Some(25), true)
-        );
-    }
-
-    #[test]
-    fn query_max_rows_ignores_limit_inside_string() {
-        let sql = apply_query_max_rows(
-            DatabaseType::SQLite,
-            "select 'limit 1' as text from users",
-            Some(25),
-            true,
-        );
-        assert_eq!("select 'limit 1' as text from users LIMIT 25", sql);
-    }
 
     #[test]
     fn query_result_deserializes_legacy_payload_without_binary_cells() {
@@ -436,6 +336,39 @@ mod tests {
         .expect("legacy query result should remain compatible");
 
         assert!(result.binary_cells.is_empty());
+        assert!(result.column_meta[0].result_charset.is_none());
+        assert!(result.column_meta[0].result_collation.is_none());
+        assert!(result.column_meta[0].result_collation_id.is_none());
+    }
+
+    #[test]
+    fn query_column_meta_result_encoding_is_optional_and_roundtrips() {
+        let meta = QueryColumnMeta::new("payload", "MYSQL_TYPE_LONG_BLOB").with_result_encoding(
+            Some("gbk"),
+            Some("gbk_chinese_ci"),
+            Some(28),
+        );
+
+        let value = serde_json::to_value(&meta).expect("column metadata should serialize");
+        assert_eq!(value["result_charset"], "gbk");
+        assert_eq!(value["result_collation"], "gbk_chinese_ci");
+        assert_eq!(value["result_collation_id"], 28);
+
+        let decoded: QueryColumnMeta =
+            serde_json::from_value(value).expect("column metadata should deserialize");
+        assert_eq!(decoded.result_charset.as_deref(), Some("gbk"));
+        assert_eq!(decoded.result_collation.as_deref(), Some("gbk_chinese_ci"));
+        assert_eq!(decoded.result_collation_id, Some(28));
+    }
+
+    #[test]
+    fn query_column_meta_omits_missing_result_encoding() {
+        let value = serde_json::to_value(QueryColumnMeta::new("id", "BIGINT"))
+            .expect("column metadata should serialize");
+
+        assert!(value.get("result_charset").is_none());
+        assert!(value.get("result_collation").is_none());
+        assert!(value.get("result_collation_id").is_none());
     }
 
     #[test]
@@ -451,6 +384,101 @@ mod tests {
             serde_json::from_str(&encoded).expect("binary cell should deserialize");
 
         assert_eq!(decoded, cell);
+    }
+
+    fn typed_result() -> QueryResult {
+        QueryResult {
+            sql: "select a, b, c".to_string(),
+            columns: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            column_meta: vec![],
+            rows: vec![vec![
+                None,
+                Some(String::new()),
+                Some("binary display".to_string()),
+            ]],
+            binary_cells: vec![BinaryCell {
+                row_index: 0,
+                column_index: 2,
+                bytes: vec![0, 0xff],
+            }],
+            elapsed_ms: 0,
+        }
+    }
+
+    #[test]
+    fn typed_view_distinguishes_null_empty_text_and_binary() {
+        let result = typed_result();
+        let view = result.typed_view().expect("result should be valid");
+
+        assert_eq!(view.cell(0, 0), Some(QueryCellRef::Null));
+        assert_eq!(view.cell(0, 1), Some(QueryCellRef::Text("")));
+        assert_eq!(view.cell(0, 2), Some(QueryCellRef::Binary(&[0_u8, 0xff])));
+        assert_eq!(view.cell(1, 0), None);
+        assert_eq!(view.cell(0, 3), None);
+    }
+
+    #[test]
+    fn typed_view_rejects_duplicate_binary_coordinates() {
+        let mut result = typed_result();
+        result.binary_cells.push(BinaryCell {
+            row_index: 0,
+            column_index: 2,
+            bytes: vec![1],
+        });
+
+        assert_eq!(
+            result.typed_view().err(),
+            Some(QueryResultError::DuplicateBinaryCell {
+                row_index: 0,
+                column_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn typed_view_rejects_out_of_bounds_binary_coordinates() {
+        for (row_index, column_index) in [(1, 0), (0, 3)] {
+            let mut result = typed_result();
+            result.binary_cells[0].row_index = row_index;
+            result.binary_cells[0].column_index = column_index;
+
+            assert_eq!(
+                result.typed_view().err(),
+                Some(QueryResultError::BinaryCellOutOfBounds {
+                    row_index,
+                    column_index,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn typed_view_rejects_inconsistent_row_width() {
+        let mut result = typed_result();
+        result.rows[0].pop();
+
+        assert_eq!(
+            result.typed_view().err(),
+            Some(QueryResultError::RowWidth {
+                row_index: 0,
+                actual: 2,
+                expected: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn typed_view_rejects_inconsistent_column_metadata_width() {
+        let mut result = typed_result();
+        result.column_meta = vec![QueryColumnMeta::new("a", "TEXT")];
+
+        assert_eq!(
+            result.typed_view().err(),
+            Some(QueryResultError::ColumnMetaWidth {
+                actual: 1,
+                expected: 3,
+            })
+        );
     }
 
     #[test]

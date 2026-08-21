@@ -1538,6 +1538,15 @@ impl DatabasePlugin for ExternalDatabasePlugin {
             SqlResult::Error(sql_error_info) => anyhow::bail!(sql_error_info.message),
         }?;
         paginated_query.strip_hidden_result_columns(&mut query_result)?;
+        crate::query_result_normalization::normalize_table_query_result(
+            self,
+            connection,
+            &request.database,
+            request.schema.as_deref(),
+            &request.table,
+            &mut query_result,
+        )
+        .await?;
 
         Ok(TableDataResponse {
             query_result,
@@ -2005,7 +2014,6 @@ fn table_info_from_wire(object: wire_schema::ObjectInfo) -> TableInfo {
         schema: None,
         comment: empty_to_none(object.comment),
         engine: None,
-        row_count: object.row_count_estimate.map(|count| count as i64),
         create_time: object.created_at,
         charset: None,
         collation: None,
@@ -2602,7 +2610,7 @@ mod tests {
         assert_eq!(
             "from_hex('deadbeef')",
             duckdb.format_table_change_value(
-                &TableCellValue::Text("3q2+7w==".to_string()),
+                &TableCellValue::Binary(vec![0xde, 0xad, 0xbe, 0xef]),
                 Some(&column_info("payload", "blob", false)),
             )
         );

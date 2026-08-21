@@ -88,7 +88,9 @@ impl TerminalView {
 
         // Xshell 风格：会话未激活（未连接/已断开）时 Ctrl+D 关闭当前窗口；
         // 会话存活时 Ctrl+D 照常透传为 EOF（\x04）退出 shell。
-        if !self.accepts_live_terminal_input(cx) {
+        // 锁定会话不关闭窗口，仅拦截输入。
+        let is_locked = self.terminal.read(cx).is_locked();
+        if !self.accepts_live_terminal_input(cx) && !is_locked {
             let modifiers = event.keystroke.modifiers;
             if modifiers.control
                 && !modifiers.alt
@@ -123,16 +125,6 @@ impl TerminalView {
         if mode.contains(TermMode::VI) {
             self.hide_history_prompt_dropdown();
             self.handle_vi_key_event(event, cx);
-            return;
-        }
-
-        // macOS may leave punctuation in marked-text state when a non-ASCII
-        // input source is active. Punctuation is not useful IME composition
-        // input for a terminal, so send it to the PTY and consume the event
-        // before the input context can defer it until the next keystroke.
-        if let Some(text) = crate::keys::direct_symbol_input(&event.keystroke) {
-            self.commit_text(text, cx);
-            cx.stop_propagation();
             return;
         }
 

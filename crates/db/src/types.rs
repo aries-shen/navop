@@ -272,7 +272,6 @@ pub struct TableInfo {
     pub schema: Option<String>,
     pub comment: Option<String>,
     pub engine: Option<String>,
-    pub row_count: Option<i64>,
     pub create_time: Option<String>,
     pub charset: Option<String>,
     pub collation: Option<String>,
@@ -686,9 +685,11 @@ impl FieldType {
             "TEXT" | "LONGTEXT" | "MEDIUMTEXT" | "TINYTEXT" | "CLOB" | "NCLOB" | "NTEXT" => {
                 Self::LongText
             }
-            "BLOB" | "LONGBLOB" | "MEDIUMBLOB" | "TINYBLOB" | "BINARY" | "VARBINARY" | "BYTEA"
-            | "IMAGE" | "RAW" | "LONG RAW" | "BFILE" | "BIGVARBIN" | "BIGBINARY"
-            | "LARGEBINARY" | "GEOMETRY" | "VECTOR" => Self::Binary,
+            "BLOB" | "LONGBLOB" | "LONG_BLOB" | "MEDIUMBLOB" | "MEDIUM_BLOB" | "TINYBLOB"
+            | "TINY_BLOB" | "BINARY" | "VARBINARY" | "BYTEA" | "IMAGE" | "RAW" | "LONG RAW"
+            | "BFILE" | "BIGVARBIN" | "BIGBINARY" | "LARGEBINARY" | "GEOMETRY" | "VECTOR" => {
+                Self::Binary
+            }
             "JSON" | "JSONB" | "ARRAY" | "MAP" | "TUPLE" | "LIST" | "STRUCT" => Self::Json,
             _ if base_type.starts_with("ARRAY")
                 || base_type.starts_with("MAP")
@@ -732,13 +733,21 @@ pub struct TableColumnMeta {
 pub enum TableCellValue {
     Null,
     Text(String),
+    Binary(Vec<u8>),
 }
 
 impl TableCellValue {
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Null => None,
+            Self::Null | Self::Binary(_) => None,
             Self::Text(value) => Some(value),
+        }
+    }
+
+    pub fn as_binary(&self) -> Option<&[u8]> {
+        match self {
+            Self::Binary(bytes) => Some(bytes),
+            Self::Null | Self::Text(_) => None,
         }
     }
 }
@@ -811,9 +820,9 @@ pub struct CopySqlRequest {
     /// Column information
     pub columns: Vec<ColumnInfo>,
     /// Row data to generate SQL for
-    pub rows: Vec<Vec<Option<String>>>,
+    pub rows: Vec<Vec<TableCellValue>>,
     /// Original row data (for UPDATE statements, used to generate WHERE clause)
-    pub original_rows: Option<Vec<Vec<Option<String>>>>,
+    pub original_rows: Option<Vec<Vec<TableCellValue>>>,
     /// Column names
     pub column_names: Vec<String>,
 }
@@ -837,11 +846,29 @@ impl CopySqlRequest {
     }
 
     pub fn with_rows(mut self, rows: Vec<Vec<Option<String>>>) -> Self {
-        self.rows = rows;
+        self.rows = rows
+            .into_iter()
+            .map(|row| row.into_iter().map(TableCellValue::from).collect())
+            .collect();
         self
     }
 
     pub fn with_original_rows(mut self, original_rows: Vec<Vec<Option<String>>>) -> Self {
+        self.original_rows = Some(
+            original_rows
+                .into_iter()
+                .map(|row| row.into_iter().map(TableCellValue::from).collect())
+                .collect(),
+        );
+        self
+    }
+
+    pub fn with_typed_rows(mut self, rows: Vec<Vec<TableCellValue>>) -> Self {
+        self.rows = rows;
+        self
+    }
+
+    pub fn with_typed_original_rows(mut self, original_rows: Vec<Vec<TableCellValue>>) -> Self {
         self.original_rows = Some(original_rows);
         self
     }
@@ -1257,6 +1284,33 @@ mod tests {
             FieldType::from_db_type("MYSQL_TYPE_NEWDECIMAL"),
             FieldType::Decimal
         );
+        assert_eq!(
+            FieldType::from_db_type("MYSQL_TYPE_LONG_BLOB"),
+            FieldType::Binary
+        );
+        assert_eq!(
+            FieldType::from_db_type("MYSQL_TYPE_MEDIUM_BLOB"),
+            FieldType::Binary
+        );
+        assert_eq!(
+            FieldType::from_db_type("MYSQL_TYPE_TINY_BLOB"),
+            FieldType::Binary
+        );
+        for data_type in [
+            "CHAR(10)",
+            "BPCHAR",
+            "NCHAR(10)",
+            "BIGCHAR",
+            "MYSQL_TYPE_STRING",
+            "FixedString(10)",
+            "Nullable(FixedString(10))",
+        ] {
+            assert_eq!(
+                FieldType::from_db_type(data_type),
+                FieldType::Text,
+                "{data_type}"
+            );
+        }
         assert_eq!(FieldType::from_db_type("int4"), FieldType::Integer);
         assert_eq!(FieldType::from_db_type("float8"), FieldType::Decimal);
         assert_eq!(FieldType::from_db_type("Int4"), FieldType::Integer);

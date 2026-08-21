@@ -1,11 +1,8 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use mysql_async::{
-    Conn, Opts, OptsBuilder, SslOpts, Value,
-    consts::{ColumnFlags, ColumnType},
-    prelude::*,
-};
+use mysql_async::{Conn, Opts, OptsBuilder, SslOpts, Value, consts::ColumnType, prelude::*};
+use mysql_common::collations::{Collation, CollationId};
 use one_core::storage::DbConnectionConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +14,7 @@ use tracing::{debug, error, info};
 use crate::connection::{DbConnection, DbError, StreamingProgress};
 use crate::executor::{
     BinaryCell, ExecOptions, ExecResult, QueryColumnMeta, QueryResult, SqlErrorInfo, SqlResult,
-    SqlSource, apply_query_max_rows,
+    SqlSource,
 };
 use crate::rustls_provider::ensure_rustls_crypto_provider;
 use crate::ssh_tunnel::{resolve_connection_target, resolve_tunnel_destination};
@@ -33,6 +30,12 @@ pub struct MysqlDbConnection {
     config: DbConnectionConfig,
     conn: Arc<Mutex<Option<Conn>>>,
     tunnel: Option<TunnelGuard>,
+}
+
+struct MysqlResultEncoding {
+    charset: Option<String>,
+    collation: Option<String>,
+    collation_id: u16,
 }
 
 impl MysqlDbConnection {
@@ -213,6 +216,104 @@ impl MysqlDbConnection {
         }
     }
 
+    /// Convert one owned wire value into its compatibility display value and,
+    /// when applicable, a lossless binary sidecar.
+    ///
+    /// Binary values are never inferred to be text merely because their bytes
+    /// happen to form valid UTF-8. Their display string is a bounded hex
+    /// preview, while the owned byte buffer is moved into the sidecar without a
+    /// full-payload clone. Direct table queries can later reclassify a
+    /// misreported MySQL TEXT-family value using authoritative schema metadata.
+    fn extract_query_cell(
+        value: Value,
+        column: Option<&mysql_async::Column>,
+    ) -> (Option<String>, Option<Vec<u8>>) {
+        let Some(column) = column else {
+            return (Self::extract_value(&value), None);
+        };
+
+        let Value::Bytes(bytes) = value else {
+            return (Self::extract_column_value(&value, column), None);
+        };
+
+        if column.column_type() == ColumnType::MYSQL_TYPE_BIT {
+            return (
+                Some(Self::format_bit_bytes(&bytes, column.column_length())),
+                None,
+            );
+        }
+
+        if Self::is_binary_wire_value(column.column_type(), column.character_set()) {
+            let display = Some(Self::format_as_hex(&bytes));
+            return (display, Some(bytes));
+        }
+
+        if column.column_type() == ColumnType::MYSQL_TYPE_JSON {
+            if std::str::from_utf8(&bytes).is_ok() {
+                return (
+                    Some(
+                        String::from_utf8(bytes)
+                            .expect("MySQL JSON bytes were validated before decoding"),
+                    ),
+                    None,
+                );
+            }
+
+            let display = Some(Self::format_as_hex(&bytes));
+            return (display, Some(bytes));
+        }
+
+        if Self::is_character_wire_type(column.column_type()) {
+            let encoding = Self::result_encoding(column.character_set());
+            if let Some(decoder) = encoding
+                .charset
+                .as_deref()
+                .and_then(crate::query_result_normalization::mysql_text_decoder_for_charset)
+                .filter(|decoder| decoder.is_valid(&bytes))
+            {
+                return (Some(decoder.decode_validated(bytes)), None);
+            }
+
+            let display = Some(Self::format_as_hex(&bytes));
+            return (display, Some(bytes));
+        }
+
+        (Some(Self::format_bytes(&bytes)), None)
+    }
+
+    fn result_encoding(collation_id: u16) -> MysqlResultEncoding {
+        let id = CollationId::from(collation_id);
+        if id == CollationId::UNKNOWN_COLLATION_ID {
+            return MysqlResultEncoding {
+                charset: None,
+                collation: None,
+                collation_id,
+            };
+        }
+
+        let collation = Collation::from(id);
+        MysqlResultEncoding {
+            charset: Some(collation.charset().to_string()),
+            collation: Some(collation.collation().to_string()),
+            collation_id,
+        }
+    }
+
+    fn is_character_wire_type(column_type: ColumnType) -> bool {
+        matches!(
+            column_type,
+            ColumnType::MYSQL_TYPE_STRING
+                | ColumnType::MYSQL_TYPE_VAR_STRING
+                | ColumnType::MYSQL_TYPE_VARCHAR
+                | ColumnType::MYSQL_TYPE_TINY_BLOB
+                | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                | ColumnType::MYSQL_TYPE_LONG_BLOB
+                | ColumnType::MYSQL_TYPE_BLOB
+                | ColumnType::MYSQL_TYPE_ENUM
+                | ColumnType::MYSQL_TYPE_SET
+        )
+    }
+
     fn is_valid_utf8_text(bytes: &[u8]) -> bool {
         match std::str::from_utf8(bytes) {
             Ok(s) => s
@@ -237,9 +338,8 @@ impl MysqlDbConnection {
         }
     }
 
-    fn is_binary_column(column_type: ColumnType, flags: ColumnFlags, collation_id: u16) -> bool {
-        flags.contains(ColumnFlags::BINARY_FLAG)
-            && collation_id == Self::MYSQL_BINARY_COLLATION_ID
+    fn is_binary_wire_value(column_type: ColumnType, collation_id: u16) -> bool {
+        collation_id == Self::MYSQL_BINARY_COLLATION_ID
             && matches!(
                 column_type,
                 ColumnType::MYSQL_TYPE_STRING
@@ -341,7 +441,12 @@ impl MysqlDbConnection {
             .map(|col: &mysql_async::Column| {
                 let name = col.name_str().to_string();
                 let db_type = format!("{:?}", col.column_type());
-                QueryColumnMeta::new(name, db_type)
+                let encoding = Self::result_encoding(col.character_set());
+                QueryColumnMeta::new(name, db_type).with_result_encoding(
+                    encoding.charset,
+                    encoding.collation,
+                    Some(encoding.collation_id),
+                )
             })
             .collect();
 
@@ -356,25 +461,21 @@ impl MysqlDbConnection {
                 break;
             };
             let row_index = all_rows.len();
-            let row_data: Vec<Option<String>> = (0..row.len())
-                .map(|i| {
-                    let Some(column) = columns_arc.get(i) else {
-                        return Self::extract_value(&row[i]);
-                    };
-                    if Self::is_binary_column(
-                        column.column_type(),
-                        column.flags(),
-                        column.character_set(),
-                    ) {
-                        if let Value::Bytes(bytes) = &row[i] {
-                            binary_cells.push(BinaryCell {
-                                row_index,
-                                column_index: i,
-                                bytes: bytes.clone(),
-                            });
-                        }
+            let row_data = row
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .map(|(column_index, value)| {
+                    let (display, binary) =
+                        Self::extract_query_cell(value, columns_arc.get(column_index));
+                    if let Some(bytes) = binary {
+                        binary_cells.push(BinaryCell {
+                            row_index,
+                            column_index,
+                            bytes,
+                        });
                     }
-                    Self::extract_column_value(&row[i], column)
+                    display
                 })
                 .collect();
             all_rows.push(row_data);
@@ -566,13 +667,8 @@ impl DbConnection for MysqlDbConnection {
                     continue;
                 }
 
-                let sql_to_execute = apply_query_max_rows(
-                    plugin.name(),
-                    sql,
-                    options.max_rows,
-                    plugin.is_query_statement(sql),
-                );
-                let sql_to_execute = sql_to_execute.as_ref();
+                let sql_to_execute = plugin.apply_query_max_rows(sql, options.max_rows);
+                let sql_to_execute = sql_to_execute.as_str();
                 let sql_preview = if sql_to_execute.len() > 200 {
                     format!("{}...", truncate_str(sql_to_execute, 200))
                 } else {
@@ -662,12 +758,7 @@ impl DbConnection for MysqlDbConnection {
                     idx + 1,
                     statements.len()
                 );
-                let sql_to_execute = apply_query_max_rows(
-                    plugin.name(),
-                    sql,
-                    options.max_rows,
-                    plugin.is_query_statement(sql),
-                );
+                let sql_to_execute = plugin.apply_query_max_rows(sql, options.max_rows);
                 let result = Self::execute_single(conn, sql_to_execute.as_ref()).await?;
 
                 let is_error = result.is_error();
@@ -790,13 +881,8 @@ impl DbConnection for MysqlDbConnection {
                     };
 
                     current += 1;
-                    let sql_to_execute = apply_query_max_rows(
-                        plugin.name(),
-                        &sql,
-                        options.max_rows,
-                        plugin.is_query_statement(&sql),
-                    );
-                    let sql_to_execute = sql_to_execute.as_ref();
+                    let sql_to_execute = plugin.apply_query_max_rows(&sql, options.max_rows);
+                    let sql_to_execute = sql_to_execute.as_str();
                     let sql_preview = if sql_to_execute.len() > 200 {
                         format!("{}...", truncate_str(sql_to_execute, 200))
                     } else {
@@ -903,12 +989,7 @@ impl DbConnection for MysqlDbConnection {
                     current += 1;
                     debug!("[MySQL] Streaming statement {}", current);
 
-                    let sql_to_execute = apply_query_max_rows(
-                        plugin.name(),
-                        &sql,
-                        options.max_rows,
-                        plugin.is_query_statement(&sql),
-                    );
+                    let sql_to_execute = plugin.apply_query_max_rows(&sql, options.max_rows);
                     let result = match Self::execute_single(conn, sql_to_execute.as_ref()).await {
                         Ok(r) => r,
                         Err(e) => {
@@ -972,13 +1053,8 @@ impl DbConnection for MysqlDbConnection {
 
                 for (index, sql) in statements.into_iter().enumerate() {
                     let current = index + 1;
-                    let sql_to_execute = apply_query_max_rows(
-                        plugin.name(),
-                        &sql,
-                        options.max_rows,
-                        plugin.is_query_statement(&sql),
-                    );
-                    let sql_to_execute = sql_to_execute.as_ref();
+                    let sql_to_execute = plugin.apply_query_max_rows(&sql, options.max_rows);
+                    let sql_to_execute = sql_to_execute.as_str();
                     let sql_preview = if sql_to_execute.len() > 200 {
                         format!("{}...", truncate_str(sql_to_execute, 200))
                     } else {
@@ -1061,12 +1137,7 @@ impl DbConnection for MysqlDbConnection {
                     let current = index + 1;
                     debug!("[MySQL] Streaming statement {}/{}", current, total);
 
-                    let sql_to_execute = apply_query_max_rows(
-                        plugin.name(),
-                        &sql,
-                        options.max_rows,
-                        plugin.is_query_statement(&sql),
-                    );
+                    let sql_to_execute = plugin.apply_query_max_rows(&sql, options.max_rows);
                     let result = match Self::execute_single(conn, sql_to_execute.as_ref()).await {
                         Ok(r) => r,
                         Err(e) => {
@@ -1242,41 +1313,167 @@ mod tests {
     }
 
     #[test]
-    fn binary_column_detection_excludes_bit_and_requires_binary_collation_for_byte_columns() {
-        use mysql_async::consts::{ColumnFlags, ColumnType};
+    fn binary_wire_value_detection_accepts_only_binary_string_families() {
+        use mysql_async::consts::ColumnType;
 
         const UTF8MB4_BIN_COLLATION_ID: u16 = 46;
-
-        assert!(!MysqlDbConnection::is_binary_column(
-            ColumnType::MYSQL_TYPE_BIT,
-            ColumnFlags::empty(),
-            0,
-        ));
-        assert!(MysqlDbConnection::is_binary_column(
-            ColumnType::MYSQL_TYPE_BLOB,
-            ColumnFlags::BLOB_FLAG | ColumnFlags::BINARY_FLAG,
-            MysqlDbConnection::MYSQL_BINARY_COLLATION_ID,
-        ));
-        assert!(MysqlDbConnection::is_binary_column(
+        let accepted_types = [
+            ColumnType::MYSQL_TYPE_STRING,
             ColumnType::MYSQL_TYPE_VAR_STRING,
-            ColumnFlags::BINARY_FLAG,
-            MysqlDbConnection::MYSQL_BINARY_COLLATION_ID,
-        ));
-        assert!(!MysqlDbConnection::is_binary_column(
             ColumnType::MYSQL_TYPE_VARCHAR,
-            ColumnFlags::BINARY_FLAG,
-            UTF8MB4_BIN_COLLATION_ID,
-        ));
-        assert!(!MysqlDbConnection::is_binary_column(
+            ColumnType::MYSQL_TYPE_TINY_BLOB,
+            ColumnType::MYSQL_TYPE_MEDIUM_BLOB,
+            ColumnType::MYSQL_TYPE_LONG_BLOB,
             ColumnType::MYSQL_TYPE_BLOB,
-            ColumnFlags::BLOB_FLAG,
-            MysqlDbConnection::MYSQL_BINARY_COLLATION_ID,
-        ));
-        assert!(!MysqlDbConnection::is_binary_column(
+            ColumnType::MYSQL_TYPE_GEOMETRY,
+            ColumnType::MYSQL_TYPE_VECTOR,
+        ];
+
+        for column_type in accepted_types {
+            assert!(
+                MysqlDbConnection::is_binary_wire_value(
+                    column_type,
+                    MysqlDbConnection::MYSQL_BINARY_COLLATION_ID,
+                ),
+                "{column_type:?} should be binary for MySQL's binary pseudo-collation"
+            );
+            assert!(
+                !MysqlDbConnection::is_binary_wire_value(column_type, UTF8MB4_BIN_COLLATION_ID),
+                "{column_type:?} must not treat a character _bin collation as binary bytes"
+            );
+            assert!(
+                !MysqlDbConnection::is_binary_wire_value(column_type, 0),
+                "{column_type:?} must require the binary collation id"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_wire_value_detection_rejects_non_binary_value_types() {
+        use mysql_async::consts::ColumnType;
+
+        for column_type in [
+            ColumnType::MYSQL_TYPE_BIT,
+            ColumnType::MYSQL_TYPE_TINY,
             ColumnType::MYSQL_TYPE_LONG,
-            ColumnFlags::BINARY_FLAG,
-            MysqlDbConnection::MYSQL_BINARY_COLLATION_ID,
-        ));
+            ColumnType::MYSQL_TYPE_LONGLONG,
+            ColumnType::MYSQL_TYPE_DOUBLE,
+            ColumnType::MYSQL_TYPE_NEWDECIMAL,
+            ColumnType::MYSQL_TYPE_DATE,
+            ColumnType::MYSQL_TYPE_DATETIME,
+            ColumnType::MYSQL_TYPE_TIMESTAMP,
+            ColumnType::MYSQL_TYPE_JSON,
+        ] {
+            assert!(
+                !MysqlDbConnection::is_binary_wire_value(
+                    column_type,
+                    MysqlDbConnection::MYSQL_BINARY_COLLATION_ID,
+                ),
+                "{column_type:?} must remain a typed non-binary value"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_query_cell_moves_exact_bytes_into_a_bounded_preview_sidecar() {
+        use mysql_async::consts::{ColumnFlags, ColumnType};
+
+        let column = mysql_async::Column::new(ColumnType::MYSQL_TYPE_LONG_BLOB)
+            .with_flags(ColumnFlags::BINARY_FLAG | ColumnFlags::BLOB_FLAG)
+            .with_character_set(MysqlDbConnection::MYSQL_BINARY_COLLATION_ID);
+        let bytes = "文".repeat(800).into_bytes();
+
+        let (display, binary) =
+            MysqlDbConnection::extract_query_cell(Value::Bytes(bytes.clone()), Some(&column));
+
+        let display = display.expect("binary cell should keep a display preview");
+        assert!(display.ends_with(&format!("... ({} bytes)", bytes.len())));
+        assert!(display.len() < bytes.len());
+        assert_eq!(binary.as_deref(), Some(bytes.as_slice()));
+    }
+
+    #[test]
+    fn ordinary_text_query_cell_is_not_promoted_to_binary() {
+        use mysql_async::consts::ColumnType;
+
+        let column =
+            mysql_async::Column::new(ColumnType::MYSQL_TYPE_LONG_BLOB).with_character_set(45);
+        let bytes = "文".repeat(800).into_bytes();
+
+        let (display, binary) =
+            MysqlDbConnection::extract_query_cell(Value::Bytes(bytes.clone()), Some(&column));
+
+        assert_eq!(display.as_deref(), std::str::from_utf8(&bytes).ok());
+        assert!(binary.is_none());
+    }
+
+    #[test]
+    fn binary_flag_does_not_override_character_collation() {
+        use mysql_async::consts::{ColumnFlags, ColumnType};
+
+        let column = mysql_async::Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)
+            .with_flags(ColumnFlags::BINARY_FLAG)
+            .with_character_set(45);
+        let bytes = "带 BINARY 属性的文本".repeat(80).into_bytes();
+
+        let (display, binary) =
+            MysqlDbConnection::extract_query_cell(Value::Bytes(bytes.clone()), Some(&column));
+
+        assert_eq!(display.as_deref(), std::str::from_utf8(&bytes).ok());
+        assert!(
+            binary.is_none(),
+            "BINARY_FLAG only describes comparison/padding semantics and must not override a character collation"
+        );
+    }
+
+    #[test]
+    fn gbk_text_query_cell_uses_result_column_charset() {
+        use encoding_rs::GBK;
+        use mysql_async::consts::ColumnType;
+
+        let column =
+            mysql_async::Column::new(ColumnType::MYSQL_TYPE_LONG_BLOB).with_character_set(28);
+        let (bytes, _, had_errors) = GBK.encode("中文");
+        assert!(!had_errors);
+
+        let (display, binary) =
+            MysqlDbConnection::extract_query_cell(Value::Bytes(bytes.into_owned()), Some(&column));
+
+        assert_eq!(display.as_deref(), Some("中文"));
+        assert!(binary.is_none());
+    }
+
+    #[test]
+    fn invalid_text_bytes_remain_lossless_in_a_binary_sidecar() {
+        use mysql_async::consts::ColumnType;
+
+        let column =
+            mysql_async::Column::new(ColumnType::MYSQL_TYPE_LONG_BLOB).with_character_set(45);
+        let bytes = vec![0xff, 0xfe];
+
+        let (display, binary) =
+            MysqlDbConnection::extract_query_cell(Value::Bytes(bytes.clone()), Some(&column));
+
+        assert_eq!(display.as_deref(), Some("0xFFFE"));
+        assert_eq!(binary, Some(bytes));
+    }
+
+    #[test]
+    fn mysql_result_encoding_resolves_known_and_unknown_collations() {
+        let utf8mb4 = MysqlDbConnection::result_encoding(45);
+        assert_eq!(utf8mb4.charset.as_deref(), Some("utf8mb4"));
+        assert_eq!(utf8mb4.collation.as_deref(), Some("utf8mb4_general_ci"));
+        assert_eq!(utf8mb4.collation_id, 45);
+
+        let binary =
+            MysqlDbConnection::result_encoding(MysqlDbConnection::MYSQL_BINARY_COLLATION_ID);
+        assert_eq!(binary.charset.as_deref(), Some("binary"));
+        assert_eq!(binary.collation.as_deref(), Some("binary"));
+
+        let unknown = MysqlDbConnection::result_encoding(u16::MAX);
+        assert!(unknown.charset.is_none());
+        assert!(unknown.collation.is_none());
+        assert_eq!(unknown.collation_id, u16::MAX);
     }
 
     #[test]
@@ -1304,9 +1501,8 @@ mod tests {
             Some("0010".to_string()),
             MysqlDbConnection::extract_column_value(&Value::Bytes(vec![0b0010]), &column)
         );
-        assert!(!MysqlDbConnection::is_binary_column(
+        assert!(!MysqlDbConnection::is_binary_wire_value(
             column.column_type(),
-            column.flags(),
             column.character_set(),
         ));
     }

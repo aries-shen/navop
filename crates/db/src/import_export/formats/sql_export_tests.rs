@@ -1,6 +1,8 @@
 use super::*;
 use crate::connection::{DbError, StreamingProgress};
 use crate::executor::{BinaryCell, ExecOptions, QueryColumnMeta, SqlSource};
+use crate::import_export::FormatHandler;
+use crate::import_export::formats::SqlFormatHandler;
 use crate::mssql::MsSqlPlugin;
 use crate::mysql::MySqlPlugin;
 use crate::oracle::OraclePlugin;
@@ -17,12 +19,30 @@ struct PagedConnection {
     pages: Arc<Mutex<Vec<Vec<Vec<Option<String>>>>>>,
 }
 
+struct MySqlBinaryTextConnection {
+    config: DbConnectionConfig,
+    queries: Arc<Mutex<Vec<String>>>,
+}
+
 impl PagedConnection {
     fn new(pages: Vec<Vec<Vec<Option<String>>>>) -> Self {
         Self {
             config: test_config(),
             queries: Arc::new(Mutex::new(Vec::new())),
             pages: Arc::new(Mutex::new(pages)),
+        }
+    }
+
+    fn queries(&self) -> Vec<String> {
+        self.queries.lock().unwrap().clone()
+    }
+}
+
+impl MySqlBinaryTextConnection {
+    fn new() -> Self {
+        Self {
+            config: test_config(),
+            queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -105,6 +125,158 @@ impl DbConnection for PagedConnection {
     }
 }
 
+#[async_trait]
+impl DbConnection for MySqlBinaryTextConnection {
+    fn config(&self) -> &DbConnectionConfig {
+        &self.config
+    }
+
+    fn set_config_database(&mut self, database: Option<String>) {
+        self.config.database = database;
+    }
+
+    async fn connect(&mut self) -> std::result::Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> std::result::Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn execute(
+        &self,
+        _plugin: &dyn DatabasePlugin,
+        _script: &str,
+        _options: ExecOptions,
+    ) -> std::result::Result<Vec<SqlResult>, DbError> {
+        Ok(Vec::new())
+    }
+
+    async fn query(&self, query: &str) -> std::result::Result<SqlResult, DbError> {
+        self.queries.lock().unwrap().push(query.to_string());
+
+        if query.contains("INFORMATION_SCHEMA.COLUMNS") {
+            return Ok(SqlResult::Query(QueryResult {
+                sql: query.to_string(),
+                columns: [
+                    "COLUMN_NAME",
+                    "COLUMN_TYPE",
+                    "IS_NULLABLE",
+                    "COLUMN_KEY",
+                    "COLUMN_DEFAULT",
+                    "COLUMN_COMMENT",
+                    "CHARACTER_SET_NAME",
+                    "COLLATION_NAME",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                column_meta: [
+                    "COLUMN_NAME",
+                    "COLUMN_TYPE",
+                    "IS_NULLABLE",
+                    "COLUMN_KEY",
+                    "COLUMN_DEFAULT",
+                    "COLUMN_COMMENT",
+                    "CHARACTER_SET_NAME",
+                    "COLLATION_NAME",
+                ]
+                .into_iter()
+                .map(|name| QueryColumnMeta::new(name, "VARCHAR"))
+                .collect(),
+                rows: vec![
+                    vec![
+                        Some("id".to_string()),
+                        Some("BIGINT".to_string()),
+                        Some("NO".to_string()),
+                        Some("PRI".to_string()),
+                        None,
+                        Some(String::new()),
+                        None,
+                        None,
+                    ],
+                    vec![
+                        Some("payload".to_string()),
+                        Some("LONGTEXT".to_string()),
+                        Some("YES".to_string()),
+                        Some(String::new()),
+                        None,
+                        Some(String::new()),
+                        Some("utf8mb4".to_string()),
+                        Some("utf8mb4_0900_ai_ci".to_string()),
+                    ],
+                    vec![
+                        Some("raw".to_string()),
+                        Some("LONGBLOB".to_string()),
+                        Some("YES".to_string()),
+                        Some(String::new()),
+                        None,
+                        Some(String::new()),
+                        None,
+                        Some("binary".to_string()),
+                    ],
+                ],
+                binary_cells: vec![],
+                elapsed_ms: 1,
+            }));
+        }
+
+        Ok(SqlResult::Query(QueryResult {
+            sql: query.to_string(),
+            columns: vec!["id".to_string(), "payload".to_string(), "raw".to_string()],
+            column_meta: vec![
+                QueryColumnMeta::new("id", "MYSQL_TYPE_LONGLONG"),
+                QueryColumnMeta::new("payload", "MYSQL_TYPE_LONG_BLOB").with_result_encoding(
+                    Some("binary"),
+                    Some("binary"),
+                    Some(63),
+                ),
+                QueryColumnMeta::new("raw", "MYSQL_TYPE_LONG_BLOB").with_result_encoding(
+                    Some("binary"),
+                    Some("binary"),
+                    Some(63),
+                ),
+            ],
+            rows: vec![vec![
+                Some("1".to_string()),
+                Some("0x74727565".to_string()),
+                Some("0x000102ff".to_string()),
+            ]],
+            binary_cells: vec![
+                BinaryCell {
+                    row_index: 0,
+                    column_index: 1,
+                    bytes: b"true".to_vec(),
+                },
+                BinaryCell {
+                    row_index: 0,
+                    column_index: 2,
+                    bytes: vec![0x00, 0x01, 0x02, 0xff],
+                },
+            ],
+            elapsed_ms: 1,
+        }))
+    }
+
+    async fn current_database(&self) -> std::result::Result<Option<String>, DbError> {
+        Ok(Some("app".to_string()))
+    }
+
+    async fn switch_database(&self, _database: &str) -> std::result::Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn execute_streaming(
+        &self,
+        _plugin: &dyn DatabasePlugin,
+        _source: SqlSource,
+        _options: ExecOptions,
+        _sender: mpsc::Sender<StreamingProgress>,
+    ) -> std::result::Result<(), DbError> {
+        Ok(())
+    }
+}
+
 fn row(id: usize) -> Vec<Option<String>> {
     vec![Some(id.to_string()), Some(format!("user'{id}"))]
 }
@@ -126,6 +298,68 @@ fn test_config() -> DbConnectionConfig {
         credential_reference: None,
         extra_params: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn sql_export_output_starts_with_database_header() {
+    let connection = PagedConnection::new(Vec::new());
+    let config = ExportConfig {
+        database: "comi_ai_manager".to_string(),
+        tables: Vec::new(),
+        ..ExportConfig::default()
+    };
+
+    let result = SqlFormatHandler
+        .export(&MySqlPlugin::new(), &connection, &config)
+        .await
+        .expect("SQL export should succeed");
+
+    let lines = result.output.lines().collect::<Vec<_>>();
+    assert_eq!(Some(&"-- Database export: comi_ai_manager"), lines.first());
+    assert!(
+        lines
+            .get(1)
+            .is_some_and(|line| line.starts_with("-- Date: "))
+    );
+    assert_eq!(Some(&"-- Generated by Navop"), lines.get(2));
+    assert_eq!(Some(&""), lines.get(3));
+    chrono::NaiveDateTime::parse_from_str(
+        lines[1].trim_start_matches("-- Date: "),
+        "%Y-%m-%d %H:%M:%S",
+    )
+    .expect("export date should use YYYY-MM-DD HH:MM:SS");
+}
+
+#[tokio::test]
+async fn streaming_sql_export_sends_header_before_table_events() {
+    let connection = PagedConnection::new(Vec::new());
+    let config = ExportConfig {
+        database: "comi_ai_manager".to_string(),
+        tables: Vec::new(),
+        ..ExportConfig::default()
+    };
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+
+    let result = SqlFormatHandler
+        .export_with_progress(&MySqlPlugin::new(), &connection, &config, Some(progress_tx))
+        .await
+        .expect("streaming SQL export should succeed");
+
+    assert!(result.output.is_empty());
+    let first_event = progress_rx
+        .recv()
+        .await
+        .expect("streaming export should emit a header");
+    assert!(matches!(
+        first_event,
+        ExportProgressEvent::HeaderExported { data }
+            if data.starts_with("-- Database export: comi_ai_manager\n-- Date: ")
+                && data.ends_with("\n-- Generated by Navop\n\n")
+    ));
+    assert!(matches!(
+        progress_rx.recv().await,
+        Some(ExportProgressEvent::Finished { total_rows: 0, .. })
+    ));
 }
 
 #[tokio::test]
@@ -247,9 +481,98 @@ fn sql_dump_prefers_binary_sidecar_without_guessing_from_display_text() {
         "binary_data",
         &query_result,
         &mut wrote_header,
-    );
+    )
+    .expect("valid query result should render");
 
     assert!(output.contains("VALUES (X'0001ff', '0x0001ff');"));
+}
+
+#[tokio::test]
+async fn mysql_sql_export_normalizes_longtext_and_preserves_longblob_binary_literals() {
+    let connection = MySqlBinaryTextConnection::new();
+    let config = ExportConfig {
+        database: "app".to_string(),
+        tables: vec!["binary_text".to_string()],
+        ..ExportConfig::default()
+    };
+    let mut output = String::new();
+
+    let rows = export_table_data_in_pages(
+        &MySqlPlugin::new(),
+        &connection,
+        &config,
+        "binary_text",
+        false,
+        &mut output,
+        &|_| {},
+    )
+    .await
+    .expect("MySQL SQL export should reconcile text and binary schema semantics");
+
+    assert_eq!(rows, 1);
+    assert!(output.contains("VALUES (1, 'true', X'000102ff');"));
+    assert!(!output.contains("X'74727565'"));
+    assert_eq!(
+        connection.queries(),
+        vec![
+            "SELECT * FROM `app`.`binary_text` LIMIT 1000 OFFSET 0",
+            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT, CHARACTER_SET_NAME, COLLATION_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'app' AND TABLE_NAME = 'binary_text' ORDER BY ORDINAL_POSITION",
+        ]
+    );
+}
+
+#[test]
+fn sql_dump_preserves_null_empty_text_and_empty_binary() {
+    let query_result = QueryResult {
+        sql: "SELECT nullable, empty_text, empty_binary FROM t".to_string(),
+        columns: vec![
+            "nullable".to_string(),
+            "empty_text".to_string(),
+            "empty_binary".to_string(),
+        ],
+        column_meta: vec![
+            QueryColumnMeta::new("nullable", "TEXT"),
+            QueryColumnMeta::new("empty_text", "TEXT"),
+            QueryColumnMeta::new("empty_binary", "BLOB"),
+        ],
+        rows: vec![vec![None, Some(String::new()), None]],
+        binary_cells: vec![BinaryCell {
+            row_index: 0,
+            column_index: 2,
+            bytes: Vec::new(),
+        }],
+        elapsed_ms: 1,
+    };
+
+    let output = render_insert_statements(&MySqlPlugin::new(), "`t`", &query_result)
+        .expect("valid query result should render");
+
+    assert!(output.contains("VALUES (NULL, '', X'');"));
+}
+
+#[test]
+fn sql_dump_rejects_malformed_query_result() {
+    let query_result = QueryResult {
+        sql: "SELECT a, b FROM t".to_string(),
+        columns: vec!["a".to_string(), "b".to_string()],
+        column_meta: vec![
+            QueryColumnMeta::new("a", "TEXT"),
+            QueryColumnMeta::new("b", "TEXT"),
+        ],
+        rows: vec![vec![Some("only one cell".to_string())]],
+        binary_cells: vec![],
+        elapsed_ms: 1,
+    };
+
+    let error = render_insert_statements(&MySqlPlugin::new(), "`t`", &query_result)
+        .expect_err("short rows must fail instead of being treated as NULL");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Invalid query result for SQL export")
+    );
+    assert!(error.to_string().contains("row 0 has width 1, expected 2"));
 }
 
 #[test]
@@ -269,7 +592,8 @@ fn mysql_sql_dump_formats_bit_values_as_unquoted_literals() {
         elapsed_ms: 1,
     };
 
-    let output = render_insert_statements(&MySqlPlugin::new(), "`test_bit`", &query_result);
+    let output = render_insert_statements(&MySqlPlugin::new(), "`test_bit`", &query_result)
+        .expect("valid query result should render");
 
     assert_eq!(
         concat!(
