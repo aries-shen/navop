@@ -33,45 +33,6 @@ impl RemoteDesktopView {
         self.windows_native_display
             .observe(settings, Instant::now());
     }
-
-    pub(super) fn flush_windows_native_display_settings(&mut self, now: Instant) {
-        let Some(request) = self.windows_native_display.take_request(now) else {
-            return;
-        };
-        log_display_request(request);
-        if !self.windows_native_display_target_is_open(request) {
-            log_display_target_unavailable(request);
-            self.windows_native_display.suspend();
-            return;
-        }
-        let settings = windows_rdp_host::WindowsRdpSessionDisplaySettings::viewport(
-            request.settings.width,
-            request.settings.height,
-            request.settings.desktop_scale_factor,
-        );
-        let result = settings.and_then(|settings| {
-            self.windows_native
-                .as_mut()
-                .expect("validated native display target")
-                .update_session_display_settings(settings)
-        });
-        match result {
-            Ok(()) => {
-                self.windows_native_display.request_succeeded(request);
-                log_display_success(request);
-            }
-            Err(error) => {
-                self.windows_native_display.request_failed(request, now);
-                log_display_failure(request, error);
-            }
-        }
-    }
-
-    fn windows_native_display_target_is_open(&self, request: WindowsNativeDisplayRequest) -> bool {
-        self.windows_native
-            .as_ref()
-            .is_some_and(|native| native.generation() == request.generation && native.is_open())
-    }
 }
 
 fn physical_viewport_settings(
@@ -99,7 +60,7 @@ fn physical_viewport_settings(
     })
 }
 
-fn log_display_request(request: WindowsNativeDisplayRequest) {
+pub(super) fn log_display_request(request: WindowsNativeDisplayRequest) {
     tracing::info!(
         reason = ?request.reason,
         generation = request.generation,
@@ -110,7 +71,7 @@ fn log_display_request(request: WindowsNativeDisplayRequest) {
     );
 }
 
-fn log_display_success(request: WindowsNativeDisplayRequest) {
+pub(super) fn log_display_success(request: WindowsNativeDisplayRequest) {
     tracing::info!(
         reason = ?request.reason,
         generation = request.generation,
@@ -121,7 +82,7 @@ fn log_display_success(request: WindowsNativeDisplayRequest) {
     );
 }
 
-fn log_display_failure(
+pub(super) fn log_display_failure(
     request: WindowsNativeDisplayRequest,
     error: windows_rdp_host::WindowsRdpHostError,
 ) {
@@ -136,7 +97,7 @@ fn log_display_failure(
     );
 }
 
-fn log_display_target_unavailable(request: WindowsNativeDisplayRequest) {
+pub(super) fn log_display_target_unavailable(request: WindowsNativeDisplayRequest) {
     tracing::warn!(
         reason = ?request.reason,
         generation = request.generation,

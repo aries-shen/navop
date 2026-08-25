@@ -82,32 +82,55 @@ impl ConnectionImportWindow {
         self.status_message = None;
         cx.notify();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let result = {
+            let scan_result = {
                 let ids = importer_ids.clone();
-                let task = Tokio::spawn(cx, async move {
-                    let reports = scan_import_sources(ids.clone()).await?;
-                    let preview_ids = previewable_source_ids_after_scan(&ids, &reports);
-                    let preview = preview_import_records(preview_ids.clone(), true).await?;
-                    Ok::<_, String>((reports, preview_ids, preview))
-                });
-                match task.await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        Err(t!("Home.ConnectionImport.scan_task_failed", error = error).to_string())
-                    }
+                let task = Tokio::spawn(cx, async move { scan_import_sources(ids).await });
+                task.await.unwrap_or_else(|error| {
+                    Err(t!("Home.ConnectionImport.scan_task_failed", error = error).to_string())
+                })
+            };
+            let reports = match scan_result {
+                Ok(reports) => reports,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.scanning = false;
+                        this.status_message = Some(error);
+                        cx.notify();
+                    });
+                    return;
                 }
+            };
+            let preview_ids = previewable_source_ids_after_scan(&importer_ids, &reports);
+            if this
+                .update(cx, |this, cx| {
+                    this.model.apply_scan_reports(reports);
+                    this.status_message = None;
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            let preview_result = {
+                let ids = preview_ids.clone();
+                let task = Tokio::spawn(cx, async move { preview_import_records(ids, true).await });
+                task.await.unwrap_or_else(|error| {
+                    Err(t!("Home.ConnectionImport.scan_task_failed", error = error).to_string())
+                })
             };
             let _ = this.update(cx, |this, cx| {
                 this.scanning = false;
-                match result {
-                    Ok((reports, preview_ids, preview)) => {
-                        this.model.apply_scan_reports(reports);
+                match preview_result {
+                    Ok(preview) => {
                         this.model.apply_preview_records(preview.records);
                         this.model
                             .apply_preview_errors(&preview_ids, preview.errors);
                         this.status_message = None;
                     }
-                    Err(error) => this.status_message = Some(error),
+                    Err(error) => {
+                        this.status_message = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -149,14 +172,81 @@ impl ConnectionImportWindow {
                 let task = Tokio::spawn(cx, async move {
                     preview_import_records_from_files(id, selected_paths, true).await
                 });
-                match task.await {
-                    Ok(result) => result,
-                    Err(error) => Err(t!(
+                task.await.unwrap_or_else(|error| {
+                    Err(t!(
                         "Home.ConnectionImport.file_parse_task_failed",
                         error = error
                     )
-                    .to_string()),
+                    .to_string())
+                })
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.scanning = false;
+                match result {
+                    Ok(preview) => {
+                        let is_empty = preview.records.is_empty() && preview.errors.is_empty();
+                        let error_message =
+                            preview.errors.first().map(|error| error.message.clone());
+                        this.model.apply_preview_records(preview.records);
+                        this.model.apply_preview_errors(
+                            std::slice::from_ref(&importer_id),
+                            preview.errors,
+                        );
+                        this.status_message = error_message.or_else(|| {
+                            is_empty.then(|| {
+                                t!("Home.ConnectionImport.no_importable_connections").to_string()
+                            })
+                        });
+                    }
+                    Err(error) => this.status_message = Some(error),
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn import_source_directory(
+        &mut self,
+        importer_id: String,
+        prompt: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.scanning {
+            return;
+        }
+        let future = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some(prompt.into()),
+        });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Ok(Ok(Some(paths))) = future.await else {
+                return;
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.scanning = true;
+                this.status_message = None;
+                cx.notify();
+            });
+            let result = {
+                let id = importer_id.clone();
+                let selected_paths: Vec<PathBuf> = paths.into_iter().collect();
+                let task = Tokio::spawn(cx, async move {
+                    preview_import_records_from_files(id, selected_paths, true).await
+                });
+                task.await.unwrap_or_else(|error| {
+                    Err(t!(
+                        "Home.ConnectionImport.directory_scan_task_failed",
+                        error = error
+                    )
+                    .to_string())
+                })
             };
             let _ = this.update(cx, |this, cx| {
                 this.scanning = false;

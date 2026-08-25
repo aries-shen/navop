@@ -12,32 +12,33 @@ Navop 提供 macOS、Windows 與 Linux 桌面版本。安裝包必須符合系�
 
 | 平台 | 裝置/架構 | 建議檔案 | 適用情境 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | Apple Silicon `.dmg` 或 `.tar.gz` | M 系列 Mac |
-| macOS | Intel | Intel `.dmg` 或 `.tar.gz` | Intel Mac |
-| Windows | x86_64 | `.msi` | MSI 安裝包，提供開始功能表、桌面捷徑與穩定的檔案關聯 |
-| Windows | x86_64 | `.exe` | EXE 安裝包，封裝同一套目前使用者 MSI 安裝流程 |
-| Windows | x86_64 | `.zip` | 免安裝執行；資料仍儲存在 Windows 使用者目錄 |
-| Windows | x86_64 | `-portable.zip` | 將程式與資料放在同一個可搬移目錄 |
-| Linux | x86_64 | `.deb`、`.rpm`、`.AppImage` 或 `.tar.gz` | 依發行版與桌面環境選擇 |
+| macOS | Apple Silicon | `navop-<version>-macos-arm64.dmg` 或 `navop-<version>-macos-arm64.tar.gz` | M 系列 Mac |
+| macOS | Intel | `navop-<version>-macos-x64.dmg` 或 `navop-<version>-macos-x64.tar.gz` | Intel Mac |
+| Windows | x86_64 | `navop-<version>-windows-x64.msi` | MSI 安裝包，提供開始功能表、桌面捷徑與穩定的檔案關聯 |
+| Windows | x86_64 | `navop-<version>-windows-x64.exe` | EXE 安裝包，封裝同一套目前使用者 MSI 安裝流程 |
+| Windows | x86_64 | `navop-<version>-windows-x64.zip` | 免安裝執行；資料仍儲存在 Windows 使用者目錄 |
+| Windows | x86_64 | `navop-<version>-windows-x64-portable.zip` | 將程式與資料放在同一個可搬移目錄 |
+| Linux | x86_64 | `navop-<version>-linux-x64.tar.gz`、`navop-<version>-linux-x64-portable.tar.gz`、`navop_<version>_amd64.deb`、`navop-<version>-1.x86_64.rpm`、`navop_<version>_amd64.AppImage` | 依發行版與桌面環境選擇 |
+| Linux | ARM64 | `navop-<version>-linux-arm64.tar.gz`、`navop-<version>-linux-arm64-portable.tar.gz` | ARM64 裝置 |
 
 可使用同一發佈版本中的 `sha256sums.txt` 驗證下載完整性。
 
 ## Windows 安裝版
 
-一般安裝可以選擇 `navop-x86_64-pc-windows-msvc.msi` 或 `navop-x86_64-pc-windows-msvc.exe`。EXE 安裝包內嵌並啟動同一套 MSI 安裝流程，因此兩者預設都安裝到目前使用者目錄，建立開始功能表與桌面捷徑，註冊支援的檔案關聯，使用標準 Windows 使用者資料目錄，並支援記住主密鑰後自動解鎖。使用預設的目前使用者安裝位置時不需要管理員權限。
+一般安裝可以選擇 `navop-<version>-windows-x64.msi` 或 `navop-<version>-windows-x64.exe`；32 位元 Windows 請下載名稱中明確包含 `win32` 的安裝包，例如 `navop-<version>-win32.exe`。EXE 安裝包內嵌並啟動同一套 MSI 安裝流程，因此兩者預設都安裝到目前使用者目錄，建立開始功能表與桌面捷徑，註冊支援的檔案關聯，使用標準 Windows 使用者資料目錄，並支援記住主密鑰後自動解鎖。使用預設的目前使用者安裝位置時不需要管理員權限。
 
 ## Windows 免安裝 ZIP
 
-一般 `navop-x86_64-pc-windows-msvc.zip` 只包含普通的 `navop.exe`，使用前必須完整解壓縮。它不會安裝捷徑或檔案關聯，但仍使用標準 Windows 使用者資料目錄，並支援記住主密鑰後自動解鎖。除非要主動啟用下述便攜模式，否則不要在執行檔旁放置 `navop.portable`。
+一般 `navop-<version>-windows-x64.zip`（32 位元版本為 `navop-<version>-win32.zip`）只包含普通的 `navop.exe`，使用前必須完整解壓縮。它不會安裝捷徑或檔案關聯，但仍使用標準 Windows 使用者資料目錄，並支援記住主密鑰後自動解鎖。除非要主動啟用下述便攜模式，否則不要在執行檔旁放置 `navop.portable`。
 
 ### 從 v0.10.1 或更早版本的 Windows ZIP 升級
 
 > [!IMPORTANT]
-> v0.10.1 及更早版本的一般 Windows ZIP 實際上已包含 `navop.portable`，因此這些使用者目前執行的是便攜模式。升級時請下載新的 `navop-x86_64-pc-windows-msvc-portable.zip`，備份並完整保留舊目錄中的 `data`，同時確認 `navop.portable` 仍與 `navop.exe` 位於同一層。
+> v0.10.1 及更早版本的一般 Windows ZIP 實際上已包含 `navop.portable`，因此這些使用者目前執行的是便攜模式。升級時請下載新的 `navop-<version>-windows-x64-portable.zip`（32 位元版本名稱包含 `win32`），備份並完整保留舊目錄中的 `data`，同時確認 `navop.portable` 仍與 `navop.exe` 位於同一層。
 
 不要為了切換版本而直接刪除舊目錄中的 `navop.portable`。刪除標記只會讓 Navop 改用標準 Windows 使用者資料目錄，不會自動複製或搬移原有的便攜資料。
 
-如果將新的一般 `navop-x86_64-pc-windows-msvc.zip` 解壓縮到全新目錄，或改用 MSI/EXE 安裝版，Navop 將使用標準 Windows 使用者資料目錄。此時原有連線、設定與擴充可能看似消失，但舊便攜目錄中的資料並未被刪除；安裝程式也不會自動搬移該目錄。需要改用安裝版時，請先保留完整的舊便攜目錄與主密鑰，確認搬移後的資料可用，再清理舊目錄。
+如果將新的一般 `navop-<version>-windows-x64.zip` 或 `navop-<version>-win32.zip` 解壓縮到全新目錄，或改用 MSI/EXE 安裝版，Navop 將使用標準 Windows 使用者資料目錄。此時原有連線、設定與擴充可能看似消失，但舊便攜目錄中的資料並未被刪除；安裝程式也不會自動搬移該目錄。需要改用安裝版時，請先保留完整的舊便攜目錄與主密鑰，確認搬移後的資料可用，再清理舊目錄。
 
 ## Windows 便攜版
 

@@ -4,6 +4,118 @@ Navop user-facing release notes. Generate and review each bilingual version entr
 
 <!-- NAVOP_RELEASES -->
 
+## [v0.11.0] - 2026-08-24
+
+### 中文
+
+#### 更新内容
+
+- 连接列表新增排序设置：「设置 → 通用 → 连接显示」新增「连接排序」，默认按名称自然排序（IP 地址等数字段按数值比较、忽略大小写），也可切换为「最近使用优先（LRU）」；首页连接列表、Redis/MongoDB 工作区标签页与持久侧栏连接树统一应用该配置，切换后即时生效。
+- SSH 新增对老旧服务器的可选兼容支持：在连接「高级设置」中开启「允许旧版 SSH 算法」后，可连接仅支持 DSA 主机密钥、SHA-1 密钥交换/MAC 或 1024 位 DH 组协商的旧设备，并针对「Key exchange init failed」问题调整协商参数与顺序，同时完善相关错误提示。
+- 标签页改进：复制标签页自动追加序号（例如 192.168.1.1 → 192.168.1.1(1)），并复用已释放的编号；标签宽度按内容自适应，不再截断长标题。
+- 更新依赖以提升安全性与功能：升级 clickhouse、sqlparser、russh、russh-sftp 等依赖，并引入 gpui-ce 剪贴板修复。
+
+#### 修复与优化
+
+- 修复原生 RDP 遮挡对话框与关闭流程问题，改进原生窗口叠加层、连接状态显示与剪贴板同步重试回退。
+- 修复 MySQL 数据库导出时 LONGTEXT 字段未能作为文本正确导出的问题。
+
+---
+
+### English
+
+#### What's New
+
+- Added configurable connection sorting under **Settings → General → Connection Display**: a new "Connection Sorting" option defaults to natural name order (numeric segments such as IP addresses compared by value, case-insensitive) with "Most Recently Used" (LRU) also available; the Home connection list, Redis/MongoDB workspace tabs, and the persistent connection sidebar tree all honor the setting and refresh immediately on change.
+- SSH now offers opt-in compatibility for legacy servers. With "Allow Legacy SSH Algorithms" enabled under **Advanced Settings**, Navop can connect to old devices that only support DSA host keys, SHA-1 key exchange/MAC, or 1024-bit DH group negotiation, with adjusted negotiation parameters and order that avoid "Key exchange init failed", plus clearer error messages.
+- Improved tabs: duplicated tabs are automatically numbered (e.g. `192.168.1.1` → `192.168.1.1(1)`), reusing freed numbers, and tab widths now adapt to content so long titles are not truncated.
+- Updated dependencies for security and functionality: clickhouse, sqlparser, russh, and russh-sftp were upgraded, and a gpui-ce clipboard fix was included.
+
+#### Fixes and Improvements
+
+- Fixed native RDP overlay dialogs and the close flow, and improved native window overlay handling, connecting status display, and clipboard retry/backoff.
+- Fixed MySQL export so `LONGTEXT` fields are correctly exported as text.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.10.10...v0.11.0
+
+## [v0.10.10] - 2026-08-24
+
+### 中文
+
+#### 修复与优化
+
+- 修复 Windows RDP 独立全屏窗口的兼容性与稳定性问题：从连接右键菜单打开独立窗口时，改用系统远程桌面客户端 `mstsc.exe` 启动全屏会话，避免内嵌原生窗口可能出现的白屏、焦点和退出异常。
+- 支持将主机名、IPv4、IPv6 与自定义端口正确传递给系统远程桌面客户端；参数无效或外部程序启动失败时会在 Navop 中显示明确提示。
+- 修复 Windows 原生 RDP 会话关闭超时后标签页可能无法完成关闭的问题；超时隔离原生组件后，Navop 现在会正确收敛标签页关闭流程。
+- 修复关闭当前标签页后剩余标签页未正确激活、聚焦，以及延迟激活事件可能让空标签容器覆盖新版首页的问题。
+- 非 Windows 平台及 VNC 独立窗口继续使用 Navop 内置窗口，不受本次调整影响。
+
+---
+
+### English
+
+#### Fixes and Improvements
+
+- Fixed compatibility and stability issues with dedicated fullscreen Windows RDP windows. Opening a dedicated window from a connection's context menu now launches the system Remote Desktop client (`mstsc.exe`) in fullscreen, avoiding white-screen, focus, and exit issues that could occur with the embedded native window.
+- Correctly passes hostnames, IPv4/IPv6 addresses, and custom ports to the system Remote Desktop client, with clear in-app messages when the connection parameters are invalid or the external program cannot be launched.
+- Fixed an issue where a Windows native RDP tab could remain open after native shutdown timed out. Once the native component is quarantined, Navop now completes the tab close flow correctly.
+- Fixed lifecycle and focus restoration for the remaining tab after closing the active tab, and prevented a delayed activation event from replacing the modern home page with an empty tab container.
+- Dedicated VNC windows and remote desktop windows on non-Windows platforms continue to use Navop's built-in window and are unaffected by this change.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.10.9...v0.10.10
+
+## [v0.10.9] - 2026-08-24
+
+### 中文
+
+#### 更新内容
+
+- 标签页新增会话锁定功能：可通过密码锁定/解锁会话（密码仅保存在内存中），支持「锁定全部会话」与「隐藏输出」，锁定中的终端会拒绝键盘输入，且无法通过关闭按钮直接关闭。
+- 标签页新增 SecureCRT 风格的连接状态徽章：已连接、断开、已连接并锁定等状态以不同图标显示，并带悬浮提示。
+- 连接导入新增 SecureCRT 会话与快捷命令支持，支持手动扫描目录，并展示扫描到的可用工作区分组。
+- SSH 支持可选的旧版 ssh-dss 主机密钥认证，并在 Windows 上新增 Pageant 认证。
+- 终端快捷命令编辑器新增「点击执行」选项，点击命令即可自动回车执行；终端设置新增建议弹窗独立开关，并增强设置面板与命令栏功能。
+- Telnet 连接支持自定义退格键编码。
+- 数据库工作区改进：MySQL/PostgreSQL 表信息视图新增表大小、索引数等信息；SQL 导出保留 Schema 元数据并支持使用当前选中的数据库；二进制与文本值（含 MySQL BIT、文本 sidecar、空二进制）在显示、编辑、导入导出等数据工作流中得到更好保留；修复字符类型显示与编辑问题。
+- 数据库比较功能优化：改进结果布局与差异浏览，差异详情列表采用虚拟化渲染，比较问题区域支持滚动查看。
+- 连接表单统一 SSH 隧道配置，减少重复填写。
+- Windows 原生 RDP 全面重构初始化与关闭生命周期，修复白屏与崩溃问题，默认在标签页中打开；独立全屏窗口改为从连接右键菜单打开且默认激活呈现，支持通过顶部悬停显示标题栏并按 ESC 退出全屏；仅保留 Windows 原生 MSTSC 与 IronRDP 后端。
+- 其他改进：窗口跨显示器恢复位置、SFTP 支持延迟凭据提示、PostgreSQL 瞬时连接失败自动重试、RDP 标准化 Windows 剪贴板文件路径、首页快速打开连接改为双击触发、补充国际化文案。
+
+#### 修复与优化
+
+- 修复 Windows 原生 RDP 初始化与关闭期间的崩溃和白屏问题。
+- 修复数据库字符类型显示与编辑，以及二进制/文本值在数据工作流中丢失的问题。
+- 修复终端 ZMODEM 探测输出停滞、AI 聊天侧栏切换标签后滚动位置丢失等问题。
+- 修复窗口在多个显示器之间切换后无法恢复位置的问题。
+
+---
+
+### English
+
+#### What's New
+
+- Added session locking to tabs: lock and unlock sessions with a password kept only in memory, with "Lock All Sessions" and "Hide Output" options; locked terminals reject keystrokes and cannot be closed via the close button.
+- Added SecureCRT-style connection status badges to tabs, showing connected, disconnected, and connected-and-locked states with tooltips.
+- Added SecureCRT session and quick-command import, with manual directory scanning and surfaced scanned workspace groups.
+- Added opt-in legacy ssh-dss host-key support for SSH, and Pageant authentication on Windows.
+- Quick-command editor now supports "execute on click" to run a command immediately, added an independent toggle for the suggestion popup in terminal settings, and enhanced the settings panel and command bar.
+- Added configurable backspace code for Telnet connections.
+- Improved the database workspace: MySQL/PostgreSQL table views now show table sizes and index counts; SQL exports preserve schema metadata and can use the currently selected database; binary and text values (including MySQL BIT, text sidecars, and empty binary) are better preserved across display, editing, import, and export workflows; fixed character-type display and editing.
+- Improved database comparison with better result layout and diff browsing, virtualized diff-detail lists, and scrollable comparison issues.
+- Unified the SSH tunnel form in connection forms to reduce repeated configuration.
+- Rebuilt Windows native RDP initialization and shutdown lifecycle to fix white screens and crashes, opening in a tab by default; the dedicated fullscreen window is available from the connection context menu, starts as the active presentation, reveals its title bar on top-edge hover, and exits fullscreen with Escape; only the Windows-native MSTSC and IronRDP backends remain.
+- Other improvements: window placement is restored across displays, SFTP prompts for delayed credentials, PostgreSQL retries transient connection failures, RDP normalizes Windows clipboard file paths, quick-open on the home page now triggers on double-click, and additional i18n text was added.
+
+#### Fixes and Improvements
+
+- Fixed crashes and white screens during Windows native RDP initialization and shutdown.
+- Fixed database character-type display and editing, and the loss of binary/text values across data workflows.
+- Fixed stalled ZMODEM probe output in terminals and AI Chat sidebar scroll position after switching tabs.
+- Fixed window placement not being restored when switching between multiple displays.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.10.8...v0.10.9
+
 ## [v0.10.8] - 2026-08-20
 
 ### 中文

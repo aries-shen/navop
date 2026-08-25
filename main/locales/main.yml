@@ -123,6 +123,14 @@ Home:
     en: "Invalid local terminal configuration: %{error}"
     zh-CN: "本地终端配置无效：%{error}"
     zh-HK: "本機終端設定無效：%{error}"
+  remote_desktop_parameters_invalid:
+    en: "Invalid remote desktop connection parameters: %{error}"
+    zh-CN: "远程桌面连接参数无效：%{error}"
+    zh-HK: "遠程桌面連線參數無效：%{error}"
+  external_program_launch_failed:
+    en: "Unable to launch the Windows Remote Desktop client: %{error}"
+    zh-CN: "无法启动 Windows 远程桌面客户端：%{error}"
+    zh-HK: "無法啟動 Windows 遠程桌面用戶端：%{error}"
   port_forwarding_started:
     en: "Port Forwarding %{name} started on %{addr}"
     zh-CN: "端口转发 %{name} 已启动：%{addr}"
@@ -291,6 +299,30 @@ Home:
       en: "%{savable} / %{total} can be saved"
       zh-CN: "可保存 %{savable} / %{total} 条"
       zh-HK: "可儲存 %{savable} / %{total} 筆"
+    workspace_group_count:
+      en: "Found %{groups} SSH connection groups; they will be imported as Navop workspaces"
+      zh-CN: "发现 %{groups} 个 SSH 连接分组，保存后将转换为 Navop 工作区"
+      zh-HK: "發現 %{groups} 個 SSH 連線分組，儲存後將轉換為 Navop 工作區"
+    discovered_workspace_groups:
+      en: "Connection groups (%{groups}): %{paths}"
+      zh-CN: "扫描到连接分组（%{groups}）：%{paths}"
+      zh-HK: "掃描到連線分組（%{groups}）：%{paths}"
+    workspace:
+      en: "Workspace: %{path}"
+      zh-CN: "工作区：%{path}"
+      zh-HK: "工作區：%{path}"
+    kind_workspace:
+      en: Workspace
+      zh-CN: 工作区
+      zh-HK: 工作區
+    workspace_path_required:
+      en: Workspace path is required
+      zh-CN: 工作区路径不能为空
+      zh-HK: 工作區路徑不能為空
+    workspace_save_unsupported:
+      en: Workspace imports cannot be converted to connections
+      zh-CN: 工作区导入不能转换为连接
+      zh-HK: 工作區匯入不能轉換為連線
     sources:
       en: Application Sources
       zh-CN: 应用来源
@@ -307,10 +339,18 @@ Home:
       en: Select a source, then click Scan
       zh-CN: 选择来源后点击扫描
       zh-HK: 選擇來源後點擊掃描
+    sources_scan_hint:
+      en: Navop automatically scans each application's default configuration directories. If nothing is found, choose the relevant directory to scan manually; some importers also support selecting configuration files.
+      zh-CN: Navop 会自动扫描各应用的默认配置目录。如果没有找到配置，请选择相关目录手动扫描；部分应用也支持选择配置文件。
+      zh-HK: Navop 會自動掃描各應用程式的預設設定目錄。如果找不到設定，請選擇相關目錄手動掃描；部分匯入工具也支援選擇設定檔。
     choose_import_file:
       en: Choose Import File
       zh-CN: 选择导入文件
       zh-HK: 選擇匯入檔案
+    choose_import_directory:
+      en: Choose Import Directory
+      zh-CN: 选择导入目录
+      zh-HK: 選擇匯入目錄
     available_count:
       en: "%{count} available"
       zh-CN: "可导入 %{count} 条"
@@ -395,6 +435,10 @@ Home:
       en: "Import file parsing task failed: %{error}"
       zh-CN: "导入文件解析任务失败：%{error}"
       zh-HK: "匯入檔案解析工作失敗：%{error}"
+    directory_scan_task_failed:
+      en: "Import directory scan task failed: %{error}"
+      zh-CN: "导入目录扫描任务失败：%{error}"
+      zh-HK: "匯入目錄掃描工作失敗：%{error}"
     no_importable_connections:
       en: No importable connections were found
       zh-CN: 未解析到可导入连接
@@ -1648,6 +1692,10 @@ Connection:
       en: SSH Agent
       zh-CN: SSH Agent
       zh-HK: SSH Agent
+    auth_pageant:
+      en: Pageant (Windows)
+      zh-CN: Pageant（Windows）
+      zh-HK: Pageant（Windows）
     auth_auto_public_key:
       en: Automatic Public Key
       zh-CN: 自动公钥
@@ -1991,6 +2039,22 @@ Settings:
         en: Choose the card or list layout for the existing connection list on Home
         zh-CN: 选择主页现有连接列表使用卡片或列表布局
         zh-HK: 選擇主頁現有連線列表使用卡片或列表佈局
+      connection_sort:
+        en: Connection Sorting
+        zh-CN: 连接排序
+        zh-HK: 連線排序
+      connection_sort_desc:
+        en: Choose how connections are ordered in Home and the connection tree. More sorting modes will be added over time.
+        zh-CN: 选择首页与连接树中连接的排列方式，后续会持续新增更多排序方式。
+        zh-HK: 選擇首頁與連線樹中連線的排列方式，後續會持續新增更多排序方式。
+      connection_sort_natural:
+        en: Name (Natural Order)
+        zh-CN: 按名称（自然排序）
+        zh-HK: 按名稱（自然排序）
+      connection_sort_lru:
+        en: Most Recently Used
+        zh-CN: 最近使用优先
+        zh-HK: 最近使用優先
 
     # 文件传输设置
     FileTransfer:

@@ -3,7 +3,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName, IconNamed, IconSize, Selectable, Sizable, StyledExt,
+    ActiveTheme, Icon, IconName, IconNamed, IconSize, InteractiveElementExt, Selectable, Sizable,
+    StyledExt,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -310,7 +311,7 @@ impl HomePage {
             .bg(cx.theme().background)
             .cursor_pointer()
             .hover(move |style| style.bg(hover_background).border_color(hover_border))
-            .on_click(
+            .on_double_click(
                 window.listener_for(&cx.entity(), move |home, _, window, cx| {
                     home.open_connection_from_quick(&open_connection, window, cx);
                 }),

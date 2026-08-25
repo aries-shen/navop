@@ -54,6 +54,32 @@ fn rendered_frame_uses_a_parent_bounded_canvas_without_intrinsic_image_layout() 
 }
 
 #[test]
+fn empty_status_visibility_matches_native_connection_lifecycle() {
+    use super::render::should_show_empty_status;
+
+    assert!(
+        should_show_empty_status(true, true, false, false),
+        "Windows native sessions must show connecting status before Connected"
+    );
+    assert!(
+        !should_show_empty_status(true, true, false, true),
+        "Windows native sessions must hide the empty canvas after Connected and before the first frame"
+    );
+    assert!(
+        should_show_empty_status(true, true, true, true),
+        "Windows native sessions must show failure detail even after a prior Connected event"
+    );
+    assert!(
+        should_show_empty_status(true, false, false, true),
+        "canvas-backed sessions must preserve their existing empty-frame status"
+    );
+    assert!(
+        !should_show_empty_status(false, true, true, false),
+        "a rendered frame must always suppress the empty-frame status"
+    );
+}
+
+#[test]
 fn remote_cursor_never_calls_gpui_paint_only_cursor_apis_from_output_callbacks() {
     let output = include_str!("output.rs");
     let cursor = include_str!("cursor.rs");
@@ -87,40 +113,134 @@ fn windows_native_close_waits_for_confirmation_and_keeps_a_release_fallback() {
         .expect("end of remote desktop close implementation");
     let close = &render[close_start..close_end];
 
+    // try_close only queues the close intent inside the entity borrow; every
+    // native close call runs in the spawned borrow-free task.
     for token in [
-        "native.begin_close(&mut focus_parent)",
-        "NativeCloseProgress::Ready",
-        "NativeCloseProgress::WaitingForEvents",
-        "finish_windows_native_close(registration, cx)",
-        "force_close_windows_native(registration, cx)",
+        "self.windows_native_display.reset()",
+        "Self::spawn_windows_native_close(",
         "WindowsNativeCloseRetryMode::WaitForConfirmation",
-        "WindowsNativeCloseRetryMode::ForceClose",
-        "Self::retry_windows_native_close(",
+        "window.focus(&self.focus_handle, cx)",
     ] {
-        assert!(close.contains(token), "missing native close token: {token}");
+        assert!(close.contains(token), "missing close intent token: {token}");
+    }
+    for forbidden in [
+        "native.begin_close",
+        "finish_windows_native_close(",
+        "force_close_windows_native",
+        "poll_windows_native_close",
+        "retry_windows_native_close",
+    ] {
+        assert!(
+            !close.contains(forbidden),
+            "try_close must not call native helpers inside the borrow: {forbidden}"
+        );
     }
 
-    let retry = function_body(
+    // The spawned close task takes the adapter out of the entity, then runs
+    // the borrow-free close runner.
+    let spawn = function_body(
         &render,
-        "fn retry_windows_native_close(",
+        "fn spawn_windows_native_close(",
         "impl Focusable for RemoteDesktopView",
+    );
+    for token in [
+        "this.take_windows_native_close_operation(registration)",
+        "Ok(WindowsNativeCloseTake::Closed) => return true,",
+        "Ok(WindowsNativeCloseTake::Failed) => return false,",
+        "Ok(WindowsNativeCloseTake::Pending) => {}",
+        "Ok(WindowsNativeCloseTake::Ready(operation)) => {",
+        "close_windows_native_operation(",
+        "Duration::from_millis(16)",
+    ] {
+        assert!(spawn.contains(token), "missing close task token: {token}");
+    }
+    assert!(
+        spawn.contains("Err(_) => return true,"),
+        "a released view leaves the adapter to its release-hook/detached cleanup"
+    );
+
+    // The borrow-held take is pure Rust ownership transfer only.
+    let take = function_body(
+        &view,
+        "fn take_windows_native_close_operation(",
+        "fn finish_windows_native_close_in_view",
+    );
+    for token in [
+        "windows_native_close_requested = true;",
+        "windows_native_close_in_flight = Some(registration);",
+        "if self.windows_native_operation_in_flight.is_some() {",
+        "WindowsNativeCloseTake::Pending",
+        "self.windows_native_registration != Some(registration)",
+    ] {
+        assert!(take.contains(token), "missing close take token: {token}");
+    }
+    assert!(
+        !take.contains("native.begin_close"),
+        "the take phase must stay free of native COM calls"
+    );
+    assert!(
+        !take.contains("native.force_close"),
+        "the take phase must stay free of native COM calls"
+    );
+
+    // The borrow-free close runner owns the whole native close state machine.
+    let runner = function_body(
+        &view,
+        "async fn close_windows_native_operation(",
+        "fn remote_desktop_diagnostics_enabled",
     );
     for token in [
         "WINDOWS_NATIVE_CLOSE_TIMEOUT",
         "WINDOWS_NATIVE_FORCE_CLOSE_TIMEOUT",
         "hard_deadline",
-        "this.poll_windows_native_close(registration, cx)",
-        "this.force_close_windows_native(registration, cx)",
-        "WindowsNativeClosePoll::Pending",
-        "Duration::from_millis(16)",
+        "operation.native.drain_events(&mut operation.event_state)",
+        "operation.native.begin_close(&mut || {})",
+        "operation.native.close_confirmed(&mut operation.event_state)",
+        "operation.native.finish_destroy()",
+        "operation.native.force_close(&mut || {})",
+        "NativeDestroyProgress::Destroyed",
+        "NativeDestroyProgress::PendingCallbacks",
+        "Box::leak(Box::new(operation.native))",
+        "WindowsRdpTerminalOutcome::TimedOutLeaked",
+        "WindowsRdpTerminalOutcome::Destroyed",
+        "finish_windows_native_close_in_view(this, registration, cx);",
     ] {
         assert!(
-            retry.contains(token),
-            "missing native close retry token: {token}"
+            contains_ignoring_whitespace(runner, token),
+            "missing borrow-free close runner token: {token}"
         );
     }
-    assert!(retry.contains("if now >= hard_deadline"));
-    assert!(retry.contains("return false;"));
+    assert!(runner.contains("if now >= hard_deadline"));
+    // PendingCallbacks is not terminal: the runner only exits through
+    // Destroyed or the timeout leak.
+    let leaked = runner
+        .find("Box::leak(Box::new(operation.native))")
+        .expect("fail-closed adapter leak");
+    let timeout = runner[leaked..]
+        .find("WindowsRdpTerminalOutcome::TimedOutLeaked")
+        .map(|offset| leaked + offset)
+        .expect("timeout terminal completion");
+    assert!(leaked < timeout);
+    let timeout_branch_start = runner
+        .find("if now >= hard_deadline")
+        .expect("hard timeout branch");
+    let timeout_branch_end = runner[timeout_branch_start..]
+        .find("if matches!(mode, WindowsNativeCloseRetryMode::WaitForConfirmation)")
+        .map(|offset| timeout_branch_start + offset)
+        .expect("graceful timeout branch");
+    let timeout_branch = &runner[timeout_branch_start..timeout_branch_end];
+    assert!(timeout_branch.contains("WindowsRdpTerminalOutcome::TimedOutLeaked"));
+    assert!(timeout_branch.contains(
+        "RemoteDesktopView::finish_windows_native_close_in_view(this, registration, cx);"
+    ));
+    assert!(
+        timeout_branch.contains("return true;"),
+        "a quarantined timeout is a terminal close outcome for the tab"
+    );
+    assert!(
+        !timeout_branch.contains("return false;"),
+        "only ownership/state failures should keep the tab open"
+    );
 
     let release_start = view
         .find("cx.on_release(move |this, cx|")
@@ -130,39 +250,38 @@ fn windows_native_close_waits_for_confirmation_and_keeps_a_release_fallback() {
         .map(|offset| release_start + offset)
         .expect("end of view release hook");
     let release = &view[release_start..release_end];
-    assert!(release.contains("native.force_close(&mut focus_parent)"));
+    assert!(
+        !release.contains("native.force_close"),
+        "release hooks hold the entity/App borrow and must not pump COM messages"
+    );
     assert!(release.contains("window.focus(&focus_handle, cx);"));
     let native_take = release
-        .find("let Some(mut native) = this.windows_native.take()")
+        .find("let Some(native) = this.windows_native.take()")
         .expect("release must take ownership of the native adapter");
+    let registration_take = release
+        .find("let registration = this.windows_native_registration.take();")
+        .expect("release must take ownership of the shutdown registration");
     let event_state_take = release
         .find("this.native_event_state.take();")
         .expect("release must invalidate the native event reducer");
-    let force_close = release
-        .find("native.force_close(&mut focus_parent)")
-        .expect("release must synchronously attempt owner-thread cleanup");
+    let detached_marker = release
+        .find("mark_windows_native_rdp_detached(")
+        .expect("release must transfer the registration to detached cleanup");
     let detached_cleanup = release
-        .find("detach_windows_native_cleanup(native, registration, cx, \"view release\")")
+        .find("detach_windows_native_cleanup(native, Some(registration), cx, \"view release\")")
         .expect("release must retain pending native cleanup on the owner thread");
-    assert!(native_take < event_state_take);
-    assert!(event_state_take < force_close);
-    assert!(native_take < detached_cleanup);
-    assert!(release.contains("Ok(windows_native::NativeDestroyProgress::Destroyed) => true"));
-    assert!(
-        release.contains("Ok(windows_native::NativeDestroyProgress::PendingCallbacks) => false")
-    );
-    assert!(release.contains("native.is_destroyed()"));
-    assert!(release.contains("if destroyed"));
-    assert!(release.contains("mark_windows_native_rdp_detached"));
+    assert!(native_take < registration_take);
+    assert!(registration_take < event_state_take);
+    assert!(event_state_take < detached_marker);
+    assert!(detached_marker < detached_cleanup);
 
-    let detached_cleanup = function_body(
+    let cleanup = function_body(
         &view,
+        "async fn cleanup_windows_native_initialization(",
         "fn detach_windows_native_cleanup(",
-        "pub struct RemoteDesktopViewConfig",
     );
     for token in [
         "WINDOWS_NATIVE_FORCE_CLOSE_TIMEOUT",
-        "cx.spawn(async move |cx|",
         "native.force_close(&mut focus_parent)",
         "NativeDestroyProgress::PendingCallbacks",
         "record_detached_windows_native_terminal",
@@ -170,19 +289,25 @@ fn windows_native_close_waits_for_confirmation_and_keeps_a_release_fallback() {
         "WindowsRdpTerminalOutcome::TimedOutLeaked",
         "Duration::from_millis(16)",
         "Box::leak(Box::new(native))",
-        ".detach();",
     ] {
         assert!(
-            detached_cleanup.contains(token),
+            cleanup.contains(token),
             "missing detached native cleanup token: {token}"
         );
     }
-    assert!(!detached_cleanup.contains("background_spawn"));
-    assert!(!detached_cleanup.contains("tokio::spawn"));
+    assert!(!cleanup.contains("background_spawn"));
+    assert!(!cleanup.contains("tokio::spawn"));
+    let detached_cleanup = function_body(
+        &view,
+        "fn detach_windows_native_cleanup(",
+        "pub struct RemoteDesktopViewConfig",
+    );
+    assert!(detached_cleanup.contains("cx.spawn(async move |cx|"));
+    assert!(detached_cleanup.contains(".detach();"));
     let detached_terminal = function_body(
         &view,
         "fn record_detached_windows_native_terminal(",
-        "fn detach_windows_native_cleanup(",
+        "fn reset_windows_native_presentation_schedule(",
     );
     assert!(detached_terminal.contains("record_windows_native_rdp_terminal_async"));
     assert!(
@@ -193,43 +318,36 @@ fn windows_native_close_waits_for_confirmation_and_keeps_a_release_fallback() {
         !detached_terminal.contains("native.force_close"),
         "terminal dispatcher rejection must never trigger direct native cleanup"
     );
-    let foreground_spawn = detached_cleanup
-        .find("cx.spawn(async move |cx|")
-        .expect("foreground cleanup spawn");
-    let force_close = detached_cleanup
+    let force_close = cleanup
         .find("native.force_close(&mut focus_parent)")
         .expect("detached force close");
-    let destroyed_branch = detached_cleanup
+    let destroyed_branch = cleanup
         .find("NativeDestroyProgress::Destroyed) => {")
         .expect("destroyed cleanup branch");
-    let destroyed_terminal = detached_cleanup[destroyed_branch..]
+    let destroyed_terminal = cleanup[destroyed_branch..]
         .find("WindowsRdpTerminalOutcome::Destroyed")
         .map(|offset| destroyed_branch + offset)
         .expect("destroyed terminal completion");
-    let destroyed_return = detached_cleanup[destroyed_terminal..]
-        .find("return;")
+    let destroyed_return = cleanup[destroyed_terminal..]
+        .find("return true;")
         .map(|offset| destroyed_terminal + offset)
         .expect("destroyed cleanup termination");
-    let already_destroyed_branch = detached_cleanup
+    let already_destroyed_branch = cleanup
         .find("Err(_) if native.is_destroyed() => {")
         .expect("already-destroyed cleanup branch");
-    let already_destroyed_return = detached_cleanup[already_destroyed_branch..]
-        .find("return;")
+    let already_destroyed_return = cleanup[already_destroyed_branch..]
+        .find("return true;")
         .map(|offset| already_destroyed_branch + offset)
         .expect("already-destroyed cleanup termination");
-    let deadline = detached_cleanup
+    let deadline = cleanup
         .find("if Instant::now() >= deadline")
         .expect("detached cleanup deadline");
-    let leak = detached_cleanup
+    let leak = cleanup
         .find("Box::leak(Box::new(native))")
         .expect("fail-closed adapter leak");
-    let timer = detached_cleanup
+    let timer = cleanup
         .find("timer(Duration::from_millis(16))")
         .expect("detached cleanup retry timer");
-    let detach = detached_cleanup
-        .rfind(".detach();")
-        .expect("detached cleanup task ownership");
-    assert!(foreground_spawn < force_close);
     assert!(force_close < destroyed_branch);
     assert!(destroyed_branch < destroyed_terminal);
     assert!(destroyed_terminal < destroyed_return);
@@ -237,7 +355,6 @@ fn windows_native_close_waits_for_confirmation_and_keeps_a_release_fallback() {
     assert!(already_destroyed_return < deadline);
     assert!(deadline < leak);
     assert!(leak < timer);
-    assert!(timer < detach);
 
     for token in [
         "NativePresentationState::Closing",
@@ -258,36 +375,43 @@ fn windows_native_close_waits_for_confirmation_and_keeps_a_release_fallback() {
 #[test]
 fn windows_native_hosts_keep_full_shutdown_registrations_through_every_terminal_path() {
     let view = include_str!("../view.rs").replace("\r\n", "\n");
-    let initialize = function_body(
+    let admit = function_body(
         &view,
-        "fn ensure_windows_native_presentation",
+        "fn admit_windows_native_presentation",
         "fn fail_presentation_initialization",
     );
-    let create = initialize
-        .find("WindowsNativeAdapter::create")
-        .expect("native presentation creation");
-    let register = initialize[create..]
-        .find("register_windows_native_rdp")
-        .map(|offset| create + offset)
-        .expect("application shutdown registration");
-    let post_create = initialize
-        .find("let Some(bounds)")
-        .expect("post-create native initialization");
+    assert!(admit.contains("register_windows_native_rdp"));
+    assert!(admit.contains("native.generation()"));
+    assert!(admit.contains("WindowsRdpRegistrationError"));
     assert!(
-        create < register && register < post_create,
-        "the created adapter must be admitted before bounds, connect, or attach work"
-    );
-    assert!(initialize.contains("native.generation()"));
-    assert!(initialize.contains("WindowsRdpRegistrationError"));
-    assert!(initialize.contains("fail_unregistered_windows_native_presentation"));
-    assert!(
-        initialize
-            .matches("fail_windows_native_presentation(")
+        admit
+            .matches("fail_unregistered_windows_native_presentation(")
             .count()
             >= 5,
-        "every admitted post-create failure must retain its full registration"
+        "every preparation failure and shutdown-admission rejection must still clean up its \
+         native host"
     );
-    assert!(initialize.contains("self.attach_windows_native_presentation(native, registration,"));
+
+    let schedule = function_body(
+        &view,
+        "fn schedule_windows_native_presentation",
+        "fn prepare_windows_native_presentation",
+    );
+    let admit_call = schedule
+        .find("this.admit_windows_native_presentation(prepared, cx)")
+        .expect("borrowed registration phase");
+    let connect = schedule
+        .find("native.connect")
+        .expect("unborrowed connect phase");
+    assert!(
+        admit_call < connect,
+        "the adapter must be registered for shutdown drain before Connect starts"
+    );
+    assert!(schedule.contains("this.attach_windows_native_presentation("));
+    assert!(schedule.contains(
+        "native,\n                                registration,\n                                scale_factor,"
+    ));
+    assert!(schedule.contains("fail_windows_native_presentation("));
 
     assert!(
         view.contains(
@@ -301,21 +425,33 @@ fn windows_native_hosts_keep_full_shutdown_registrations_through_every_terminal_
         "fn fail_windows_native_presentation",
         "fn fail_unregistered_windows_native_presentation",
     );
-    assert!(failure.contains("registration: windows_rdp_host::WindowsRdpRegistration"));
-    assert!(failure.contains("WindowsRdpTerminalOutcome::Destroyed"));
-    assert!(
-        failure.contains("detach_windows_native_cleanup(native, Some(registration), cx, stage)")
-    );
+    assert!(failure.contains("self.windows_native_display.reset();"));
+    assert!(failure.contains("self.fail_presentation_initialization("));
+    assert!(!failure.contains("native.force_close"));
+    assert!(schedule.contains("cleanup_windows_native_initialization("));
+    assert!(schedule.contains("mark_windows_native_rdp_detached_async"));
 
     let attach = function_body(
         &view,
         "fn attach_windows_native_presentation",
-        "pub(super) fn update_windows_native_bounds",
+        "fn apply_windows_native_ui_effect",
     );
     assert!(attach.contains("registration: windows_rdp_host::WindowsRdpRegistration"));
     assert!(attach.contains("registration.generation()"));
     assert!(attach.contains("presentation.generation()"));
     assert!(attach.contains("self.windows_native_registration = Some(registration);"));
+    for forbidden in [
+        "activate_windows_native",
+        "focus_windows_native",
+        "cx.defer_in",
+        "native.update_bounds",
+        "native.activate",
+    ] {
+        assert!(
+            !attach.contains(forbidden),
+            "Phase 5 attach must remain pure Rust and avoid native work: {forbidden}"
+        );
+    }
 
     let release_start = view
         .find("cx.on_release(move |this, cx|")
@@ -332,11 +468,11 @@ fn windows_native_hosts_keep_full_shutdown_registrations_through_every_terminal_
         .find("this.windows_native_registration.take()")
         .expect("shutdown registration take");
     let force_close = release
-        .find("native.force_close(&mut focus_parent)")
-        .expect("owner-thread force close");
+        .find("detach_windows_native_cleanup(native, Some(registration), cx, \"view release\")")
+        .expect("release must defer owner-thread force close");
     assert!(native_take < registration_take);
     assert!(registration_take < force_close);
-    assert!(release.contains("WindowsRdpTerminalOutcome::Destroyed"));
+    assert!(!release.contains("native.force_close"));
     assert!(release.contains("Some(registration)"));
     assert!(
         release.contains("WindowsRdpTerminalOutcome::OwnerLost"),
@@ -364,8 +500,8 @@ fn windows_native_shutdown_controller_drains_on_the_foreground_and_leaks_before_
         "registry.pending_registrations()",
         ".fail_closed_report()",
         "owner.update(cx",
-        "force_close_windows_native_for_shutdown",
-        "quarantine_windows_native_for_shutdown",
+        "take_windows_native_close_operation",
+        "close_windows_native_operation",
         "cx.spawn(async move |cx|",
         "Duration::from_millis(16)",
     ] {
@@ -445,8 +581,8 @@ fn windows_native_shutdown_controller_drains_on_the_foreground_and_leaks_before_
 
     let detached_cleanup = function_body(
         &view,
+        "async fn cleanup_windows_native_initialization(",
         "fn detach_windows_native_cleanup(",
-        "pub struct RemoteDesktopViewConfig",
     );
     assert!(
         detached_cleanup.contains("registration: Option<windows_rdp_host::WindowsRdpRegistration>")
@@ -462,31 +598,36 @@ fn windows_native_shutdown_controller_drains_on_the_foreground_and_leaks_before_
         "the complete adapter must be leaked before recording timeout completion"
     );
 
-    let quarantine = function_body(
-        &view,
-        "fn quarantine_windows_native_for_shutdown",
-        "fn poll_windows_native_close",
+    let poll_view_owner = function_body(
+        &controller,
+        "async fn poll_view_owner(",
+        "fn record_mismatched_view_owner(",
     );
-    assert!(quarantine.contains("self.windows_native_registration == Some(registration)"));
+    let take_call = poll_view_owner
+        .find("view.take_windows_native_close_operation(registration)")
+        .expect("borrow-held take phase");
+    let runner_call = poll_view_owner
+        .find("crate::view::close_windows_native_operation(")
+        .expect("borrow-free execute phase");
     assert!(
-        quarantine.contains("return false;"),
-        "registration/adapter mismatches must be observable by the drain controller"
+        take_call < runner_call,
+        "the drain must take the adapter inside the borrow and execute native close after it"
     );
-    let quarantine_take = quarantine
-        .find(".windows_native\n            .take()")
-        .expect("quarantine adapter take");
-    let quarantine_leak = quarantine
-        .find("Box::leak(Box::new(native))")
-        .expect("quarantine adapter leak");
-    let quarantine_terminal = quarantine
+    assert!(
+        !poll_view_owner[take_call..take_call + 400].contains("force_close"),
+        "the drain's entity-borrow closure must never pump COM messages"
+    );
+    assert!(poll_view_owner.contains("WindowsNativeCloseTake::Closed"));
+    assert!(poll_view_owner.contains("WindowsNativeCloseTake::Pending"));
+    assert!(poll_view_owner.contains("WindowsNativeCloseTake::Failed"));
+    let drain_leak = poll_view_owner
+        .find("Box::leak(Box::new(operation.into_leaked_adapter()))")
+        .expect("drain deadline adapter leak");
+    let drain_leak_terminal = poll_view_owner[drain_leak..]
         .find("WindowsRdpTerminalOutcome::TimedOutLeaked")
-        .expect("quarantine timeout completion");
-    assert!(quarantine_take < quarantine_leak);
-    assert!(quarantine_leak < quarantine_terminal);
-    assert!(
-        quarantine.contains("\n        true\n"),
-        "successful quarantine must be acknowledged to the drain controller"
-    );
+        .map(|offset| drain_leak + offset)
+        .expect("drain deadline terminal completion");
+    assert!(drain_leak < drain_leak_terminal);
 }
 
 #[test]
@@ -507,8 +648,8 @@ fn windows_native_shutdown_uses_locked_gpui_context_contracts() {
         "the synchronous App drain entrypoint must import BorrowAppContext"
     );
     for signature in [
-        "fn poll_view_owner(\n",
-        "fn poll_registration(\n",
+        "async fn poll_view_owner(\n",
+        "async fn poll_registration(\n",
         "async fn drain(\n",
     ] {
         let body = &drain[drain
@@ -519,11 +660,14 @@ fn windows_native_shutdown_uses_locked_gpui_context_contracts() {
             "{signature} must retain mutable AsyncApp access for WeakEntity::update"
         );
     }
-    let poll_registration =
-        function_body(&drain, "fn poll_registration(\n", "fn completed_report(");
+    let poll_registration = function_body(
+        &drain,
+        "async fn poll_registration(\n",
+        "fn completed_report(",
+    );
     for call in [
         "record_stalled_detached_owner(registration, deadline_elapsed, cx)",
-        "poll_view_owner(owner, registration, deadline_elapsed, cx)",
+        "poll_view_owner(owner, registration, deadline, deadline_elapsed, cx).await",
     ] {
         assert!(
             poll_registration.contains(call),
@@ -617,21 +761,44 @@ fn windows_native_events_are_drained_on_the_gpui_owner_thread() {
         "let output_poll_task = cx.spawn",
         "cx.on_release(move |this, cx|",
     );
-    assert!(poll_task.contains("this.poll_windows_native_events()"));
+    assert!(poll_task.contains("this.windows_native_maintenance_is_pending()"));
+    assert!(poll_task.contains("this.take_windows_native_operation()"));
+    assert!(poll_task.contains("execute_windows_native_operation(operation)"));
+    assert!(poll_task.contains("this.commit_windows_native_operation(result, cx)"));
+    assert!(poll_task.contains("cleanup_rejected_windows_native_operation("));
     assert!(poll_task.contains("native_event_window_handle.update"));
     assert!(poll_task.contains("window.focus(&focus_handle, cx);"));
 
-    let poll = function_body(
+    // The native execute stage is a free function: it must not touch any
+    // entity/window/app borrow while pumping COM messages.
+    let execute = function_body(
         &view,
-        "fn poll_windows_native_events",
-        "fn poll_windows_native_close",
+        "fn execute_windows_native_operation(",
+        "pub struct RemoteDesktopViewConfig",
     );
-    assert!(poll.contains("native.drain_events(event_state)"));
-    assert!(poll.contains("for effect in effects"));
-    assert!(poll.contains("self.apply_windows_native_ui_effect(effect)"));
-    assert!(poll.contains("NativeRdpEventState::take_focus_release_pending"));
-    assert!(poll.contains("self.tab_active"));
-    assert!(poll.contains("self.focus_handle.clone()"));
+    for forbidden in [
+        "this.update",
+        "owner.update",
+        "cx.update",
+        "AsyncApp",
+        "WeakEntity",
+        "Context<RemoteDesktopView>",
+    ] {
+        assert!(
+            !execute.contains(forbidden),
+            "the native execute stage must stay borrow-free: {forbidden}"
+        );
+    }
+    assert!(execute.contains("operation.native.drain_events(&mut operation.event_state)"));
+    assert!(contains_ignoring_whitespace(
+        execute,
+        "operation.native.update_bounds(bounds, point(px(0.0), px(0.0)), scale_factor)"
+    ));
+    assert!(execute.contains("operation.native.deactivate(&mut || {"));
+    assert!(execute.contains("operation.native.activate(false)"));
+    assert!(execute.contains("operation.native.focus()"));
+    assert!(execute.contains("operation.event_state.take_focus_release_pending()"));
+    assert!(execute.contains("if !presentation_active {"));
 
     assert!(native.contains("pub(super) fn drain_events("));
     assert!(native.contains("state.close_confirmed()"));
@@ -684,21 +851,38 @@ fn windows_native_reconnect_resets_and_reopens_the_native_presentation() {
         "fn apply_windows_native_ui_effect(",
         "fn mark_windows_native_connected",
     );
-    assert!(effects.contains("native.begin_reconnect"));
     assert!(effects.contains("self.native_login_complete = false"));
     assert!(effects.contains("self.windows_native_display.reconnecting(generation)"));
-    assert!(effects.contains("self.present_windows_native_after_login()"));
     assert!(effects.contains("WindowsNativeFocusTarget::NativeChild"));
+    // The reducer must stay pure Rust: native presentation work runs in the
+    // borrow-free maintenance execute stage.
+    for forbidden in [
+        "native.begin_reconnect",
+        "native.mark_login_complete",
+        "native.activate",
+        "native.deactivate",
+        "native.focus",
+        "native.update_bounds",
+        "refresh_native_readiness",
+        "present_windows_native_after_login",
+    ] {
+        assert!(
+            !effects.contains(forbidden),
+            "the UI effect reducer must not call native helpers: {forbidden}"
+        );
+    }
 
-    let poll = function_body(
+    let execute = function_body(
         &view,
-        "fn poll_windows_native_events",
-        "fn apply_windows_native_ui_effect",
+        "fn execute_windows_native_operation(",
+        "pub struct RemoteDesktopViewConfig",
     );
-    assert!(poll.contains("requested_focus = Some(target)"));
-    assert!(poll.contains("NativeRdpEventState::take_focus_release_pending"));
-    assert!(poll.contains("Some(WindowsNativeFocusTarget::NativeChild)"));
-    assert!(poll.contains("self.focus_windows_native()"));
+    assert!(execute.contains("operation.native.begin_reconnect(&mut || {"));
+    assert!(execute.contains("operation.native.mark_login_complete();"));
+    assert!(execute.contains("requested_focus = Some(WindowsNativeFocusTarget::NativeChild)"));
+    assert!(execute.contains("operation.event_state.take_focus_release_pending()"));
+    assert!(execute.contains("operation.native.deactivate(&mut || {"));
+    assert!(execute.contains("operation.native.focus()"));
 }
 
 #[test]
@@ -726,47 +910,207 @@ fn presentation_initialization_precedes_and_gates_canvas_runtime_start() {
 }
 
 #[test]
-fn windows_native_initialization_orders_create_bounds_connect_and_attach() {
+fn windows_native_connect_runs_outside_the_app_borrow() {
     let view = include_str!("../view.rs").replace("\r\n", "\n");
-    let initialize = function_body(
+    let schedule = function_body(
         &view,
-        "fn ensure_windows_native_presentation",
-        "fn fail_presentation_initialization",
+        "fn schedule_windows_native_presentation",
+        "fn prepare_windows_native_presentation",
     );
 
-    let proxy_check = initialize
-        .find("if proxy_configured")
-        .expect("proxy capability check");
-    let create = initialize
-        .find("WindowsNativeAdapter::create")
-        .expect("native presentation creation");
+    let spawn = schedule
+        .find("cx.spawn")
+        .expect("deferred native initialization task");
+    let snapshot = schedule
+        .find("this.prepare_windows_native_presentation(window, initialization_generation)")
+        .expect("borrowed pure-Rust snapshot phase");
+    let snapshot_borrow_end = schedule
+        .find("let Some(inputs) = inputs else")
+        .expect("end of the borrowed snapshot phase");
+    let prepare = schedule
+        .find("prepare_windows_native_connection(inputs)")
+        .expect("unborrowed ActiveX creation and preparation phase");
+    let admit = schedule
+        .find("this.admit_windows_native_presentation(prepared, cx)")
+        .expect("borrowed registration phase");
+    let admit_borrow_end = schedule
+        .find("let (mut native, registration, connection_options) = match admission")
+        .expect("end of the borrowed registration phase");
+    let connect = schedule
+        .find("native.connect")
+        .expect("unborrowed connect phase");
+    let attach = schedule
+        .find("this.attach_windows_native_presentation(")
+        .expect("borrowed attach phase");
+
+    assert!(spawn < snapshot);
+    assert!(snapshot < snapshot_borrow_end);
     assert!(
-        proxy_check < create,
-        "unsupported SOCKS/HTTP proxy settings must fail before creating a native host"
+        snapshot_borrow_end < prepare && prepare < admit,
+        "the ActiveX host creation and preparation pump Win32 messages that can dispatch \
+         pending GPUI foreground tasks; they must run outside the App borrow"
     );
-    assert!(initialize.contains("WindowsNativePresentationCreateError::ProxyUnsupported => None"));
+    assert!(admit < admit_borrow_end);
+    assert!(
+        admit_borrow_end < connect,
+        "the ActiveX Connect call pumps COM messages that can dispatch pending GPUI \
+         foreground tasks; it must run after the App borrow is released"
+    );
+    assert!(connect < attach);
+    assert!(schedule.contains("windows_native_initialization_generation"));
+    assert!(schedule.contains("reset_windows_native_presentation_schedule"));
+
+    // The COM-stage function itself must be borrow-free: it runs outside any
+    // GPUI context and only receives a pure-Rust input snapshot.
+    let prepare_fn = function_body(
+        &view,
+        "fn prepare_windows_native_connection",
+        "fn preserve_presented_frame_during_session_reset",
+    );
+    assert!(prepare_fn.contains("WindowsNativeAdapter::create_with_owner"));
+    assert!(prepare_fn.contains("native.update_bounds"));
+    assert!(prepare_fn.contains("native.apply_credentials"));
+    assert!(
+        !prepare_fn.contains("cx."),
+        "the borrow-free COM stage must not touch any GPUI context"
+    );
+
+    // The snapshot phase must stay pure Rust: no COM calls before the borrow
+    // is released.
+    let snapshot_fn = function_body(
+        &view,
+        "fn prepare_windows_native_presentation",
+        "fn admit_windows_native_presentation",
+    );
+    assert!(snapshot_fn.contains("parent_window_owner(window)"));
+    assert!(snapshot_fn.contains("options: self.options.clone()"));
+    assert!(
+        !snapshot_fn.contains("windows_native_initialization_generation = None"),
+        "Phase 1 must not release the initialization latch while later COM phases are running"
+    );
+    for token in ["create_with_owner", "update_bounds", "apply_credentials"] {
+        assert!(
+            !snapshot_fn.contains(token),
+            "the borrowed snapshot phase must not call the COM-stage primitive: {token}"
+        );
+    }
+}
+
+#[test]
+fn windows_native_initialization_dispatch_rejection_cannot_strand_or_leak_the_host() {
+    let view = include_str!("../view.rs").replace("\r\n", "\n");
+    let schedule = function_body(
+        &view,
+        "fn schedule_windows_native_presentation",
+        "fn prepare_windows_native_presentation",
+    );
+
+    assert!(
+        schedule.contains("reset_windows_native_presentation_schedule"),
+        "a rejected Phase 1 update must clear the scheduled latch so a live view can retry"
+    );
+    assert!(
+        schedule.contains("cleanup_rejected_windows_native_preparation"),
+        "a rejected Phase 3 update must retain and clean any host created during Phase 2"
+    );
+    assert!(
+        schedule.contains("cleanup_windows_native_initialization"),
+        "Connect failure and rejected Phase 5 attach must use borrow-free native cleanup"
+    );
+    assert!(
+        schedule.contains("mark_windows_native_rdp_detached_async"),
+        "registered hosts must detach from a vanished view before borrow-free cleanup"
+    );
+
+    let cleanup = function_body(
+        &view,
+        "async fn cleanup_windows_native_initialization",
+        "fn detach_windows_native_cleanup",
+    );
+    assert!(cleanup.contains("native.force_close(&mut focus_parent)"));
+    assert!(
+        cleanup.contains("record_detached_windows_native_terminal"),
+        "borrow-free cleanup must always terminalize a registered host"
+    );
+
+    let admit = function_body(
+        &view,
+        "fn admit_windows_native_presentation",
+        "fn fail_presentation_initialization",
+    );
+    assert!(
+        !admit.contains("native.force_close"),
+        "Phase 3 holds the App/entity borrow and must never pump native cleanup"
+    );
+}
+
+#[test]
+fn windows_native_attach_rejects_stale_initialization_generations() {
+    let view = include_str!("../view.rs").replace("\r\n", "\n");
+    let attach = function_body(
+        &view,
+        "pub(crate) fn attach_windows_native_presentation",
+        "fn apply_windows_native_ui_effect",
+    );
+
+    assert!(
+        attach.contains("presentation_initialization")
+            && attach.contains("RemoteDesktopPresentationInitialization::Pending"),
+        "Phase 5 must not attach after the view has reset, failed, or selected Canvas"
+    );
+    assert!(
+        attach.contains("return Err("),
+        "a stale Phase 5 payload must be returned to the borrow-free cleanup path"
+    );
+}
+
+#[test]
+fn windows_native_initialization_orders_create_bounds_connect_and_attach() {
+    let view = include_str!("../view.rs").replace("\r\n", "\n");
+    let snapshot = function_body(
+        &view,
+        "fn prepare_windows_native_presentation",
+        "fn admit_windows_native_presentation",
+    );
+
+    let selection = snapshot
+        .find("select_remote_desktop_presentation(")
+        .expect("presentation selection");
+    let proxy_check = snapshot
+        .find("if self.options.proxy.is_some()")
+        .expect("proxy capability check");
+    let owner = snapshot
+        .find("parent_window_owner(window)")
+        .expect("native owner extraction");
+    assert!(
+        selection < proxy_check && proxy_check < owner,
+        "selection and the unsupported SOCKS/HTTP proxy check must fail before touching the \
+         native host"
+    );
     let proxy_failure = function_body(
-        initialize,
-        "WindowsNativePresentationCreateError::ProxyUnsupported,\n            )) =>",
-        "WindowsNativePresentationCreateError::Adapter(error),\n            )) =>",
+        snapshot,
+        "if self.options.proxy.is_some() {",
+        "let Some(bounds) = self.content_bounds",
     );
     assert!(proxy_failure.contains("self.fail_presentation_initialization("));
     assert!(
-        proxy_failure
-            .contains("RemoteDesktopPresentation::NativeWindows,\n                    true,")
+        proxy_failure.contains("RemoteDesktopPresentation::NativeWindows,\n                true,")
     );
     assert!(
         !proxy_failure.contains("RemoteDesktopPresentationInitialization::Canvas"),
         "Auto must fail closed rather than bypassing an unsupported proxy via Canvas fallback"
     );
+    assert!(proxy_failure.contains("native_proxy_unsupported"));
 
-    let post_create_start = initialize
-        .find("let Some(bounds)")
-        .expect("post-create native initialization");
-    let post_create = &initialize[post_create_start..];
+    // Phase 2: the borrow-free COM sequence.
+    let prepare = function_body(
+        &view,
+        "fn prepare_windows_native_connection",
+        "fn preserve_presented_frame_during_session_reset",
+    );
     let mut previous = 0;
     for token in [
-        "windows_native_policy::initial_desktop_size",
+        "WindowsNativeAdapter::create_with_owner",
         "native.update_bounds",
         "parse_destination",
         "windows_native_policy::connection_policy",
@@ -774,38 +1118,109 @@ fn windows_native_initialization_orders_create_bounds_connect_and_attach() {
         ".with_policy(policy)",
         "windows_native_policy::apply_gateway_credentials",
         "native.apply_credentials",
-        "native.connect",
-        "attach_windows_native_presentation",
-        "RemoteDesktopPresentationInitialization::Native",
     ] {
-        let position = post_create[previous..]
+        let position = prepare[previous..]
             .find(token)
             .map(|offset| previous + offset)
             .unwrap_or_else(|| panic!("missing ordered native initialization token: {token}"));
         previous = position + token.len();
     }
-
     assert!(
-        !post_create.contains("RemoteDesktopPresentationInitialization::Canvas"),
-        "once a native host exists, later setup/connect failures must not open a Canvas session"
+        prepare.matches("WindowsNativePrepareFailure").count() >= 5,
+        "every COM preparation failure must route its native host to cleanup"
     );
+
+    // Phase 3: admission routes preparation failures before the host is
+    // registered, and registered failures fail closed (no Canvas session).
+    let admit = function_body(
+        &view,
+        "fn admit_windows_native_presentation",
+        "fn fail_presentation_initialization",
+    );
+    let post_create = admit
+        .find("Err(WindowsNativePrepareFailure::Bounds")
+        .expect("post-create preparation failure branches");
+    let shared_folders = admit
+        .find("Err(WindowsNativePrepareFailure::SharedFoldersUnsupported")
+        .expect("shared-folder capability branch");
+    let connection_options = admit
+        .find("Err(WindowsNativePrepareFailure::ConnectionOptions")
+        .expect("post-create connection-options branch");
     assert!(
-        post_create
-            .matches("fail_windows_native_presentation")
+        !admit[post_create..shared_folders]
+            .contains("RemoteDesktopPresentationInitialization::Canvas")
+            && !admit[connection_options..]
+                .contains("RemoteDesktopPresentationInitialization::Canvas"),
+        "once a native host exists, later preparation/connect failures must not open a Canvas \
+         session, except the explicit shared-folder capability fallback"
+    );
+    let shared_folder_branch = &admit[shared_folders..connection_options];
+    for token in [
+        "RemoteDesktopBackendPreference::Auto",
+        "RemoteDesktopPresentationInitialization::Canvas",
+        "WindowsNativeRdpUnavailableReason::SharedFoldersUnsupported",
+        "self.fail_windows_native_presentation(",
+        "registration: None",
+        "reason: \"shared-folders\"",
+    ] {
+        assert!(
+            shared_folder_branch.contains(token),
+            "missing shared-folder fail-closed/fallback token: {token}"
+        );
+    }
+    assert!(
+        admit[post_create..]
+            .matches("fail_unregistered_windows_native_presentation")
             .count()
             >= 5,
-        "all post-create initialization failures must close the native host and fail closed"
+        "all post-create preparation failures must close the native host and fail closed"
     );
-    for (offset, _) in post_create.match_indices("self.fail_windows_native_presentation(") {
-        let invocation = &post_create[offset..];
+    let register = admit
+        .find("register_windows_native_rdp")
+        .expect("application shutdown registration");
+    assert!(
+        post_create < register,
+        "every preparation failure must be routed before the host is registered"
+    );
+    for (offset, _) in admit.match_indices("self.fail_unregistered_windows_native_presentation(") {
+        let invocation = &admit[offset..];
         let end = invocation
             .find(");")
             .expect("native initialization failure invocation");
         assert!(
-            invocation[..end].contains("cx"),
-            "native initialization failure cleanup must retain ownership on the GPUI thread"
+            !invocation[..end].contains("cx"),
+            "Phase 3 failure routing must return ownership before COM cleanup pumps messages"
         );
     }
+    // Phase 4 and Phase 5 live in the schedule: connect outside the borrow,
+    // then attach with the registration.
+    let schedule = function_body(
+        &view,
+        "fn schedule_windows_native_presentation",
+        "fn prepare_windows_native_presentation",
+    );
+    assert!(schedule.contains("cleanup_windows_native_initialization("));
+    let mut previous = 0;
+    for token in [
+        "cx.spawn",
+        "this.prepare_windows_native_presentation(window, initialization_generation)",
+        "prepare_windows_native_connection(inputs)",
+        "this.admit_windows_native_presentation(prepared, cx)",
+        "native.connect",
+        "this.attach_windows_native_presentation(",
+    ] {
+        let position = schedule[previous..]
+            .find(token)
+            .map(|offset| previous + offset)
+            .unwrap_or_else(|| panic!("missing ordered deferred native token: {token}"));
+        previous = position + token.len();
+    }
+    let attach = function_body(
+        &view,
+        "fn attach_windows_native_presentation",
+        "fn apply_windows_native_ui_effect",
+    );
+    assert!(attach.contains("RemoteDesktopPresentationInitialization::Native"));
 }
 
 #[test]
@@ -818,21 +1233,46 @@ fn windows_native_fixed_mode_keeps_hwnd_bounds_but_skips_protocol_display_update
         "pub(super) fn update_content_bounds",
         "pub(super) fn flush_pending_start",
     );
-    let native_bounds = update_bounds
-        .find("self.update_windows_native_bounds(bounds, display_scale_factor)")
-        .expect("native HWND bounds update");
+    // The presentation path only queues the bounds intent: the native
+    // SetBounds call pumps Win32 messages and runs in the maintenance
+    // operation outside the entity borrow.
     let observe = update_bounds
         .find("self.observe_windows_native_viewport(bounds, display_scale_factor)")
         .expect("native protocol display observation");
+    let pending_bounds = update_bounds
+        .find("self.pending_windows_native_bounds = Some((bounds, display_scale_factor));")
+        .expect("queued native HWND bounds intent");
     assert!(
-        native_bounds < observe,
-        "native child HWND bounds must update before protocol-level display handling"
+        observe < pending_bounds,
+        "protocol display observation and the queued HWND bounds intent must both be recorded \
+         without entering the native path"
     );
+    for forbidden in [
+        "self.update_windows_native_bounds(",
+        "native.update_bounds",
+        "sink.set_bounds",
+    ] {
+        assert!(
+            !update_bounds.contains(forbidden),
+            "update_content_bounds must not call native bounds updates: {forbidden}"
+        );
+    }
+
+    // The maintenance execute stage applies the queued bounds natively.
+    let view = include_str!("../view.rs").replace("\r\n", "\n");
+    let execute = function_body(
+        &view,
+        "fn execute_windows_native_operation(",
+        "pub struct RemoteDesktopViewConfig",
+    );
+    assert!(execute.contains(
+        "operation\n                .native\n                .update_bounds(bounds, point(px(0.0), px(0.0)), scale_factor)"
+    ));
 
     let observe = function_body(
         &integration,
         "pub(super) fn observe_windows_native_viewport",
-        "pub(super) fn flush_windows_native_display_settings",
+        "fn physical_viewport_settings",
     );
     let fixed_guard = observe
         .find("windows_native_policy::uses_dynamic_display_updates")
@@ -887,25 +1327,26 @@ fn explicit_canvas_retry_requires_confirmed_native_cleanup_and_defers_runtime_st
         "fn fail_windows_native_presentation",
         "pub(crate) fn attach_windows_native_presentation",
     );
-    assert!(failure.contains("cx: &mut Context<Self>"));
-    assert!(failure.contains("let destroyed = match native.force_close(&mut focus_parent)"));
-    assert!(failure.contains("match native.force_close(&mut focus_parent)"));
-    assert!(failure.contains("Ok(windows_native::NativeDestroyProgress::Destroyed) => true"));
-    assert!(
-        failure.contains("Ok(windows_native::NativeDestroyProgress::PendingCallbacks) => false")
+    assert!(failure.contains("self.windows_native_display.reset();"));
+    assert!(failure.contains("self.fail_presentation_initialization("));
+    assert!(failure.contains("RemoteDesktopPresentation::NativeWindows"));
+    assert!(!failure.contains("native.force_close"));
+    let cleanup = function_body(
+        &view,
+        "async fn cleanup_windows_native_initialization(",
+        "fn detach_windows_native_cleanup(",
     );
-    assert!(failure.contains("Err(close_error) =>"));
-    assert!(failure.contains("native.is_destroyed()"));
-    assert!(failure.contains("let canvas_retry_available = destroyed;"));
-    assert!(failure.contains("let needs_detached_cleanup = !destroyed;"));
-    assert!(failure.contains("if needs_detached_cleanup"));
-    assert!(failure.contains("mark_windows_native_rdp_detached(registration, cx)"));
-    assert!(
-        failure.contains("detach_windows_native_cleanup(native, Some(registration), cx, stage);")
+    assert!(cleanup.contains("native.force_close(&mut focus_parent)"));
+    assert!(cleanup.contains("NativeDestroyProgress::Destroyed"));
+    assert!(cleanup.contains("NativeDestroyProgress::PendingCallbacks"));
+    assert!(cleanup.contains("WindowsRdpTerminalOutcome::TimedOutLeaked"));
+    assert!(cleanup.contains("Box::leak(Box::new(native))"));
+    let completion = function_body(
+        &view,
+        "fn complete_windows_native_initialization_cleanup(",
+        "pub(crate) fn attach_windows_native_presentation",
     );
-    assert!(failure.contains(
-        "RemoteDesktopPresentation::NativeWindows,\n            canvas_retry_available,"
-    ));
+    assert!(completion.contains("canvas_retry_available: destroyed"));
 
     assert!(render.contains(".on_action(cx.listener(Self::use_canvas))"));
     assert!(render.contains("this.use_canvas(&UseCanvas, window, cx);"));
@@ -970,43 +1411,186 @@ fn windows_native_tab_lifecycle_defers_focus_only_while_active() {
     let attach = function_body(
         &view,
         "fn attach_windows_native_presentation",
-        "pub(super) fn update_windows_native_bounds",
+        "fn apply_windows_native_ui_effect",
     );
 
     let active_assignment = activate
         .find("self.tab_active = true;")
         .expect("active lifecycle assignment");
-    let native_activation = activate
-        .find("self.activate_windows_native(false)")
-        .expect("native activation");
-    let stale_focus_drain = activate
-        .find("self.poll_windows_native_events()")
-        .expect("stale native focus drain");
-    assert!(stale_focus_drain < active_assignment);
-    assert!(active_assignment < native_activation);
-    assert!(activate.contains("cx.defer_in(window"));
-    assert!(activate.contains("if this.tab_active"));
-    assert!(activate.contains("this.focus_windows_native();"));
+    let lifecycle_dirty = activate
+        .find("self.windows_native_lifecycle_dirty = true;")
+        .expect("active lifecycle intent");
+    let focus_requested = activate
+        .find("self.windows_native_focus_requested = true;")
+        .expect("active native focus intent");
+    assert!(active_assignment < lifecycle_dirty);
+    assert!(lifecycle_dirty < focus_requested);
 
     let inactive_assignment = deactivate
         .find("self.tab_active = false;")
         .expect("inactive lifecycle assignment");
-    let native_deactivation = deactivate
-        .find("self.deactivate_windows_native")
-        .expect("native deactivation");
-    let released_focus_drain = deactivate
-        .find("self.poll_windows_native_events()")
-        .expect("released native focus drain");
-    assert!(inactive_assignment < native_deactivation);
-    assert!(native_deactivation < released_focus_drain);
+    let inactive_dirty = deactivate
+        .find("self.windows_native_lifecycle_dirty = true;")
+        .expect("inactive lifecycle intent");
+    let focus_cleared = deactivate
+        .find("self.windows_native_focus_requested = false;")
+        .expect("cleared native focus intent");
+    let parent_focus = deactivate
+        .find("window.focus(&self.focus_handle, cx);")
+        .expect("GPUI parent focus handoff");
+    assert!(inactive_assignment < inactive_dirty);
+    assert!(inactive_dirty < focus_cleared);
+    assert!(focus_cleared < parent_focus);
 
-    // The attach-time activation is gated on the login phase so the overlay is
-    // never shown before LoginComplete/Reconnected.
-    assert!(attach.contains("self.native_login_complete"));
-    assert!(attach.contains("self.activate_windows_native(false)"));
-    assert!(attach.contains("cx.defer_in(window"));
-    assert!(attach.contains("if this.tab_active"));
-    assert!(attach.contains("this.focus_windows_native();"));
+    // Lifecycle hooks only record pure Rust intent: native activate, focus,
+    // deactivate, and event draining run in the maintenance operation outside
+    // the entity borrow (COM calls pump Win32 messages).
+    for forbidden in [
+        "poll_windows_native_events",
+        "activate_windows_native",
+        "deactivate_windows_native",
+        "focus_windows_native",
+        "native.activate",
+        "native.deactivate",
+        "native.focus",
+        "drain_events",
+        "cx.defer_in",
+    ] {
+        assert!(
+            !activate.contains(forbidden),
+            "on_activate must stay free of native lifecycle work: {forbidden}"
+        );
+        assert!(
+            !deactivate.contains(forbidden),
+            "on_deactivate must stay free of native lifecycle work: {forbidden}"
+        );
+    }
+
+    // The maintenance operation consumes the recorded intent borrow-free.
+    let take = function_body(
+        &view,
+        "fn take_windows_native_operation(",
+        "fn commit_windows_native_operation",
+    );
+    assert!(
+        take.contains("lifecycle_dirty: std::mem::take(&mut self.windows_native_lifecycle_dirty),")
+    );
+    assert!(
+        take.contains("focus_requested: std::mem::take(&mut self.windows_native_focus_requested),")
+    );
+    let execute = function_body(
+        &view,
+        "fn execute_windows_native_operation(",
+        "pub struct RemoteDesktopViewConfig",
+    );
+    assert!(execute.contains(
+        "let presentation_active = operation.tab_active && !operation.presentation_obscured;"
+    ));
+    assert!(execute.contains("if operation.lifecycle_dirty && !presentation_active {"));
+    assert!(execute.contains(
+        "} else if operation.lifecycle_dirty && presentation_active && allow_activation {"
+    ));
+
+    // Phase 5 only installs Rust ownership/state. LoginComplete/Reconnected
+    // perform native synchronization after the entity borrow has ended.
+    for forbidden in [
+        "self.native_login_complete",
+        "self.activate_windows_native",
+        "cx.defer_in",
+        "self.focus_windows_native",
+    ] {
+        assert!(
+            !attach.contains(forbidden),
+            "attach must not enter the native presentation path: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn windows_native_dialog_obscures_presentation_without_changing_tab_lifecycle() {
+    let render = include_str!("render.rs").replace("\r\n", "\n");
+    let view = include_str!("../view.rs").replace("\r\n", "\n");
+    let setter = function_body(&render, "fn set_presentation_obscured", "fn try_close");
+    let take = function_body(
+        &view,
+        "fn take_windows_native_operation(",
+        "fn commit_windows_native_operation",
+    );
+    let execute = function_body(
+        &view,
+        "fn execute_windows_native_operation(",
+        "pub struct RemoteDesktopViewConfig",
+    );
+
+    assert!(view.contains("presentation_obscured: bool,"));
+    assert!(view.contains("presentation_obscured: false,"));
+    assert!(setter.contains("self.presentation_obscured = obscured;"));
+    assert!(setter.contains("self.windows_native_lifecycle_dirty = true;"));
+    assert!(setter.contains("self.windows_native_focus_requested = false;"));
+    for forbidden in [
+        "native.activate",
+        "native.deactivate",
+        "native.focus",
+        "cx.defer_in",
+    ] {
+        assert!(
+            !setter.contains(forbidden),
+            "dialog obscuring must record pure Rust intent only: {forbidden}"
+        );
+    }
+
+    assert!(take.contains("presentation_obscured: self.presentation_obscured,"));
+    assert!(take.contains("!self.presentation_obscured"));
+    assert!(execute.contains(
+        "let presentation_active = operation.tab_active && !operation.presentation_obscured;"
+    ));
+    assert!(execute.contains("allow_activation = presentation_active;"));
+    assert!(execute.contains("if presentation_active {"));
+    assert!(execute.contains("operation.lifecycle_dirty && !presentation_active"));
+    assert!(
+        execute.contains("operation.lifecycle_dirty && presentation_active && allow_activation")
+    );
+    assert!(execute.contains("now_presentable\n        && presentation_active"));
+    assert!(execute.contains("if !presentation_active {\n        requested_focus = None;"));
+}
+
+#[test]
+fn standalone_window_starts_active_with_native_focus_requested() {
+    let view = include_str!("../view.rs").replace("\r\n", "\n");
+    let new_body = function_body(&view, "pub fn new(", "fn cancel_presentation_pacing");
+
+    let standalone = new_body
+        .find("let standalone_window = config.tab_index.is_none();")
+        .expect("standalone window detection");
+    let tab_active = new_body
+        .find("tab_active: standalone_window,")
+        .expect("standalone windows start active");
+    let focus_requested = new_body
+        .find("windows_native_focus_requested: standalone_window,")
+        .expect("standalone windows request native focus");
+    assert!(
+        standalone < tab_active && tab_active < focus_requested,
+        "standalone detection must precede both activation intents"
+    );
+    assert!(
+        !new_body[standalone..tab_active].contains("tab_active: false"),
+        "initialization must never hard-code the inactive tab state"
+    );
+}
+
+#[test]
+fn overlay_composition_diagnostics_are_gated_behind_the_diagnostics_env() {
+    let source = include_str!("windows_native_overlay/diagnostics.rs").replace("\r\n", "\n");
+
+    assert!(source.contains("NAVOP_REMOTE_DESKTOP_DIAGNOSTICS"));
+    assert!(source.contains("fn overlay_diagnostics_enabled"));
+    assert!(
+        source
+            .matches("if !overlay_diagnostics_enabled() {")
+            .count()
+            >= 4,
+        "every overlay log entry point must early-return when diagnostics are disabled"
+    );
 }
 
 #[test]
@@ -1073,8 +1657,8 @@ fn assert_parent_bounded_remote_desktop_content(source: &str) {
     );
 
     let status = &content[content
-        .find("show_empty_status && (!uses_windows_native || show_failure_detail)")
-        .expect("empty-frame status")..];
+        .find("should_show_empty_status(")
+        .expect("empty-frame status predicate")..];
     assert!(status.contains(".min_w_0()"));
     assert!(status.contains(".max_w_full()"));
     assert!(status.contains(".flex_shrink_0()"));
@@ -1129,6 +1713,11 @@ fn function_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         .map(|offset| start + offset)
         .expect("next function");
     &source[start..end]
+}
+
+fn contains_ignoring_whitespace(source: &str, token: &str) -> bool {
+    let compact = |value: &str| value.split_whitespace().collect::<String>();
+    compact(source).contains(&compact(token))
 }
 
 #[test]
@@ -1243,33 +1832,35 @@ fn windows_native_presentation_readiness_is_independent_of_canvas_frames() {
     assert!(activate.contains("return Ok(());"));
 
     for token in [
-        "fn present_windows_native_after_login",
-        "fn synchronize_windows_native_presentation",
-        "fn refresh_windows_native_readiness",
-        "fn log_windows_native_readiness",
+        "windows_native_display\n                    .login_complete(generation, Instant::now())",
+        "windows_native_display\n                    .reconnected(generation, Instant::now())",
         "native_login_complete",
         "presentation ready",
     ] {
         assert!(view.contains(token), "view.rs missing {token}");
     }
-    // LoginComplete/Reconnected must force a re-synchronization of bounds.
-    let login_complete = function_body(
+    // LoginComplete/Reconnected drive the display reducer (force/retry), while
+    // the adapter's login phase and readiness refresh run borrow-free.
+    let execute = function_body(
         &view,
-        "fn present_windows_native_after_login",
-        "fn synchronize_windows_native_presentation",
+        "fn execute_windows_native_operation(",
+        "pub struct RemoteDesktopViewConfig",
     );
-    assert!(login_complete.contains("synchronize_windows_native_presentation()"));
     // The view must propagate the login phase into the adapter; keeping only
     // the view-local bool would leave the activate() readiness gate closed.
-    assert!(login_complete.contains("native.mark_login_complete()"));
+    assert!(execute.contains("operation.native.mark_login_complete();"));
     // The maintenance task re-reads readiness every tick.
-    assert!(maintenance.contains("refresh_windows_native_readiness()"));
-    let readiness = function_body(
+    assert!(execute.contains("operation.native.refresh_native_readiness()"));
+    assert!(execute.contains("operation.native.activation_pending()"));
+    assert!(maintenance.contains("execute_windows_native_operation(operation)"));
+    // Readiness transition logging happens in the pure-Rust commit phase and
+    // only fires on state transitions.
+    let commit = function_body(
         &view,
-        "fn refresh_windows_native_readiness",
-        "fn log_windows_native_readiness",
+        "fn commit_windows_native_operation(",
+        "fn attach_windows_native_presentation",
     );
-    assert!(readiness.contains("native.activation_pending()"));
+    assert!(commit.contains("if readiness.transitioned {"));
     // The overlay exposes actual HWND visibility, never canvas frame readiness.
     assert!(overlay.contains("fn is_actually_visible"));
     assert!(overlay.contains("IsWindowVisible"));

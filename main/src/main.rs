@@ -10,6 +10,7 @@ mod auth;
 
 mod ai_chat_acp;
 mod app_init;
+mod connection_sort;
 mod connection_visuals;
 mod credential_vault;
 mod env_file;
@@ -42,10 +43,10 @@ mod user_avatar;
 #[cfg(any(target_os = "windows", test))]
 mod windows_single_instance;
 
-use crate::onetcli_app::OnetCliApp;
+use crate::onetcli_app::{GlobalTabContainer, OnetCliApp};
 use gpui::*;
 
-use gpui_component::Root;
+use gpui_component::{DialogStateChanged, Root};
 use gpui_component_assets::Assets;
 use one_core::settings::{AppSettings, MainWindowSize, MainWindowState};
 use std::path::PathBuf;
@@ -263,6 +264,21 @@ impl AssetSource for AppAssets {
 fn main() {
     env_file::load_env_files();
 
+    // GPUI 的 Windows 平台默认通过 DirectComposition visual 呈现窗口内容，
+    // 该 visual 会盖住传统 child HWND（例如 RDP ActiveX 控件），即使连接
+    // 成功、child 可见，远端桌面区域也表现为白屏。原生 RDP 后端必须在
+    // platform 单例构造之前让 GPUI 走经典 HWND swap-chain 路径，与
+    // `tools/gpui-rdp-smoke` 保持一致；该环境变量只在构造时读取一次。
+    // 使用共享编译期标记（`remote_desktop_view/windows-native-rdp` 也会
+    // 启用它），而不是 main 自身的 feature，保证两种 feature 写法都生效。
+    if remote_desktop::windows_native_rdp_compiled() {
+        // SAFETY: 进程尚未创建 GPUI platform，也没有任何线程会读取该
+        // 环境变量；与 smoke 工具在进程首部执行相同操作。
+        unsafe {
+            std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
+        }
+    }
+
     if update::handle_update_command() {
         return;
     }
@@ -410,7 +426,15 @@ fn main() {
                 app_init::init_window_systems(window, cx);
                 update::schedule_update_check(window, cx);
                 let view = cx.new(|cx| OnetCliApp::new(window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
+                let root = cx.new(|cx| Root::new(view, window, cx));
+                let tab_container = cx.global::<GlobalTabContainer>().tab_container.clone();
+                cx.subscribe(&root, move |_, event: &DialogStateChanged, cx| {
+                    tab_container.update(cx, |tabs, cx| {
+                        tabs.set_active_presentation_obscured_by_dialog(event.active_count > 0, cx);
+                    });
+                })
+                .detach();
+                root
             }) {
                 Ok(window) => window,
                 Err(error) => {
@@ -518,6 +542,24 @@ mod embedded_cli_removal_tests {
     }
 
     #[test]
+    fn windows_native_rdp_disables_direct_composition_before_application_creation() {
+        let source = include_str!("main.rs");
+        let marker = source
+            .find("remote_desktop::windows_native_rdp_compiled()")
+            .expect("windows-native-rdp capability marker");
+        let setter = source
+            .find("GPUI_DISABLE_DIRECT_COMPOSITION")
+            .expect("windows-native-rdp must disable GPUI DirectComposition");
+        let application = source
+            .find("gpui_platform::application()")
+            .expect("GPUI application creation");
+
+        assert!(marker < setter);
+        assert!(setter < application);
+        assert!(source.contains("std::env::set_var(\"GPUI_DISABLE_DIRECT_COMPOSITION\", \"1\")"));
+    }
+
+    #[test]
     fn forwarded_startup_request_activates_existing_window_before_opening_files() {
         let source = include_str!("main.rs");
         let receiver = source
@@ -531,6 +573,21 @@ mod embedded_cli_removal_tests {
             .expect("forwarded file open");
 
         assert!(activation < open);
+    }
+
+    #[test]
+    fn main_window_dialog_state_obscures_active_native_presentation() {
+        let source = include_str!("main.rs").replace("\r\n", "\n");
+        let root_export = include_str!("../../crates/ui/src/lib.rs");
+
+        assert!(root_export.contains("DialogStateChanged"));
+        assert!(source.contains("use gpui_component::{DialogStateChanged, Root};"));
+        assert!(source.contains("let root = cx.new(|cx| Root::new(view, window, cx));"));
+        assert!(source.contains("cx.subscribe(&root,"));
+        assert!(source.contains("event: &DialogStateChanged"));
+        assert!(source.contains("event.active_count > 0"));
+        assert!(source.contains("set_active_presentation_obscured_by_dialog"));
+        assert!(source.contains(".detach();\n                root"));
     }
 
     #[test]
@@ -751,7 +808,7 @@ mod native_driver_feature_contract_tests {
     }
 
     #[test]
-    fn windows_native_rdp_feature_is_declared_and_default_off() {
+    fn windows_native_rdp_feature_is_declared_and_enabled_by_default() {
         let main_manifest = include_str!("../Cargo.toml");
         let remote_desktop_view_manifest =
             include_str!("../../crates/remote_desktop_view/Cargo.toml");
@@ -770,7 +827,10 @@ mod native_driver_feature_contract_tests {
             main_features
                 .contains("windows-native-rdp = [\"remote_desktop_view/windows-native-rdp\"]")
         );
-        assert!(!main_default.contains("windows-native-rdp"));
+        assert!(
+            main_default.contains("windows-native-rdp"),
+            "the Windows native RDP backend must be part of the default build"
+        );
         assert!(
             remote_desktop_view_features.contains(
                 "windows-native-rdp = [\"dep:raw-window-handle\", \"dep:windows_rdp_host\"]"

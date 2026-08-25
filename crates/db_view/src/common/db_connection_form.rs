@@ -2,14 +2,18 @@ use anyhow::Error;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use connection_form::credential::{
-    CredentialCapabilities, CredentialPickerConfig, CredentialPickerEvent,
-    CredentialReferencePicker, create_credential_picker, resolve_connection_for_runtime,
-};
 use connection_form::team::{
     TeamSelectItem, connection_sync_controls_visible_in, create_team_select, refresh_team_options,
     refresh_teams_tooltip, replace_team_options, resolve_team_assignment, selected_team_id,
     team_label, team_management_enabled,
+};
+use connection_form::{
+    SshAuthOption, SshConnectionSelectItem,
+    credential::{
+        CredentialCapabilities, CredentialPickerConfig, CredentialPickerEvent,
+        CredentialReferencePicker, create_credential_picker, resolve_connection_for_runtime,
+    },
+    normalize_ssh_auth_type as normalized_ssh_auth_type,
 };
 use db::plugin_manifest::FormVisibilityRule;
 use db::{
@@ -140,45 +144,6 @@ impl WorkspaceSelectItem {
 }
 
 impl SelectItem for WorkspaceSelectItem {
-    type Value = Option<i64>;
-
-    fn title(&self) -> SharedString {
-        self.name.clone().into()
-    }
-
-    fn value(&self) -> &Self::Value {
-        &self.id
-    }
-}
-
-/// SSH connection select item for tunnel reuse.
-#[derive(Clone, Debug)]
-pub struct SshConnectionSelectItem {
-    pub id: Option<i64>,
-    pub name: String,
-}
-
-impl SshConnectionSelectItem {
-    pub fn none() -> Self {
-        Self {
-            id: None,
-            name: t!("ConnectionForm.ssh_connection_manual").to_string(),
-        }
-    }
-
-    pub fn from_connection(connection: &StoredConnection) -> Self {
-        let id = connection.id;
-        let host = connection.to_ssh_params().ok().map(|params| params.host);
-        let name = match host.as_deref().filter(|host| !host.trim().is_empty()) {
-            Some(host) => format!("{} ({})", connection.name, host),
-            None => connection.name.clone(),
-        };
-
-        Self { id, name }
-    }
-}
-
-impl SelectItem for SshConnectionSelectItem {
     type Value = Option<i64>;
 
     fn title(&self) -> SharedString {
@@ -401,24 +366,12 @@ impl DbFormConfig {
             )
             .optional()
             .default("password")
-            .options(vec![
-                (
-                    "password".to_string(),
-                    t!("ConnectionForm.ssh_auth_password").to_string(),
-                ),
-                (
-                    "private_key".to_string(),
-                    t!("ConnectionForm.ssh_auth_private_key").to_string(),
-                ),
-                (
-                    "private_key_content".to_string(),
-                    t!("ConnectionForm.ssh_auth_private_key_content").to_string(),
-                ),
-                (
-                    "agent".to_string(),
-                    t!("ConnectionForm.ssh_auth_agent").to_string(),
-                ),
-            ]),
+            .options(
+                SshAuthOption::ALL
+                    .iter()
+                    .map(|option| (option.value().to_string(), option.label()))
+                    .collect(),
+            ),
             FormField::new(
                 "ssh_password",
                 t!("ConnectionForm.ssh_password"),
@@ -1146,25 +1099,16 @@ impl DbFormConfig {
     }
 }
 
-fn normalized_ssh_auth_type(auth_type: &str) -> &str {
-    match auth_type.trim().to_ascii_lowercase().as_str() {
-        "private_key" => "private_key",
-        "private_key_content" | "private_key_material" => "private_key_content",
-        "agent" => "agent",
-        _ => "password",
-    }
-}
-
 fn ssh_auth_requires_password(auth_type: &str) -> bool {
-    normalized_ssh_auth_type(auth_type) == "password"
+    normalized_ssh_auth_type(auth_type) == SshAuthOption::Password.value()
 }
 
 fn ssh_auth_requires_private_key(auth_type: &str) -> bool {
-    normalized_ssh_auth_type(auth_type) == "private_key"
+    normalized_ssh_auth_type(auth_type) == SshAuthOption::PrivateKey.value()
 }
 
 fn ssh_auth_requires_private_key_content(auth_type: &str) -> bool {
-    normalized_ssh_auth_type(auth_type) == "private_key_content"
+    normalized_ssh_auth_type(auth_type) == SshAuthOption::PrivateKeyContent.value()
 }
 
 const REQUIRED_HOST_SSH_FIELD_NAMES: &[&str] = &[
@@ -3032,84 +2976,36 @@ impl DbConnectionForm {
                             .label(self.field_label("ssh_auth_type"))
                             .items_center()
                             .label_justify_end()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .flex_wrap()
-                                    .gap_4()
-                                    .child(
-                                        Radio::new("db-ssh-auth-password")
-                                            .label(
-                                                t!("ConnectionForm.ssh_auth_password").to_string(),
-                                            )
-                                            .checked(ssh_auth_type == "password")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.set_field_value(
-                                                    "ssh_auth_type",
-                                                    "password",
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        Radio::new("db-ssh-auth-private-key")
-                                            .label(
-                                                t!("ConnectionForm.ssh_auth_private_key")
-                                                    .to_string(),
-                                            )
-                                            .checked(ssh_auth_type == "private_key")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.set_field_value(
-                                                    "ssh_auth_type",
-                                                    "private_key",
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        Radio::new("db-ssh-auth-private-key-content")
-                                            .label(
-                                                t!("ConnectionForm.ssh_auth_private_key_content")
-                                                    .to_string(),
-                                            )
-                                            .checked(ssh_auth_type == "private_key_content")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.set_field_value(
-                                                    "ssh_auth_type",
-                                                    "private_key_content",
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        Radio::new("db-ssh-auth-agent")
-                                            .label(t!("ConnectionForm.ssh_auth_agent").to_string())
-                                            .checked(ssh_auth_type == "agent")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.set_field_value(
-                                                    "ssh_auth_type",
-                                                    "agent",
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    ),
-                            ),
+                            .child(h_flex().w_full().flex_wrap().gap_4().children(
+                                SshAuthOption::ALL.iter().copied().map(|option| {
+                                    Radio::new(format!("db-ssh-auth-{}", option.value()))
+                                        .label(option.label())
+                                        .checked(ssh_auth_type == option.value())
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.set_field_value(
+                                                "ssh_auth_type",
+                                                option.value(),
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                }),
+                            )),
                     )
-                    .when(ssh_auth_type == "password", |form| {
+                    .when(ssh_auth_type == SshAuthOption::Password.value(), |form| {
                         form.child(self.render_field_by_name("ssh_password", cx))
                     })
-                    .when(ssh_auth_type == "private_key", |form| {
+                    .when(ssh_auth_type == SshAuthOption::PrivateKey.value(), |form| {
                         form.child(self.render_field_by_name("ssh_private_key_path", cx))
                             .child(self.render_field_by_name("ssh_private_key_passphrase", cx))
                     })
-                    .when(ssh_auth_type == "private_key_content", |form| {
-                        form.child(self.render_field_by_name("ssh_private_key_content", cx))
-                            .child(self.render_field_by_name("ssh_private_key_passphrase", cx))
-                    })
+                    .when(
+                        ssh_auth_type == SshAuthOption::PrivateKeyContent.value(),
+                        |form| {
+                            form.child(self.render_field_by_name("ssh_private_key_content", cx))
+                                .child(self.render_field_by_name("ssh_private_key_passphrase", cx))
+                        },
+                    )
                 })
                 .child(self.render_field_by_name("ssh_target_host", cx))
                 .child(self.render_field_by_name("ssh_target_port", cx))
@@ -3619,6 +3515,11 @@ mod tests {
     }
 
     #[test]
+    fn pageant_auth_type_is_preserved() {
+        assert_eq!("pageant", normalized_ssh_auth_type(" Pageant "));
+    }
+
+    #[test]
     fn custom_ssl_enabled_matches_database_semantics() {
         assert!(is_custom_ssl_enabled(
             HostSslTabKind::MySql,
@@ -3696,6 +3597,22 @@ mod tests {
                 "jump.example.com",
                 "root",
                 "agent",
+                "",
+                "",
+                ""
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ssh_pageant_auth_does_not_require_password() {
+        assert_eq!(
+            missing_ssh_tunnel_required_field(
+                true,
+                "jump.example.com",
+                "root",
+                "pageant",
                 "",
                 "",
                 ""

@@ -70,6 +70,7 @@ impl ConnectionImportWindow {
     }
 
     fn render_preview_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace_group_count = self.model.workspace_group_paths().len();
         div().overflow_hidden().child(
             h_flex()
                 .items_center()
@@ -98,7 +99,21 @@ impl ConnectionImportWindow {
                                     )
                                     .to_string(),
                                 ),
-                        ),
+                        )
+                        .when(workspace_group_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        t!(
+                                            "Home.ConnectionImport.workspace_group_count",
+                                            groups = workspace_group_count
+                                        )
+                                        .to_string(),
+                                    ),
+                            )
+                        }),
                 )
                 .child(
                     h_flex()
@@ -114,7 +129,7 @@ impl ConnectionImportWindow {
     fn render_sources(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_none()
-            .w(px(260.0))
+            .w(px(320.0))
             .h_full()
             .min_h_0()
             .border_r_1()
@@ -128,6 +143,12 @@ impl ConnectionImportWindow {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t!("Home.ConnectionImport.sources").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(t!("Home.ConnectionImport.sources_scan_hint").to_string()),
             )
             .children(
                 self.model

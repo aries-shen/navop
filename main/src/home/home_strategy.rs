@@ -271,6 +271,8 @@ impl ConnectionOpenStrategy for RemoteDesktopOpenStrategy {
             connection,
             protocol,
         } = *self;
+        // 双击等常规打开一律走 tab；独立全屏窗口仅保留在连接的右键菜单里
+        // （Connection.open_in_fullscreen_window）。
         extension_runtime::remote_desktop_provider_install::open_remote_desktop_connection_with_provider_guard(
             home, connection, protocol, mode, window, cx,
         );
@@ -292,6 +294,28 @@ impl ConnectionOpenStrategy for NoopOpenStrategy {
 mod tests {
     use super::mongodb_driver_id;
     use one_core::storage::{MongoDBParams, MongoDriverVariant, StoredConnection};
+
+    #[test]
+    fn remote_desktop_double_click_opens_in_a_tab() {
+        let source = include_str!("home_strategy.rs").replace("\r\n", "\n");
+        let start = source
+            .find("impl ConnectionOpenStrategy for RemoteDesktopOpenStrategy")
+            .expect("remote desktop open strategy");
+        let end = source[start..]
+            .find("impl ConnectionOpenStrategy for NoopOpenStrategy")
+            .map(|offset| start + offset)
+            .expect("next strategy");
+        let strategy = &source[start..end];
+
+        assert!(
+            strategy.contains("open_remote_desktop_connection_with_provider_guard("),
+            "double-click must open the remote desktop in a tab"
+        );
+        assert!(
+            !strategy.contains("open_remote_desktop_fullscreen_window"),
+            "the fullscreen window must stay behind the context-menu action"
+        );
+    }
 
     #[test]
     fn mongodb_driver_id_follows_the_saved_variant() {

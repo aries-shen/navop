@@ -255,7 +255,7 @@ test("portable Linux disables WebView while standard builds keep it", () => {
   assert.match(htmlCodeBlock, /HtmlPreview\.webview_unavailable/);
   assert.match(
     mainCargo,
-    /default = \["wasm-components", "embedded-webview"\]/,
+    /default = \["wasm-components", "embedded-webview", "windows-native-rdp"\]/,
   );
   assert.match(
     mainCargo,
@@ -454,7 +454,7 @@ test("Windows release builds an installable per-user MSI", () => {
   assert.match(release, /wix build installer\/windows\/navop\.wxs/);
   assert.match(
     release,
-    /-out "\$\{\{ matrix\.windows_basename \}\}\.msi"/,
+    /-out "\$\{env:PUBLIC_BASENAME\}\.msi"/,
   );
   assert.match(wix, /Scope="perUser"/);
   assert.match(wix, /StandardDirectory Id="LocalAppDataFolder"/);
@@ -469,14 +469,14 @@ test("Windows release builds an installable per-user MSI", () => {
 test("Windows application builds include the native RDP backend", () => {
   const release = read(".github/workflows/release.yml");
   const manual = read(".github/workflows/build-windows-msi.yml");
-  const releaseBuild = release.match(
-    /- name: Build release binary[\s\S]*?(?=\n      - name:)/,
+  const releaseWindowsBuild = release.match(
+    /- name: Build release binary \(Windows\)[\s\S]*?(?=\n      - name:)/,
   )?.[0];
   const manualBuild = manual.match(
     /- name: Build release binary[\s\S]*?(?=\n      - name:)/,
   )?.[0];
 
-  assert.ok(releaseBuild, "missing release binary build step");
+  assert.ok(releaseWindowsBuild, "missing Windows release binary build step");
   assert.ok(manualBuild, "missing manual Windows release binary build step");
   for (const target of [
     "aarch64-apple-darwin",
@@ -503,16 +503,16 @@ test("Windows application builds include the native RDP backend", () => {
     );
   }
   assert.match(
-    releaseBuild,
-    /if \[ "\$\{\{ matrix\.windows_native_rdp \}\}" = "true" \]; then/,
+    releaseWindowsBuild,
+    /if: runner\.os == 'Windows'/,
   );
   assert.match(
-    releaseBuild,
-    /cargo_features\+=\(--features windows-native-rdp\)/,
+    releaseWindowsBuild,
+    /--features windows-native-rdp/,
   );
   assert.match(
-    releaseBuild,
-    /cargo build --release -p main "\$\{cargo_features\[@\]\}" --target \$\{\{ matrix\.target \}\}/,
+    releaseWindowsBuild,
+    /--target \$target/,
   );
   assert.match(
     manual,
@@ -526,11 +526,11 @@ test("Windows application builds include the native RDP backend", () => {
     manual,
     /- name: Configure MSVC environment[\s\S]*?uses: ilammy\/msvc-dev-cmd@v1[\s\S]*?arch: \$\{\{ env\.WINDOWS_WIX_ARCH \}\}/,
   );
-  assert.match(releaseBuild, /VCToolsInstallDir/);
+  assert.match(releaseWindowsBuild, /VCToolsInstallDir/);
   assert.match(manualBuild, /VCToolsInstallDir/);
 });
 
-test("Windows release publishes 32-bit x86 artifacts and updater metadata", () => {
+test("Windows release publishes versioned Win32 artifacts while preserving updater metadata", () => {
   const release = read(".github/workflows/release.yml");
   const manual = read(".github/workflows/build-windows-msi.yml");
   const upload = read(".github/workflows/upload-r2.yml");
@@ -539,7 +539,7 @@ test("Windows release publishes 32-bit x86 artifacts and updater metadata", () =
   assert.match(release, /- windows-x86/);
   assert.match(
     release,
-    /windows_x86='\{"target":"i686-pc-windows-msvc"[^']*"archive":"navop-i686-pc-windows-msvc\.zip"[^']*"windows_arch":"x86"[^']*"windows_basename":"navop-i686-pc-windows-msvc"/,
+    /windows_x86='\{"target":"i686-pc-windows-msvc"[^']*"archive":"navop-i686-pc-windows-msvc\.zip"[^']*"public_label":"win32"[^']*"windows_arch":"x86"/,
   );
   assert.match(
     release,
@@ -547,15 +547,17 @@ test("Windows release publishes 32-bit x86 artifacts and updater metadata", () =
   );
   assert.match(
     release,
-    /\$\{\{ matrix\.windows_basename \}\}-portable\.zip/,
+    /\$\{env:PUBLIC_BASENAME\}-portable\.zip/,
   );
   assert.match(release, /-arch \$\{\{ matrix\.windows_arch \}\}/);
-  assert.match(release, /\$\{\{ matrix\.windows_basename \}\}\.msi/);
-  assert.match(release, /\$\{\{ matrix\.windows_basename \}\}\.exe/);
+  assert.match(release, /\$\{env:PUBLIC_BASENAME\}\.msi/);
+  assert.match(release, /\$\{env:PUBLIC_BASENAME\}\.exe/);
+  assert.match(release, /PUBLIC_BASENAME=navop-\$\{VERSION#v\}-\$\{\{ matrix\.public_label \}\}/);
 
   assert.match(manual, /architecture:/);
   assert.match(manual, /- x86/);
   assert.match(manual, /i686-pc-windows-msvc/);
+  assert.match(manual, /inputs\.architecture == 'x86' && 'win32'/);
   assert.match(manual, /WINDOWS_TARGET/);
   assert.match(manual, /WINDOWS_WIX_ARCH/);
   assert.match(manual, /WINDOWS_BASENAME/);
@@ -600,7 +602,7 @@ test("Windows release builds an EXE installer bundle from the MSI", () => {
   }
   assert.match(
     release,
-    /wix build installer\/windows\/navop-bundle\.wxs[^]*-ext WixToolset\.BootstrapperApplications\.wixext[^]*-d Version=[^\n]+[^]*-d MsiPath=[^\n]*\$\{\{ matrix\.windows_basename \}\}\.msi[^]*-out "\$\{\{ matrix\.windows_basename \}\}\.exe"/,
+    /wix build installer\/windows\/navop-bundle\.wxs[^]*-ext WixToolset\.BootstrapperApplications\.wixext[^]*-d Version=[^\n]+[^]*-d MsiPath=[^\n]*\$\{env:PUBLIC_BASENAME\}\.msi[^]*-out "\$\{env:PUBLIC_BASENAME\}\.exe"/,
   );
   assert.match(
     manual,
@@ -652,7 +654,7 @@ test("Windows release keeps the legacy ZIP standard and publishes portable separ
   );
   assert.match(
     release,
-    /Compress-Archive -Path "portable-package\/\*" -DestinationPath "\$\{\{ matrix\.windows_basename \}\}-portable\.zip"/,
+    /Compress-Archive -Path "portable-package\/\*" -DestinationPath "\$\{env:PUBLIC_BASENAME\}-portable\.zip"/,
   );
   assert.match(
     manual,
@@ -671,26 +673,26 @@ test("Windows release keeps the legacy ZIP standard and publishes portable separ
   );
   assert.match(
     release,
-    /name: \$\{\{ matrix\.windows_basename \}\}-portable\.zip/,
+    /name: navop-\$\{\{ matrix\.public_label \}\}-packages/,
   );
   assert.match(
     release,
-    /path: \$\{\{ matrix\.windows_basename \}\}-portable\.zip/,
+    /navop-\*-\$\{\{ matrix\.public_label \}\}-portable\.zip/,
   );
   assert.match(
     release,
-    /name: \$\{\{ matrix\.windows_basename \}\}\.exe/,
+    /navop-\*-\$\{\{ matrix\.public_label \}\}\.msi/,
   );
   assert.match(
     release,
-    /path: \$\{\{ matrix\.windows_basename \}\}\.exe/,
+    /navop-\*-\$\{\{ matrix\.public_label \}\}\.exe/,
   );
   for (const [guide, installerLabel] of [
     [installGuides[0], /EXE 安装包/],
     [installGuides[1], /EXE installer/],
     [installGuides[2], /EXE 安裝包/],
   ]) {
-    assert.match(guide, /navop-x86_64-pc-windows-msvc\.exe/);
+    assert.match(guide, /navop-<version>-windows-x64\.exe/);
     assert.match(guide, installerLabel);
     assert.match(guide, /-portable\.zip/);
     assert.doesNotMatch(
@@ -821,43 +823,34 @@ test("Windows MSI shortcuts use dedicated HKCU-keyed components", () => {
   }
 });
 
-test("GitHub publishes installers while R2 only uploads updater archives", () => {
+test("GitHub and R2 publish every installer while the updater manifest remains compatible", () => {
   const release = read(".github/workflows/release.yml");
   const upload = read(".github/workflows/upload-r2.yml");
 
   assert.match(
     release,
-    /name: \$\{\{ matrix\.windows_basename \}\}\.msi[\s\S]*?path: \$\{\{ matrix\.windows_basename \}\}\.msi/,
+    /name: navop-\$\{\{ matrix\.public_label \}\}-packages[\s\S]*?navop-\*-\$\{\{ matrix\.public_label \}\}\.msi/,
   );
   assert.match(release, /new_files=\(artifacts\/navop-\* artifacts\/navop_\*\)/);
   assert.match(release, /navop-aarch64-unknown-linux-gnu-portable\.tar\.gz/);
   assert.match(release, /navop-x86_64-unknown-linux-gnu-portable\.tar\.gz/);
-  assert.match(upload, /navop-x86_64-pc-windows-msvc\.zip/);
-  assert.match(upload, /navop-i686-pc-windows-msvc\.zip/);
-  assert.doesNotMatch(
-    upload,
-    /navop-aarch64-unknown-linux-gnu-portable\.tar\.gz/,
-  );
-  assert.doesNotMatch(
-    upload,
-    /navop-x86_64-unknown-linux-gnu-portable\.tar\.gz/,
-  );
-  assert.doesNotMatch(upload, /navop-x86_64-pc-windows-msvc-portable\.zip/);
-  assert.doesNotMatch(upload, /navop-x86_64-pc-windows-msvc\.exe/);
-  assert.doesNotMatch(upload, /navop-i686-pc-windows-msvc-portable\.zip/);
-  assert.doesNotMatch(upload, /navop-i686-pc-windows-msvc\.exe/);
-  assert.match(upload, /navop-aarch64-apple-darwin\.tar\.gz/);
-  assert.match(upload, /navop-x86_64-unknown-linux-gnu\.tar\.gz/);
-  assert.doesNotMatch(upload, /\.msi/);
-  assert.doesNotMatch(upload, /\.dmg/);
-  assert.doesNotMatch(upload, /application\/x-msi/);
-  assert.doesNotMatch(upload, /application\/x-apple-diskimage/);
-
-  const uploadList = upload.slice(
-    upload.indexOf("release_files=("),
-    upload.indexOf('for file in "${release_files[@]}"'),
-  );
-  assert.doesNotMatch(uploadList, /sha256sums\.txt/);
+  assert.match(upload, /--pattern "navop-\*"/);
+  assert.match(upload, /--pattern "navop_\*"/);
+  assert.match(upload, /release_files=\(artifacts\/navop-\* artifacts\/navop_\*\)/);
+  assert.match(upload, /schema_version: 1/);
+  assert.match(upload, /downloads: objectUrls\("releases", updaterAssets\)/);
+  assert.match(upload, /fallback_downloads: githubReleaseUrls\(updaterAssets\)/);
+  assert.match(upload, /sha256s: objectChecksums\(updaterAssets\)/);
+  assert.match(upload, /packages,/);
+  assert.match(upload, /publicUpdaterAlternatives/);
+  assert.match(upload, /`navop-\$\{version\}-win32\.zip`/);
+  assert.match(upload, /\["win32", "i686-pc-windows-msvc"\]/);
+  assert.match(upload, /\*\.dmg\) content_type="application\/x-apple-diskimage"/);
+  assert.match(upload, /\*\.msi\) content_type="application\/x-msi"/);
+  assert.match(upload, /\*\.exe\) content_type="application\/vnd\.microsoft\.portable-executable"/);
+  assert.match(upload, /\*\.deb\) content_type="application\/vnd\.debian\.binary-package"/);
+  assert.match(upload, /\*\.rpm\) content_type="application\/x-rpm"/);
+  assert.match(upload, /\*\.AppImage\) content_type="application\/octet-stream"/);
 });
 
 test("R2 uploads are single-dispatch, revalidated, and verified after overwrite", () => {
@@ -866,7 +859,7 @@ test("R2 uploads are single-dispatch, revalidated, and verified after overwrite"
   assert.match(upload, /workflow_dispatch:/);
   assert.doesNotMatch(upload, /workflow_run:/);
   assert.match(upload, /group: \$\{\{ github\.workflow \}\}-\$\{\{ inputs\.tag \}\}/);
-  assert.match(upload, /cancel-in-progress: true/);
+  assert.match(upload, /cancel-in-progress: false/);
   assert.match(upload, /--metadata "sha256=\$\{expected_sha256\}"/);
   assert.match(upload, /aws s3api head-object/);
   assert.match(upload, /R2 object size mismatch/);
@@ -875,6 +868,28 @@ test("R2 uploads are single-dispatch, revalidated, and verified after overwrite"
   assert.match(upload, /no-store, max-age=0/);
   assert.doesNotMatch(upload, /max-age=31536000/);
   assert.doesNotMatch(upload, /max-age=31536000, immutable/);
+});
+
+test("CNB release synchronization replaces moved tags before syncing assets", () => {
+  const sync = read(".github/workflows/sync-cnb-release-assets.yml");
+
+  assert.match(sync, /uses: actions\/checkout@v4/);
+  assert.match(sync, /fetch-depth: 0/);
+  assert.match(sync, /ref: \$\{\{ inputs\.tag \}\}/);
+  assert.match(sync, /group: navop-cnb-release/);
+  assert.match(sync, /cancel-in-progress: false/);
+  assert.match(sync, /git remote add cnb "https:\/\/cnb\.cool\/\$\{CNB_REPOSITORY\}\.git"/);
+  assert.match(sync, /git ls-remote --tags cnb/);
+  assert.match(sync, /git for-each-ref --format='%\(refname\)' refs\/tags/);
+  assert.match(sync, /git push cnb ":refs\/tags\/\$\{tag_name\}"/);
+  assert.match(sync, /git push cnb --tags/);
+  assert.match(sync, /\.\/mpgrm releases sync/);
+
+  const deleteMovedTag = sync.indexOf('git push cnb ":refs/tags/${tag_name}"');
+  const pushTags = sync.indexOf("git push cnb --tags");
+  const syncAssets = sync.indexOf("./mpgrm releases sync");
+  assert.ok(deleteMovedTag >= 0 && deleteMovedTag < pushTags);
+  assert.ok(pushTags >= 0 && pushTags < syncAssets);
 });
 
 test("CI runs release packaging regression checks", () => {

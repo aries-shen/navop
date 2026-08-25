@@ -17,6 +17,10 @@ use gpui_component::{
 use rust_i18n::t;
 use tokio::sync::mpsc;
 
+use crate::compare::compare_result_feedback::{
+    CompareIssueListState, clear_compare_issue_list, compare_issue_list_state,
+    data_compare_failure_issues, refresh_compare_issue_list,
+};
 use crate::compare::data_diff_detail::{
     DataDiffListState, clear_data_diff_list, data_diff_list_state, refresh_data_diff_list,
 };
@@ -33,11 +37,12 @@ use crate::compare::target_picker::{
     StringSelect, selected_string, set_connection_select, set_string_select, string_select_state,
 };
 use crate::compare::window_params::{
-    DataCompareSelection, data_compare_params, data_compare_target_tables_for_selection,
+    DataCompareSelection, DataCompareSettings, data_compare_params,
+    data_compare_target_tables_for_selection, parse_optional_positive_limit,
 };
 use crate::compare::window_ui::{
     CompareStep, ConnectionSelectItem, SyncSqlExecutionLogEntry, clear_sync_sql_execution_log,
-    close_button, connection_select_state, ignore_identifier_case_option,
+    close_button, connection_select_state, ignore_identifier_case_option, input_row,
     register_connection_for_compare, reset_sync_sql_execution_log, selected_connection_id,
     sql_editor_panel, start_sync_sql_execution, sync_sql_editor_state,
     sync_sql_execution_log_panel, sync_sql_execution_options_row,
@@ -74,12 +79,17 @@ pub struct DataCompareWindow {
     pub(super) selected_target_tables: Entity<HashSet<String>>,
     pub(super) target_table_list: TableSelectionListState,
     pub(super) key_columns: Entity<InputState>,
+    max_rows_per_table: Entity<InputState>,
+    max_pages_per_table: Entity<InputState>,
     pub(super) ignore_identifier_case: Entity<bool>,
     pub(super) result: Entity<Option<Arc<DataCompareBatchResult>>>,
     pub(super) data_diff_list: DataDiffListState,
     pub(super) sync_plan: Entity<Option<SyncPlan>>,
     pub(super) selected_statement_ids: Entity<HashSet<String>>,
     pub(super) sync_statement_list: SyncStatementListState,
+    pub(super) failure_details_list: CompareIssueListState,
+    pub(super) failure_details_expanded: Entity<bool>,
+    pub(super) sync_warnings_expanded: Entity<bool>,
     pub(super) sync_sql_editor: Entity<InputState>,
     sync_sql_dirty: bool,
     pub(super) execution_log: Entity<Vec<SyncSqlExecutionLogEntry>>,
@@ -147,6 +157,12 @@ impl DataCompareWindow {
             cx.new(|cx| InputState::new(window, cx).default_value(default_table.clone()));
         let target_table_select = string_select_state(default_table.clone(), window, cx);
         let key_columns = cx.new(|cx| InputState::new(window, cx).placeholder("id, tenant_id"));
+        let max_rows_per_table = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("Compare.limit_optional").to_string())
+        });
+        let max_pages_per_table = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("Compare.limit_optional").to_string())
+        });
         let ignore_identifier_case = cx.new(|_| true);
         let sync_sql_editor = sync_sql_editor_state(window, cx);
         let execution_log_scroll = ScrollHandle::new();
@@ -156,6 +172,8 @@ impl DataCompareWindow {
             let data_diff_list = data_diff_list_state(selected_statement_ids.clone(), window, cx);
             let sync_statement_list =
                 sync_statement_list_state(selected_statement_ids.clone(), window, cx);
+            let failure_details_list =
+                compare_issue_list_state("data-compare-failures", window, cx);
             let selected_source_tables = cx.new({
                 let default_selected_tables = default_selected_tables.clone();
                 move |_| default_selected_tables.clone()
@@ -190,6 +208,8 @@ impl DataCompareWindow {
                 selected_target_tables,
                 target_table_list,
                 key_columns,
+                max_rows_per_table,
+                max_pages_per_table,
                 ignore_identifier_case,
                 sync_sql_editor,
                 result: cx.new(|_| None),
@@ -197,6 +217,9 @@ impl DataCompareWindow {
                 sync_plan: cx.new(|_| None),
                 selected_statement_ids,
                 sync_statement_list,
+                failure_details_list,
+                failure_details_expanded: cx.new(|_| true),
+                sync_warnings_expanded: cx.new(|_| false),
                 execution_log: cx.new(|_| Vec::new()),
                 execution_log_scroll,
                 sync_sql_dirty: false,
@@ -417,6 +440,11 @@ impl DataCompareWindow {
                             let sync_sql_blocked_status =
                                 data_compare_sync_sql_blocked_status(&result);
                             let selected_ids = default_selected_statement_ids(&plan);
+                            refresh_compare_issue_list(
+                                &view.failure_details_list,
+                                data_compare_failure_issues(&result.table_failures),
+                                cx,
+                            );
                             let result = Arc::new(result);
                             refresh_data_diff_list(
                                 &view.data_diff_list,
@@ -452,6 +480,11 @@ impl DataCompareWindow {
                             }
                         }
                         Err(error) => {
+                            refresh_compare_issue_list(
+                                &view.failure_details_list,
+                                data_compare_failure_issues(&result.table_failures),
+                                cx,
+                            );
                             let result = Arc::new(result);
                             refresh_data_diff_list(&view.data_diff_list, result.clone(), None, cx);
                             view.result.update(cx, |slot, cx| {
@@ -585,6 +618,7 @@ impl DataCompareWindow {
             cx.notify();
         });
         clear_data_diff_list(&self.data_diff_list, cx);
+        clear_compare_issue_list(&self.failure_details_list, cx);
         self.sync_plan.update(cx, |slot, cx| {
             *slot = None;
             cx.notify();
@@ -626,13 +660,27 @@ impl DataCompareWindow {
         cx.notify();
     }
 
-    fn build_params(&self, cx: &mut Context<Self>) -> Result<DataCompareParams, &'static str> {
+    fn build_params(&self, cx: &mut Context<Self>) -> Result<DataCompareParams, String> {
+        let max_rows = self.max_rows_per_table.read(cx).text().to_string();
+        let max_pages = self.max_pages_per_table.read(cx).text().to_string();
+        let invalid_limit = || t!("Compare.invalid_compare_limit").to_string();
+        let max_rows_per_table =
+            parse_optional_positive_limit(&max_rows).map_err(|_| invalid_limit())?;
+        let max_pages_per_table =
+            parse_optional_positive_limit(&max_pages).map_err(|_| invalid_limit())?;
         data_compare_params(
             self.source_selection(cx),
             self.target_selection(cx),
-            self.key_columns.read(cx).text().to_string(),
-            !*self.ignore_identifier_case.read(cx),
+            DataCompareSettings {
+                key_columns: self.key_columns.read(cx).text().to_string(),
+                case_sensitive_identifiers: !*self.ignore_identifier_case.read(cx),
+                limits: crate::compare::DataCompareLimits {
+                    max_rows_per_table,
+                    max_pages_per_table,
+                },
+            },
         )
+        .map_err(str::to_string)
     }
 
     fn start_execute_sync_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -730,6 +778,7 @@ impl DataCompareWindow {
             cx.notify();
         });
         clear_data_diff_list(&self.data_diff_list, cx);
+        clear_compare_issue_list(&self.failure_details_list, cx);
         self.sync_plan.update(cx, |slot, cx| {
             *slot = None;
             cx.notify();
@@ -743,6 +792,14 @@ impl DataCompareWindow {
             cx.notify();
         });
         clear_sync_statement_list(&self.sync_statement_list, cx);
+        self.failure_details_expanded.update(cx, |expanded, cx| {
+            *expanded = true;
+            cx.notify();
+        });
+        self.sync_warnings_expanded.update(cx, |expanded, cx| {
+            *expanded = false;
+            cx.notify();
+        });
         self.sync_sql_editor.update(cx, |state, cx| {
             state.set_value(String::new(), window, cx);
         });
@@ -958,7 +1015,25 @@ impl Render for DataCompareWindow {
                                     "data-compare-ignore-identifier-case",
                                     self.ignore_identifier_case.clone(),
                                     cx,
-                                )),
+                                ))
+                                .child(
+                                    h_flex()
+                                        .gap_4()
+                                        .child(div().flex_1().min_w_0().child(input_row(
+                                            t!("Compare.max_rows_per_table").to_string(),
+                                            &self.max_rows_per_table,
+                                        )))
+                                        .child(div().flex_1().min_w_0().child(input_row(
+                                            t!("Compare.max_pages_per_table").to_string(),
+                                            &self.max_pages_per_table,
+                                        ))),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(t!("Compare.compare_limit_hint").to_string()),
+                                ),
                         )
                     })
                     .when(self.current_step == CompareStep::SqlPreview, |this| {

@@ -423,6 +423,14 @@ ConnectionForm:
     en: SSH Agent
     zh-CN: SSH Agent
     zh-HK: SSH Agent
+  ssh_auth_pageant:
+    en: Pageant (Windows)
+    zh-CN: Pageant（Windows）
+    zh-HK: Pageant（Windows）
+  ssh_auth_auto_public_key:
+    en: Auto Public Key
+    zh-CN: 自动公钥
+    zh-HK: 自動公鑰
   ssh_private_key_path:
     en: Private Key Path
     zh-CN: 私钥路径
@@ -3345,6 +3353,26 @@ Compare:
     en: Key Columns
     zh-CN: 主键列
     zh-HK: 主鍵欄位
+  max_rows_per_table:
+    en: Max rows/table
+    zh-CN: 每表最大行数
+    zh-HK: 每表最大行數
+  max_pages_per_table:
+    en: Max pages/table
+    zh-CN: 每表最大页数
+    zh-HK: 每表最大頁數
+  limit_optional:
+    en: Optional
+    zh-CN: 可选
+    zh-HK: 可選
+  invalid_compare_limit:
+    en: Compare limits must be positive whole numbers
+    zh-CN: 比较限制必须是正整数
+    zh-HK: 比較限制必須是正整數
+  compare_limit_hint:
+    en: Leave both limits empty for a complete comparison. Limits reduce resource use, but may produce incomplete results and disable synchronization SQL.
+    zh-CN: 两项均留空将执行完整比较。设置限制可降低资源消耗，但结果可能不完整，并会禁用同步 SQL。
+    zh-HK: 兩項均留空將執行完整比較。設定限制可降低資源消耗，但結果可能不完整，並會停用同步 SQL。
   source_tables:
     en: Source Tables
     zh-CN: 源表
@@ -3537,6 +3565,18 @@ Compare:
     en: "%{count} table(s) failed to compare and were excluded from the sync plan."
     zh-CN: "%{count} 张表比较失败，已从同步计划中排除"
     zh-HK: "%{count} 張表比較失敗，已從同步計劃中排除"
+  compare_issues:
+    en: "Compare Issues (%{count})"
+    zh-CN: "比较问题（%{count}）"
+    zh-HK: "比較問題（%{count}）"
+  compare_issue_copied:
+    en: Compare issue copied
+    zh-CN: 比较问题已复制
+    zh-HK: 比較問題已複製
+  sync_plan_warnings:
+    en: "Sync Plan Warnings (%{count})"
+    zh-CN: "同步计划警告（%{count}）"
+    zh-HK: "同步計劃警告（%{count}）"
   data_compare_dependency_metadata_failed_note:
     en: Dependency metadata could not be loaded completely. Compare results were preserved, but sync SQL generation and execution are disabled because statement ordering cannot be guaranteed.
     zh-CN: 依赖元数据未能完整加载。比较结果已保留，但由于无法保证同步语句顺序，已禁止生成和执行同步 SQL

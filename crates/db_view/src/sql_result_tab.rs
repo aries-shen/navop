@@ -30,6 +30,8 @@ use crate::sidebar::execution_history_panel::ExecutionHistoryPanel;
 use crate::table_data::cell_preview_host::CellPreviewHost;
 use crate::table_data::data_grid::{DataGrid, DataGridConfig, DataGridUsage};
 use ai_chat_view::AskAiButton;
+use db::cache_manager::{GlobalNodeCache, SchemaInvalidationPlan};
+use one_core::connection_notifier::{ConnectionDataEvent, GlobalConnectionNotifier};
 use one_core::gpui_tokio::Tokio;
 use one_core::settings::AppSettings;
 use parking_lot::Mutex;
@@ -105,6 +107,34 @@ pub(crate) struct SessionSqlRun {
     pub database: Option<String>,
     pub schema: Option<String>,
     pub database_type: one_core::storage::DatabaseType,
+    pub schema_invalidation: SessionSchemaInvalidation,
+}
+
+#[derive(Clone)]
+pub(crate) enum SessionSchemaInvalidation {
+    Immediate,
+    Deferred(Arc<Mutex<SchemaInvalidationPlan>>),
+}
+
+fn emit_schema_changed_events(
+    cx: &mut AsyncApp,
+    notifier: Option<&GlobalConnectionNotifier>,
+    scopes: Vec<(String, String, Option<String>)>,
+) {
+    let Some(notifier) = notifier else {
+        return;
+    };
+    for (connection_id, database, schema) in scopes {
+        let _ = cx.update(|cx| {
+            notifier.0.update(cx, |_, cx| {
+                cx.emit(ConnectionDataEvent::SchemaChanged {
+                    connection_id,
+                    database,
+                    schema,
+                });
+            });
+        });
+    }
 }
 
 impl StatementListData {
@@ -614,11 +644,13 @@ impl SqlResultTabContainer {
         });
 
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let (global_state, max_rows) = cx.update(|cx| {
+            let (global_state, max_rows, cache, notifier) = cx.update(|cx| {
                 let global_state = cx.global::<GlobalDbState>().clone();
                 let sql_query_max_rows = AppSettings::current(cx).sql_query_max_rows;
                 let max_rows = (sql_query_max_rows > 0).then_some(sql_query_max_rows as usize);
-                (global_state, max_rows)
+                let cache = cx.try_global::<GlobalNodeCache>().cloned();
+                let notifier = cx.try_global::<GlobalConnectionNotifier>().cloned();
+                (global_state, max_rows, cache, notifier)
             });
             let exec_opts = db::ExecOptions {
                 stop_on_error: false,
@@ -629,9 +661,9 @@ impl SqlResultTabContainer {
             let sql = request.sql.clone();
             let execution_state = global_state.clone();
             let execution_task = Tokio::spawn_result(cx, async move {
-                execution_state
+                Ok(execution_state
                     .execute_session(session_id, sql, Some(exec_opts))
-                    .await
+                    .await)
             });
             let execution_result = tokio::select! {
                 biased;
@@ -648,8 +680,20 @@ impl SqlResultTabContainer {
                         error
                     );
                 }
+                if let Some(cache) = cache {
+                    let plan = global_state.conservative_sql_cache_invalidation_plan(
+                        &request.connection_id,
+                        request.database.as_deref(),
+                        request.schema.as_deref(),
+                    );
+                    let scopes = global_state
+                        .apply_sql_cache_invalidation_plan(&cache, &request.connection_id, &plan)
+                        .await;
+                    emit_schema_changed_events(cx, notifier.as_ref(), scopes);
+                }
                 return None;
             };
+            let execution_result = execution_result.unwrap_or_else(Err);
             let results = match execution_result {
                 Ok(results) => results,
                 Err(error) => vec![SqlResult::Error(SqlErrorInfo {
@@ -657,6 +701,40 @@ impl SqlResultTabContainer {
                     message: error.to_string(),
                 })],
             };
+            if let Some(cache) = cache {
+                let mut plan = SchemaInvalidationPlan::default();
+                for result in &results {
+                    let sql = match result {
+                        SqlResult::Query(result) => Some(result.sql.as_str()),
+                        SqlResult::Exec(result) => Some(result.sql.as_str()),
+                        SqlResult::Error(_) => None,
+                    };
+                    if let Some(sql) = sql.filter(|sql| !sql.trim().is_empty()) {
+                        plan.merge(global_state.plan_sql_cache_invalidation(
+                            &cache,
+                            &request.connection_id,
+                            sql,
+                            request.database.as_deref(),
+                            request.schema.as_deref(),
+                        ));
+                    }
+                }
+                match &request.schema_invalidation {
+                    SessionSchemaInvalidation::Immediate => {
+                        let scopes = global_state
+                            .apply_sql_cache_invalidation_plan(
+                                &cache,
+                                &request.connection_id,
+                                &plan,
+                            )
+                            .await;
+                        emit_schema_changed_events(cx, notifier.as_ref(), scopes);
+                    }
+                    SessionSchemaInvalidation::Deferred(pending) => {
+                        pending.lock().merge(plan);
+                    }
+                }
+            }
             let has_query_result = results
                 .iter()
                 .any(|result| matches!(result, SqlResult::Query(_)));

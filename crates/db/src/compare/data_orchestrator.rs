@@ -4,6 +4,7 @@ use std::{
 };
 
 use gpui::AsyncApp;
+use one_core::gpui_tokio::Tokio;
 use one_core::storage::DatabaseType;
 
 use crate::{
@@ -401,15 +402,16 @@ async fn load_table_columns(
     schema: Option<String>,
     table: &str,
 ) -> anyhow::Result<Vec<ColumnInfo>> {
-    db_state
-        .list_columns(
-            cx,
-            connection_id.to_string(),
-            database.to_string(),
-            schema,
-            table.to_string(),
-        )
-        .await
+    let db_state = db_state.clone();
+    let connection_id = connection_id.to_string();
+    let database = database.to_string();
+    let table = table.to_string();
+    Tokio::spawn_result(cx, async move {
+        db_state
+            .list_columns_direct(&connection_id, &database, schema, &table)
+            .await
+    })
+    .await
 }
 
 async fn target_table_info(
@@ -421,9 +423,15 @@ async fn target_table_info(
     table: &str,
     case_sensitive_identifiers: bool,
 ) -> anyhow::Result<Option<TableInfo>> {
-    let tables = db_state
-        .list_tables(cx, connection_id.to_string(), database.to_string(), schema)
-        .await?;
+    let db_state = db_state.clone();
+    let connection_id = connection_id.to_string();
+    let database = database.to_string();
+    let tables = Tokio::spawn_result(cx, async move {
+        db_state
+            .list_tables_direct(&connection_id, &database, schema)
+            .await
+    })
+    .await?;
     Ok(matching_table(&tables, table, case_sensitive_identifiers).cloned())
 }
 
@@ -941,14 +949,16 @@ async fn load_target_table_lookup(
     cx: &mut AsyncApp,
     params: &super::DataCompareParams,
 ) -> anyhow::Result<HashMap<String, String>> {
-    let tables = db_state
-        .list_tables(
-            cx,
-            params.target_connection_id.clone(),
-            params.target_database.clone(),
-            params.target_schema.clone(),
-        )
-        .await?;
+    let db_state = db_state.clone();
+    let connection_id = params.target_connection_id.clone();
+    let database = params.target_database.clone();
+    let schema = params.target_schema.clone();
+    let tables = Tokio::spawn_result(cx, async move {
+        db_state
+            .list_tables_direct(&connection_id, &database, schema)
+            .await
+    })
+    .await?;
     Ok(tables
         .into_iter()
         .map(|table| {
@@ -966,15 +976,17 @@ async fn load_target_foreign_keys(
     params: &super::DataCompareParams,
     table: &str,
 ) -> anyhow::Result<Vec<ForeignKeyDefinition>> {
-    db_state
-        .list_foreign_keys(
-            cx,
-            params.target_connection_id.clone(),
-            params.target_database.clone(),
-            params.target_schema.clone(),
-            table.to_string(),
-        )
-        .await
+    let db_state = db_state.clone();
+    let connection_id = params.target_connection_id.clone();
+    let database = params.target_database.clone();
+    let schema = params.target_schema.clone();
+    let table = table.to_string();
+    Tokio::spawn_result(cx, async move {
+        db_state
+            .list_foreign_keys_direct(&connection_id, &database, schema, &table)
+            .await
+    })
+    .await
 }
 
 fn target_table_lookup(params: &super::DataCompareParams) -> HashMap<String, String> {

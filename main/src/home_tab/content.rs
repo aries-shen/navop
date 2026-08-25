@@ -41,6 +41,7 @@ impl HomePage {
     ) -> AnyElement {
         let legacy = self.home_page_style == HomePageStyle::Legacy;
         let center_modern_content = !legacy && self.persistent_sidebar_expanded;
+        let connection_sort_order = AppSettings::global(cx).connection_sort_order;
         let workspaces_with_connections: Vec<_> = self
             .workspaces
             .iter()
@@ -54,7 +55,7 @@ impl HomePage {
                 }
             })
             .map(|ws| {
-                let conn_list: Vec<_> = self
+                let mut conn_list: Vec<_> = self
                     .connections
                     .iter()
                     .filter(|conn| conn.workspace_id == ws.id)
@@ -62,11 +63,12 @@ impl HomePage {
                     .filter(|conn| self.match_connection_type(conn))
                     .cloned()
                     .collect();
+                crate::connection_sort::sort_connections(&mut conn_list, connection_sort_order);
                 (ws.clone(), conn_list)
             })
             .collect();
 
-        let unassigned_connections: Vec<_> = self
+        let mut unassigned_connections: Vec<_> = self
             .connections
             .iter()
             .filter(|conn| conn.workspace_id.is_none())
@@ -74,6 +76,10 @@ impl HomePage {
             .filter(|conn| self.match_connection_type(conn))
             .cloned()
             .collect();
+        crate::connection_sort::sort_connections(
+            &mut unassigned_connections,
+            connection_sort_order,
+        );
         let has_workspaces = self.workspaces.iter().any(|ws| ws.id.is_some());
 
         if layout == ConnectionLayout::List && !has_workspaces {

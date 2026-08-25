@@ -25,6 +25,8 @@ fn fullscreen_hidden_titlebar_is_revealed_from_a_top_edge_hover_zone() {
     assert!(render.contains(".on_hover(cx.listener"));
     assert!(render.contains("this.titlebar_revealed = *hovered"));
     assert!(render.contains("TitleBar::new()"));
+    assert!(!render.contains(".id(\"fullscreen-titlebar-content\")"));
+    assert!(!render.contains("this.pt(px(4.0))"));
 }
 
 #[test]

@@ -11,6 +11,15 @@ struct RemoteDesktopCanvasPaint {
     cursor: Option<cursor::RemoteCursorPaint>,
 }
 
+pub(super) fn should_show_empty_status(
+    show_empty_status: bool,
+    uses_windows_native: bool,
+    show_failure_detail: bool,
+    connected: bool,
+) -> bool {
+    show_empty_status && (!uses_windows_native || show_failure_detail || !connected)
+}
+
 fn remote_desktop_frame_canvas(frame: RemoteDesktopCanvasPaint) -> impl IntoElement {
     canvas(
         move |_, _, _| frame,
@@ -165,63 +174,53 @@ fn localized_fallback_reason(reason: presentation::WindowsNativeRdpUnavailableRe
         presentation::WindowsNativeRdpUnavailableReason::RequiredInterfaceMissing => {
             t!("RemoteDesktop.fallback_required_interface_missing").to_string()
         }
+        presentation::WindowsNativeRdpUnavailableReason::SharedFoldersUnsupported => {
+            t!("RemoteDesktop.fallback_shared_folders_unsupported").to_string()
+        }
     }
 }
 
 impl RemoteDesktopView {
+    /// Queues the Windows native RDP close intent and spawns the borrow-free
+    /// close task. The entity borrow held by `try_close` only performs pure
+    /// Rust state resets; every native call runs inside the spawned task after
+    /// the update closure returns.
     #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
-    fn retry_windows_native_close(
+    fn spawn_windows_native_close(
         registration: windows_rdp_host::WindowsRdpRegistration,
-        mut mode: WindowsNativeCloseRetryMode,
+        initial_mode: WindowsNativeCloseRetryMode,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let generation = registration.generation();
-        let started_at = Instant::now();
-        let graceful_deadline = started_at + WINDOWS_NATIVE_CLOSE_TIMEOUT;
-        let hard_deadline = match mode {
-            WindowsNativeCloseRetryMode::WaitForConfirmation => {
-                graceful_deadline + WINDOWS_NATIVE_FORCE_CLOSE_TIMEOUT
-            }
-            WindowsNativeCloseRetryMode::ForceClose => {
-                started_at + WINDOWS_NATIVE_FORCE_CLOSE_TIMEOUT
-            }
-        };
-
+        let hard_deadline = Instant::now()
+            + match initial_mode {
+                WindowsNativeCloseRetryMode::WaitForConfirmation => {
+                    WINDOWS_NATIVE_CLOSE_TIMEOUT + WINDOWS_NATIVE_FORCE_CLOSE_TIMEOUT
+                }
+                WindowsNativeCloseRetryMode::ForceClose => WINDOWS_NATIVE_FORCE_CLOSE_TIMEOUT,
+            };
         cx.spawn(async move |this, cx| {
             loop {
-                let now = Instant::now();
-                if now >= hard_deadline {
-                    tracing::warn!(
-                        generation,
-                        "timed out waiting for Windows native RDP callback quiescence"
-                    );
-                    return false;
-                }
-                if matches!(mode, WindowsNativeCloseRetryMode::WaitForConfirmation)
-                    && now >= graceful_deadline
-                {
-                    mode = WindowsNativeCloseRetryMode::ForceClose;
-                }
-
-                let poll = this.update(cx, |this, cx| match mode {
-                    WindowsNativeCloseRetryMode::WaitForConfirmation => {
-                        this.poll_windows_native_close(registration, cx)
-                    }
-                    WindowsNativeCloseRetryMode::ForceClose => {
-                        this.force_close_windows_native(registration, cx)
-                    }
+                let taken = this.update(cx, |this, _| {
+                    this.take_windows_native_close_operation(registration)
                 });
-                match poll {
-                    Ok(WindowsNativeClosePoll::Closed) => return true,
-                    Ok(WindowsNativeClosePoll::Failed) => return false,
-                    Ok(WindowsNativeClosePoll::Pending) => {}
-                    Err(_) => {
-                        // Entity release owns the synchronous owner-thread
-                        // force-close fallback once this view is gone.
-                        return true;
+                match taken {
+                    // The view is gone; its release hook (or the shutdown
+                    // drain) owns the adapter and its terminal outcome.
+                    Err(_) => return true,
+                    Ok(WindowsNativeCloseTake::Closed) => return true,
+                    Ok(WindowsNativeCloseTake::Failed) => return false,
+                    Ok(WindowsNativeCloseTake::Pending) => {}
+                    Ok(WindowsNativeCloseTake::Ready(operation)) => {
+                        return close_windows_native_operation(
+                            &this,
+                            operation,
+                            initial_mode,
+                            hard_deadline,
+                            cx,
+                        )
+                        .await;
                     }
                 }
-
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
@@ -258,32 +257,42 @@ impl TabContent for RemoteDesktopView {
         true
     }
 
-    fn on_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
-        let _ = self.poll_windows_native_events();
+    fn on_activate(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        // Pure Rust intent only: native activate/focus runs in the maintenance
+        // operation outside any entity borrow (COM calls pump messages).
         self.tab_active = true;
-        if !self.activate_windows_native(false) {
-            return;
+        #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+        {
+            self.windows_native_lifecycle_dirty = true;
+            self.windows_native_focus_requested = true;
         }
-
-        // TabContainer focuses the GPUI FocusHandle after on_activate returns.
-        // Defer the native focus handoff by one UI turn so the ActiveX child is
-        // the final focus owner. A rapid deactivate makes focus() a no-op.
-        cx.defer_in(window, |this, _, _| {
-            if this.tab_active {
-                this.focus_windows_native();
-            }
-        });
     }
 
     fn on_deactivate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Pure Rust intent only; native deactivate runs in the maintenance
+        // operation outside any entity borrow.
         self.tab_active = false;
-        let focus_handle = self.focus_handle.clone();
-        self.deactivate_windows_native(|| {
-            window.focus(&focus_handle, cx);
-        });
         #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
-        let _ = self.poll_windows_native_events();
+        {
+            self.windows_native_lifecycle_dirty = true;
+            self.windows_native_focus_requested = false;
+        }
+        // Returning GPUI focus to the parent handle is a pure GPUI operation
+        // and safe inside the borrow, unlike the native deactivate path.
+        window.focus(&self.focus_handle, cx);
+    }
+
+    fn set_presentation_obscured(&mut self, obscured: bool, _cx: &mut Context<Self>) {
+        if self.presentation_obscured == obscured {
+            return;
+        }
+
+        self.presentation_obscured = obscured;
+        #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
+        {
+            self.windows_native_lifecycle_dirty = true;
+            self.windows_native_focus_requested = false;
+        }
     }
 
     fn try_close(
@@ -306,76 +315,21 @@ impl TabContent for RemoteDesktopView {
         #[cfg(all(feature = "windows-native-rdp", target_os = "windows"))]
         {
             self.windows_native_display.reset();
-            let Some(native) = self.windows_native.as_mut() else {
+            let Some(registration) = self.windows_native_registration else {
+                if self.windows_native.is_some() || self.native_event_state.is_some() {
+                    tracing::error!("Windows native RDP adapter has no shutdown registration");
+                    return Task::ready(false);
+                }
                 return Task::ready(true);
             };
-            let Some(registration) = self.windows_native_registration else {
-                tracing::error!("Windows native RDP adapter has no shutdown registration");
-                return Task::ready(false);
-            };
-            if native.generation() != registration.generation() {
-                tracing::error!(
-                    token = registration.token(),
-                    registration_generation = registration.generation(),
-                    adapter_generation = native.generation(),
-                    "Windows native RDP adapter registration mismatch"
-                );
-                return Task::ready(false);
-            }
-            let focus_handle = self.focus_handle.clone();
-            let progress = {
-                let mut focus_parent = || window.focus(&focus_handle, cx);
-                native.begin_close(&mut focus_parent)
-            };
-
-            let progress = match progress {
-                Ok(progress) => progress,
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        "failed to request graceful Windows native RDP close"
-                    );
-                    return match self.force_close_windows_native(registration, cx) {
-                        WindowsNativeClosePoll::Closed => Task::ready(true),
-                        WindowsNativeClosePoll::Failed => Task::ready(false),
-                        WindowsNativeClosePoll::Pending => Self::retry_windows_native_close(
-                            registration,
-                            WindowsNativeCloseRetryMode::ForceClose,
-                            cx,
-                        ),
-                    };
-                }
-            };
-
-            match progress {
-                windows_native::NativeCloseProgress::Ready => {
-                    return match self.finish_windows_native_close(registration, cx) {
-                        WindowsNativeClosePoll::Closed => Task::ready(true),
-                        WindowsNativeClosePoll::Failed => Task::ready(false),
-                        WindowsNativeClosePoll::Pending => Self::retry_windows_native_close(
-                            registration,
-                            WindowsNativeCloseRetryMode::ForceClose,
-                            cx,
-                        ),
-                    };
-                }
-                windows_native::NativeCloseProgress::WaitingForEvents { generation } => {
-                    if generation != registration.generation() {
-                        tracing::error!(
-                            token = registration.token(),
-                            registration_generation = registration.generation(),
-                            close_generation = generation,
-                            "Windows native RDP close generation changed unexpectedly"
-                        );
-                        return Task::ready(false);
-                    }
-                    return Self::retry_windows_native_close(
-                        registration,
-                        WindowsNativeCloseRetryMode::WaitForConfirmation,
-                        cx,
-                    );
-                }
-            }
+            // Only queue the close intent here: every native close call runs in
+            // the spawned borrow-free task after this update closure returns.
+            window.focus(&self.focus_handle, cx);
+            return Self::spawn_windows_native_close(
+                registration,
+                WindowsNativeCloseRetryMode::WaitForConfirmation,
+                cx,
+            );
         }
 
         #[cfg(not(all(feature = "windows-native-rdp", target_os = "windows")))]
@@ -437,12 +391,15 @@ impl Render for RemoteDesktopView {
         let uses_windows_native = self.uses_windows_native_presentation();
         let failure_detail = self.failure_detail.clone();
         let show_failure_detail = failure_detail.is_some();
-        let show_presentation_status = self.options.protocol == RemoteDesktopProtocol::Rdp;
         let presentation_initialization = self.presentation_initialization;
         let fallback_reason = presentation_initialization
             .fallback_reason()
             .map(localized_fallback_reason);
         let canvas_retry_available = presentation_initialization.allows_explicit_canvas_retry();
+        // Reserve the status row only when it has content; an empty RDP status
+        // row renders as a blank white strip above the remote desktop.
+        let show_presentation_status = self.options.protocol == RemoteDesktopProtocol::Rdp
+            && (fallback_reason.is_some() || canvas_retry_available);
         let view = cx.entity();
 
         let content = div()
@@ -531,7 +488,12 @@ impl Render for RemoteDesktopView {
                     .child(remote_desktop_frame_canvas(canvas_paint))
             })
             .when(
-                show_empty_status && (!uses_windows_native || show_failure_detail),
+                should_show_empty_status(
+                    show_empty_status,
+                    uses_windows_native,
+                    show_failure_detail,
+                    self.connected,
+                ),
                 |this| {
                     this.child(
                         div()

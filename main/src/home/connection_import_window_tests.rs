@@ -63,7 +63,9 @@ fn descriptor(id: &str) -> ImporterDescriptor {
             supports_scan: true,
             supports_password_import: false,
             supports_manual_file_pick: true,
+            supports_manual_directory_pick: false,
             manual_file_pick_prompt: None,
+            manual_directory_pick_prompt: None,
             supports_incremental_preview: false,
         },
     }
@@ -90,6 +92,7 @@ fn database_record(name: &str) -> ImportRecord {
         ssh: None,
         port_forwarding: None,
         quick_command: None,
+        workspace: None,
         password_status: PasswordImportStatus::Unsupported,
         warnings: Vec::new(),
     }

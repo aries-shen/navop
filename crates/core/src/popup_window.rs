@@ -251,7 +251,7 @@ impl Render for PopupWindowContent {
                             px(4.0)
                         })
                         .overflow_hidden()
-                        .on_hover(cx.listener(|this, hovered, _, cx| {
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                             if this.titlebar_revealed != *hovered {
                                 this.titlebar_revealed = *hovered;
                                 cx.notify();

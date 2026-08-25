@@ -299,6 +299,7 @@ fn scan_error_report(importer_id: String, message: String) -> ImportScanReport {
         availability: ImporterAvailability::Error { message },
         discovered_files: Vec::new(),
         warnings: Vec::new(),
+        discovered_workspace_paths: Vec::new(),
     }
 }
 
@@ -335,6 +336,7 @@ fn runtime_id(manifest: &Manifest, contrib: &ConnectionImporterContrib) -> Strin
 
 fn descriptor(manifest: &Manifest, contrib: &ConnectionImporterContrib) -> ImporterDescriptor {
     let manual_file_pick_prompt = manual_file_pick_prompt(contrib);
+    let manual_directory_pick_prompt = manual_directory_pick_prompt(contrib);
     ImporterDescriptor {
         id: format!("{}/{}", manifest.id, contrib.id),
         display_name: contrib.display_name.clone(),
@@ -355,7 +357,9 @@ fn descriptor(manifest: &Manifest, contrib: &ConnectionImporterContrib) -> Impor
             supports_scan: true,
             supports_password_import: false,
             supports_manual_file_pick: manual_file_pick_prompt.is_some(),
+            supports_manual_directory_pick: contrib.manual_file_pick.supports_directories,
             manual_file_pick_prompt,
+            manual_directory_pick_prompt,
             supports_incremental_preview: false,
         },
     }
@@ -365,6 +369,16 @@ fn manual_file_pick_prompt(contrib: &ConnectionImporterContrib) -> Option<String
     contrib
         .manual_file_pick
         .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(str::to_string)
+}
+
+fn manual_directory_pick_prompt(contrib: &ConnectionImporterContrib) -> Option<String> {
+    contrib
+        .manual_file_pick
+        .directory_prompt
         .as_deref()
         .map(str::trim)
         .filter(|prompt| !prompt.is_empty())
@@ -394,6 +408,7 @@ fn parse_output_kind(value: &str) -> Option<ImportRecordKind> {
         "ssh" => Some(ImportRecordKind::Ssh),
         "port-forwarding" | "port_forwarding" => Some(ImportRecordKind::PortForwarding),
         "quick-command" | "quick_command" => Some(ImportRecordKind::QuickCommand),
+        "workspace" => Some(ImportRecordKind::Workspace),
         _ => None,
     }
 }

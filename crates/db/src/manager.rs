@@ -1,5 +1,5 @@
 use crate::cache::CacheContext;
-use crate::cache_manager::GlobalNodeCache;
+use crate::cache_manager::{GlobalNodeCache, SchemaInvalidationPlan, SqlInvalidationContext};
 use crate::clickhouse::ClickHousePlugin;
 use crate::connection::{DbConnection, DbError, StreamingProgress};
 use crate::connection_config_resolver::ConnectionConfigResolver;
@@ -886,6 +886,10 @@ struct StreamingExecutionRequest {
     state: GlobalDbState,
     config: DbConnectionConfig,
     source: Option<SqlSource>,
+    /// Keep the original source available after `execute_on_session` consumes
+    /// the execution source. Script sources can use precise DDL invalidation;
+    /// file sources must retain the conservative connection-wide behavior.
+    invalidation_source: SqlSource,
     schema: Option<String>,
     opts: ExecOptions,
     tx: mpsc::Sender<StreamingProgress>,
@@ -893,8 +897,15 @@ struct StreamingExecutionRequest {
     cancellation: CancellationToken,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamingExecutionOutcome {
+    Success,
+    Error,
+    Cancelled,
+}
+
 impl StreamingExecutionRequest {
-    async fn run(mut self) -> Option<(String, String, Option<String>)> {
+    async fn run(mut self) -> Vec<(String, String, Option<String>)> {
         let total_size = self
             .source
             .as_ref()
@@ -909,7 +920,7 @@ impl StreamingExecutionRequest {
                     total_size,
                 )
                 .await;
-                return None;
+                return Vec::new();
             }
         };
         let session_id = match self
@@ -926,36 +937,135 @@ impl StreamingExecutionRequest {
                     total_size,
                 )
                 .await;
-                return None;
+                return Vec::new();
             }
         };
 
-        let cancellation = self.cancellation.clone();
-        let exec_result = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => None,
-            result = self.execute_on_session(&session_id, plugin.as_ref()) => Some(result),
+        let source = match self.source.take() {
+            Some(source) => source,
+            None => {
+                send_streaming_error(
+                    &self.tx,
+                    "Streaming source already consumed".to_string(),
+                    total_size,
+                )
+                .await;
+                return Vec::new();
+            }
         };
-        let _ = self
+        let (driver_tx, mut driver_rx) = mpsc::channel::<StreamingProgress>(100);
+        let cancellation = self.cancellation.clone();
+        let mut execution =
+            Box::pin(self.execute_on_session(&session_id, plugin.as_ref(), source, driver_tx));
+        let mut exec_result = None;
+        let mut outcome: StreamingExecutionOutcome;
+        let mut confirmed_plan = SchemaInvalidationPlan::default();
+        let mut had_successful_progress = false;
+        let mut had_error_progress = false;
+        let mut driver_progress_open = true;
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    outcome = StreamingExecutionOutcome::Cancelled;
+                    break;
+                }
+                progress = driver_rx.recv(), if driver_progress_open => {
+                    let Some(progress) = progress else {
+                        driver_progress_open = false;
+                        continue;
+                    };
+                    self.observe_streaming_progress(
+                        &progress,
+                        &mut confirmed_plan,
+                        &mut had_successful_progress,
+                        &mut had_error_progress,
+                    );
+                    let forwarded = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => None,
+                        result = self.tx.send(progress) => Some(result),
+                    };
+                    match forwarded {
+                        Some(Ok(())) => {}
+                        Some(Err(_)) | None => {
+                            outcome = StreamingExecutionOutcome::Cancelled;
+                            break;
+                        }
+                    }
+                }
+                result = &mut execution => {
+                    outcome = if result.is_err() || had_error_progress {
+                        StreamingExecutionOutcome::Error
+                    } else {
+                        StreamingExecutionOutcome::Success
+                    };
+                    exec_result = Some(result);
+                    break;
+                }
+            }
+        }
+        drop(execution);
+
+        if exec_result.is_some() {
+            let mut forward_progress = outcome != StreamingExecutionOutcome::Cancelled;
+            while let Some(progress) = driver_rx.recv().await {
+                self.observe_streaming_progress(
+                    &progress,
+                    &mut confirmed_plan,
+                    &mut had_successful_progress,
+                    &mut had_error_progress,
+                );
+                if forward_progress {
+                    let forwarded = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => None,
+                        result = self.tx.send(progress) => Some(result),
+                    };
+                    if !matches!(forwarded, Some(Ok(()))) {
+                        forward_progress = false;
+                    }
+                }
+            }
+        } else {
+            while let Ok(progress) = driver_rx.try_recv() {
+                self.observe_streaming_progress(
+                    &progress,
+                    &mut confirmed_plan,
+                    &mut had_successful_progress,
+                    &mut had_error_progress,
+                );
+            }
+        }
+        if outcome == StreamingExecutionOutcome::Success && had_error_progress {
+            outcome = StreamingExecutionOutcome::Error;
+        }
+
+        if let Err(error) = self
             .state
             .connection_manager
             .close_session(&session_id)
-            .await;
+            .await
+        {
+            warn!("Failed to close streaming session {session_id}: {error}");
+        }
 
         if let Some(Err(error)) = exec_result {
             error!("Streaming execution error: {error}");
             send_streaming_error(&self.tx, error.to_string(), total_size).await;
         }
 
-        // Earlier statements may have applied DDL before a later streaming error.
-        // Invalidate conservatively even when execution reports an error.
-        self.invalidate_schema_cache().await
+        self.apply_streaming_invalidation(outcome, confirmed_plan, had_successful_progress)
+            .await
     }
 
     async fn execute_on_session(
-        &mut self,
+        &self,
         session_id: &str,
         plugin: &dyn DatabasePlugin,
+        source: SqlSource,
+        tx: mpsc::Sender<StreamingProgress>,
     ) -> anyhow::Result<()> {
         let mut guard = self
             .state
@@ -972,27 +1082,94 @@ impl StreamingExecutionRequest {
                 .map_err(|error| anyhow::anyhow!("Failed to switch schema: {error}"))?;
         }
 
-        let source = self
-            .source
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Streaming source already consumed"))?;
-        conn.execute_streaming(plugin, source, self.opts.clone(), self.tx.clone())
+        conn.execute_streaming(plugin, source, self.opts.clone(), tx)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
-    async fn invalidate_schema_cache(&self) -> Option<(String, String, Option<String>)> {
-        let cache = self.cache.as_ref()?;
-        let current_database = self.config.database.as_deref().unwrap_or_default();
-        let cache_ctx = CacheContext::from_config(&self.config);
+    async fn apply_streaming_invalidation(
+        &self,
+        outcome: StreamingExecutionOutcome,
+        confirmed_plan: SchemaInvalidationPlan,
+        had_successful_progress: bool,
+    ) -> Vec<(String, String, Option<String>)> {
+        let Some(cache) = self.cache.as_ref() else {
+            return Vec::new();
+        };
+        let conservative = should_conservatively_invalidate_streaming(
+            &self.invalidation_source,
+            self.opts.transactional,
+            outcome,
+            had_successful_progress,
+        );
+        let plan = if conservative {
+            self.state.conservative_sql_cache_invalidation_plan(
+                &self.config.id,
+                self.config.database.as_deref(),
+                self.schema.as_deref(),
+            )
+        } else {
+            confirmed_plan
+        };
+        self.state
+            .apply_sql_cache_invalidation_plan(cache, &self.config.id, &plan)
+            .await
+    }
 
-        cache.invalidate_connection_metadata(&self.config.id).await;
-        cache.clear_connection_cache(&cache_ctx).await;
-        Some((
-            self.config.id.clone(),
-            current_database.to_string(),
-            self.schema.clone(),
-        ))
+    fn observe_streaming_progress(
+        &self,
+        progress: &StreamingProgress,
+        confirmed_plan: &mut SchemaInvalidationPlan,
+        had_successful_progress: &mut bool,
+        had_error_progress: &mut bool,
+    ) {
+        if matches!(progress.result, SqlResult::Error(_)) {
+            *had_error_progress = true;
+            return;
+        }
+        let Some(sql) = successful_streaming_sql(&progress.result) else {
+            return;
+        };
+        *had_successful_progress = true;
+        if let (Some(cache), SqlSource::Script(_)) =
+            (self.cache.as_ref(), &self.invalidation_source)
+        {
+            confirmed_plan.merge(self.state.plan_sql_cache_invalidation(
+                cache,
+                &self.config.id,
+                sql,
+                self.config.database.as_deref(),
+                self.schema.as_deref(),
+            ));
+        }
+    }
+}
+
+fn successful_streaming_sql(result: &SqlResult) -> Option<&str> {
+    match result {
+        SqlResult::Query(result) => Some(result.sql.as_str()),
+        SqlResult::Exec(result) => Some(result.sql.as_str()),
+        SqlResult::Error(_) => None,
+    }
+    .filter(|sql| !sql.trim().is_empty())
+}
+
+fn should_conservatively_invalidate_streaming(
+    source: &SqlSource,
+    transactional: bool,
+    outcome: StreamingExecutionOutcome,
+    had_successful_progress: bool,
+) -> bool {
+    match source {
+        SqlSource::File(_) => {
+            outcome == StreamingExecutionOutcome::Cancelled || had_successful_progress
+        }
+        SqlSource::Script(_) if !transactional => false,
+        SqlSource::Script(_) => match outcome {
+            StreamingExecutionOutcome::Success => false,
+            StreamingExecutionOutcome::Error => had_successful_progress,
+            StreamingExecutionOutcome::Cancelled => true,
+        },
     }
 }
 
@@ -1014,6 +1191,114 @@ async fn send_streaming_error(
 }
 
 impl GlobalDbState {
+    /// Build a reusable schema invalidation plan without mutating caches.
+    ///
+    /// Callers that own a longer-lived session (for example a manual
+    /// transaction) can accumulate plans and apply them at the correct
+    /// transaction boundary.
+    pub fn plan_sql_cache_invalidation(
+        &self,
+        cache: &GlobalNodeCache,
+        connection_id: &str,
+        script: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> SchemaInvalidationPlan {
+        let Some(config) = self.get_config(connection_id) else {
+            return SchemaInvalidationPlan::default();
+        };
+        let current_database = database.or(config.database.as_deref()).unwrap_or_default();
+        cache.plan_sql_invalidation(
+            script,
+            SqlInvalidationContext {
+                database: current_database,
+                schema,
+                database_type: &config.database_type,
+            },
+        )
+    }
+
+    /// Build a connection-wide fallback plan for an execution whose final
+    /// transaction state cannot be determined.
+    pub fn conservative_sql_cache_invalidation_plan(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> SchemaInvalidationPlan {
+        let current_database = database
+            .map(str::to_string)
+            .or_else(|| {
+                self.get_config(connection_id)
+                    .and_then(|config| config.database)
+            })
+            .unwrap_or_default();
+        SchemaInvalidationPlan::conservative_connection_wide(
+            current_database,
+            schema.map(str::to_string),
+        )
+    }
+
+    /// Apply a previously built schema invalidation plan and return every scope
+    /// that should emit a `SchemaChanged` notification.
+    pub async fn apply_sql_cache_invalidation_plan(
+        &self,
+        cache: &GlobalNodeCache,
+        connection_id: &str,
+        plan: &SchemaInvalidationPlan,
+    ) -> Vec<(String, String, Option<String>)> {
+        let cache_ctx = self
+            .get_config(connection_id)
+            .map(|config| CacheContext::from_config(&config));
+        cache
+            .apply_invalidation_plan(connection_id, plan, cache_ctx.as_ref())
+            .await
+            .into_iter()
+            .map(|scope| (connection_id.to_string(), scope.database, scope.schema))
+            .collect()
+    }
+
+    /// Invalidate metadata for SQL executed on a caller-owned session.
+    ///
+    /// Session-bound execution cannot use `execute_with_session_internal` because
+    /// that method owns the session lifecycle. Keep cache invalidation separate so
+    /// manual-transaction callers can use the same DDL parser and invalidator.
+    pub async fn invalidate_sql_cache(
+        &self,
+        cache: &GlobalNodeCache,
+        connection_id: &str,
+        script: &str,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Option<(String, String, Option<String>)> {
+        let plan = self.plan_sql_cache_invalidation(cache, connection_id, script, database, schema);
+        self.apply_sql_cache_invalidation_plan(cache, connection_id, &plan)
+            .await
+            .into_iter()
+            .next()
+    }
+
+    async fn finish_direct_metadata_session<T>(
+        &self,
+        session_id: &str,
+        result: anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let cleanup = self.connection_manager.release_session(session_id).await;
+        match (result, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(anyhow::anyhow!(
+                "Failed to release metadata session: {error}"
+            )),
+            (Err(error), Err(cleanup_error)) => {
+                tracing::warn!(
+                    "Failed to release metadata session after metadata query error: {cleanup_error}"
+                );
+                Err(error)
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self::with_config_resolver(ConnectionConfigResolver::default())
     }
@@ -1293,6 +1578,7 @@ impl GlobalDbState {
         connection_id: String,
         database: Option<String>,
     ) -> anyhow::Result<String> {
+        require_tokio_runtime("database session creation")?;
         let mut config = self
             .get_config(&connection_id)
             .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
@@ -1367,6 +1653,7 @@ impl GlobalDbState {
         script: String,
         opts: Option<ExecOptions>,
     ) -> anyhow::Result<Vec<SqlResult>> {
+        require_tokio_runtime("database session execution")?;
         let config = self
             .connection_manager
             .get_session_config(&session_id)
@@ -1414,6 +1701,7 @@ impl GlobalDbState {
         session_id: &str,
         request: crate::types::TableDataRequest,
     ) -> anyhow::Result<crate::types::TableDataResponse> {
+        require_tokio_runtime("database session query")?;
         let config = self
             .connection_manager
             .get_session_config(session_id)
@@ -1457,6 +1745,7 @@ impl GlobalDbState {
         session_id: String,
         schema: String,
     ) -> anyhow::Result<()> {
+        require_tokio_runtime("database session schema switch")?;
         let mut guard = self
             .connection_manager
             .get_session_connection(&session_id)
@@ -1473,6 +1762,7 @@ impl GlobalDbState {
         &self,
         connection_id: String,
     ) -> anyhow::Result<Vec<String>> {
+        require_tokio_runtime("database metadata query")?;
         let config = self
             .get_config(&connection_id)
             .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
@@ -1495,8 +1785,8 @@ impl GlobalDbState {
                 .map_err(|e| anyhow::anyhow!("{}", e))
         }
         .await;
-        self.connection_manager.close_session(&session_id).await?;
-        result
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
     }
 
     pub async fn list_schemas_direct(
@@ -1504,6 +1794,7 @@ impl GlobalDbState {
         connection_id: String,
         database: String,
     ) -> anyhow::Result<Vec<String>> {
+        require_tokio_runtime("database metadata query")?;
         let mut config = self
             .get_config(&connection_id)
             .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
@@ -1529,8 +1820,8 @@ impl GlobalDbState {
                 .map_err(|e| anyhow::anyhow!("{}", e))
         }
         .await;
-        self.connection_manager.close_session(&session_id).await?;
-        result
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
     }
 
     /// Build table-designer DDL SQL on an async path.
@@ -1781,10 +2072,12 @@ impl GlobalDbState {
 
         let cache = cx.update(|cx| cx.try_global::<GlobalNodeCache>().cloned());
         let notifier = cx.update(|cx| cx.try_global::<GlobalConnectionNotifier>().cloned());
+        let invalidation_source = source.clone();
         let request = StreamingExecutionRequest {
             state: self.clone(),
             config,
             source: Some(source),
+            invalidation_source,
             schema,
             opts,
             tx,
@@ -1794,15 +2087,17 @@ impl GlobalDbState {
         let execution_task = Tokio::spawn(cx, request.run());
 
         cx.spawn(async move |cx: &mut AsyncApp| {
-            if let Ok(Some((connection_id, database, schema))) = execution_task.await {
+            if let Ok(scopes) = execution_task.await {
                 if let Some(notifier) = notifier {
                     cx.update(|cx| {
                         notifier.0.update(cx, |_, cx| {
-                            cx.emit(ConnectionDataEvent::SchemaChanged {
-                                connection_id,
-                                database,
-                                schema,
-                            });
+                            for (connection_id, database, schema) in scopes {
+                                cx.emit(ConnectionDataEvent::SchemaChanged {
+                                    connection_id,
+                                    database,
+                                    schema,
+                                });
+                            }
                         });
                     });
                 }
@@ -1893,6 +2188,7 @@ impl GlobalDbState {
     }
 
     pub async fn close_session_direct(&self, session_id: &str) -> anyhow::Result<()> {
+        require_tokio_runtime("database session close")?;
         self.connection_manager
             .close_session(session_id)
             .await
@@ -3016,11 +3312,14 @@ impl GlobalDbState {
         database: &str,
         schema: Option<String>,
     ) -> anyhow::Result<Vec<crate::types::TableInfo>> {
+        require_tokio_runtime("database metadata query")?;
         let config = self
             .get_config(connection_id)
             .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
         let mut config = config.clone();
-        config.database = Some(database.to_string());
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
 
         let plugin = self.get_plugin(&config.database_type)?;
         let session_id = self
@@ -3028,7 +3327,7 @@ impl GlobalDbState {
             .create_session(config, &self.db_manager)
             .await?;
 
-        let result = {
+        let result = async {
             let mut guard = self
                 .connection_manager
                 .get_session_connection(&session_id)
@@ -3040,14 +3339,11 @@ impl GlobalDbState {
                 .list_tables(conn, database, schema)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
-        };
+        }
+        .await;
 
-        self.connection_manager
-            .release_session(&session_id)
+        self.finish_direct_metadata_session(&session_id, result)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        result
     }
 
     /// Pure async version of `list_columns` — can be called from any tokio context
@@ -3059,11 +3355,14 @@ impl GlobalDbState {
         schema: Option<String>,
         table: &str,
     ) -> anyhow::Result<Vec<crate::types::ColumnInfo>> {
+        require_tokio_runtime("database metadata query")?;
         let config = self
             .get_config(connection_id)
             .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
         let mut config = config.clone();
-        config.database = Some(database.to_string());
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
 
         let plugin = self.get_plugin(&config.database_type)?;
         let session_id = self
@@ -3071,7 +3370,7 @@ impl GlobalDbState {
             .create_session(config, &self.db_manager)
             .await?;
 
-        let result = {
+        let result = async {
             let mut guard = self
                 .connection_manager
                 .get_session_connection(&session_id)
@@ -3083,14 +3382,298 @@ impl GlobalDbState {
                 .list_columns(conn, database, schema, table)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
-        };
+        }
+        .await;
 
-        self.connection_manager
-            .release_session(&session_id)
+        self.finish_direct_metadata_session(&session_id, result)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
 
-        result
+    /// Pure async version of `list_indexes` — can be called from any tokio context
+    /// without `AsyncApp`. Skips `GlobalNodeCache`.
+    pub async fn list_indexes_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+        table: &str,
+    ) -> anyhow::Result<Vec<crate::types::IndexInfo>> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .list_indexes(conn, database, schema, table)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
+    /// Pure async version of `list_foreign_keys` — can be called from any tokio
+    /// context without `AsyncApp`. Skips `GlobalNodeCache`.
+    pub async fn list_foreign_keys_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+        table: &str,
+    ) -> anyhow::Result<Vec<crate::types::ForeignKeyDefinition>> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .list_foreign_keys(conn, database, schema, table)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
+    /// Loads schema-compare metadata using one session and one connection.
+    pub async fn load_table_metadata_direct(
+        &self,
+        request: crate::types::DirectTableMetadataRequest,
+    ) -> anyhow::Result<crate::types::DirectTableMetadata> {
+        require_tokio_runtime("database metadata query")?;
+        let mut config = self
+            .get_config(&request.connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", request.connection_id))?
+            .clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(request.database.clone());
+        }
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+        let result = self
+            .query_table_metadata_session(&session_id, plugin.as_ref(), &request)
+            .await;
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
+    async fn query_table_metadata_session(
+        &self,
+        session_id: &str,
+        plugin: &dyn DatabasePlugin,
+        request: &crate::types::DirectTableMetadataRequest,
+    ) -> anyhow::Result<crate::types::DirectTableMetadata> {
+        let mut guard = self
+            .connection_manager
+            .get_session_connection(session_id)
+            .await?;
+        let connection = guard
+            .connection()
+            .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+        let columns = plugin
+            .list_columns(
+                connection,
+                &request.database,
+                request.schema.clone(),
+                &request.table,
+            )
+            .await?;
+        if !request.include_table_metadata {
+            return Ok(crate::types::DirectTableMetadata {
+                columns,
+                ..Default::default()
+            });
+        }
+        let indexes = plugin
+            .list_indexes(
+                connection,
+                &request.database,
+                request.schema.clone(),
+                &request.table,
+            )
+            .await?;
+        let foreign_keys = plugin
+            .list_foreign_keys(
+                connection,
+                &request.database,
+                request.schema.clone(),
+                &request.table,
+            )
+            .await?;
+        Ok(crate::types::DirectTableMetadata {
+            columns,
+            indexes,
+            foreign_keys,
+        })
+    }
+
+    /// Pure async version of `list_functions_in_schema` — skips all metadata
+    /// cache reads and writes.
+    pub async fn list_functions_in_schema_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+    ) -> anyhow::Result<Vec<crate::types::FunctionInfo>> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .list_functions_in_schema(conn, database, schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
+    /// Pure async version of `list_procedures_in_schema` — skips all metadata
+    /// cache reads and writes.
+    pub async fn list_procedures_in_schema_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+    ) -> anyhow::Result<Vec<crate::types::FunctionInfo>> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .list_procedures_in_schema(conn, database, schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
+    }
+
+    /// Pure async version of `list_triggers_in_schema` — skips all metadata
+    /// cache reads and writes.
+    pub async fn list_triggers_in_schema_direct(
+        &self,
+        connection_id: &str,
+        database: &str,
+        schema: Option<String>,
+    ) -> anyhow::Result<Vec<crate::types::TriggerInfo>> {
+        require_tokio_runtime("database metadata query")?;
+        let config = self
+            .get_config(connection_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?;
+        let mut config = config.clone();
+        if config.database_type != DatabaseType::Oracle {
+            config.database = Some(database.to_string());
+        }
+
+        let plugin = self.get_plugin(&config.database_type)?;
+        let session_id = self
+            .connection_manager
+            .create_session(config, &self.db_manager)
+            .await?;
+
+        let result = async {
+            let mut guard = self
+                .connection_manager
+                .get_session_connection(&session_id)
+                .await?;
+            let conn = guard
+                .connection()
+                .ok_or_else(|| anyhow::anyhow!("Session connection not found"))?;
+            plugin
+                .list_triggers_in_schema(conn, database, schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
+
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
     }
 
     /// Pure async SQL execution version — can be called from any tokio context
@@ -3103,6 +3686,7 @@ impl GlobalDbState {
         schema: Option<String>,
         opts: Option<ExecOptions>,
     ) -> anyhow::Result<Vec<SqlResult>> {
+        require_tokio_runtime("database script execution")?;
         let mut config = self
             .get_config(connection_id)
             .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", connection_id))?
@@ -3121,7 +3705,7 @@ impl GlobalDbState {
             .create_session(config, &self.db_manager)
             .await?;
 
-        let result = {
+        let result = async {
             let mut guard = self
                 .connection_manager
                 .get_session_connection(&session_id)
@@ -3138,10 +3722,12 @@ impl GlobalDbState {
 
             conn.execute(plugin.as_ref(), script, opts.unwrap_or_default())
                 .await
-        };
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        .await;
 
-        self.connection_manager.close_session(&session_id).await?;
-        result.map_err(|e| anyhow::anyhow!("{}", e))
+        self.finish_direct_metadata_session(&session_id, result)
+            .await
     }
 
     /// 获取数据库的比较能力
@@ -3205,6 +3791,7 @@ mod tests {
         switched_schemas: Option<Arc<StdMutex<Vec<String>>>>,
         streaming_started: Option<Arc<AtomicBool>>,
         streaming_dropped: Option<Arc<AtomicBool>>,
+        streaming_results: Option<Vec<SqlResult>>,
     }
 
     impl MockConnection {
@@ -3217,6 +3804,7 @@ mod tests {
                 switched_schemas: None,
                 streaming_started: None,
                 streaming_dropped: None,
+                streaming_results: None,
             }
         }
 
@@ -3233,6 +3821,7 @@ mod tests {
                 switched_schemas: None,
                 streaming_started: None,
                 streaming_dropped: None,
+                streaming_results: None,
             }
         }
 
@@ -3248,6 +3837,7 @@ mod tests {
                 switched_schemas: None,
                 streaming_started: None,
                 streaming_dropped: None,
+                streaming_results: None,
             }
         }
 
@@ -3263,6 +3853,7 @@ mod tests {
                 switched_schemas: Some(switched_schemas),
                 streaming_started: None,
                 streaming_dropped: None,
+                streaming_results: None,
             }
         }
 
@@ -3280,6 +3871,23 @@ mod tests {
                 switched_schemas: None,
                 streaming_started: Some(streaming_started),
                 streaming_dropped: Some(streaming_dropped),
+                streaming_results: None,
+            }
+        }
+
+        fn with_streaming_results(
+            config: DbConnectionConfig,
+            streaming_results: Vec<SqlResult>,
+        ) -> Self {
+            Self {
+                config,
+                healthy: true,
+                disconnect_count: Arc::new(AtomicUsize::new(0)),
+                executed_sql: None,
+                switched_schemas: None,
+                streaming_started: None,
+                streaming_dropped: None,
+                streaming_results: Some(streaming_results),
             }
         }
     }
@@ -3291,6 +3899,7 @@ mod tests {
         max_active_opens: Arc<AtomicUsize>,
         open_started: Arc<tokio::sync::Notify>,
         created_configs: Option<Arc<StdMutex<Vec<DbConnectionConfig>>>>,
+        metadata_calls: Option<Arc<StdMutex<Vec<&'static str>>>>,
     }
 
     impl SlowOpenPlugin {
@@ -3327,6 +3936,7 @@ mod tests {
                 max_active_opens,
                 open_started,
                 created_configs: None,
+                metadata_calls: None,
             }
         }
 
@@ -3340,6 +3950,21 @@ mod tests {
             );
             plugin.created_configs = Some(created_configs);
             plugin
+        }
+
+        fn recording_table_metadata(
+            created_configs: Arc<StdMutex<Vec<DbConnectionConfig>>>,
+            metadata_calls: Arc<StdMutex<Vec<&'static str>>>,
+        ) -> Self {
+            let mut plugin = Self::recording_postgres(created_configs);
+            plugin.metadata_calls = Some(metadata_calls);
+            plugin
+        }
+
+        fn record_metadata_call(&self, operation: &'static str) {
+            if let Some(calls) = &self.metadata_calls {
+                calls.lock().unwrap().push(operation);
+            }
         }
     }
 
@@ -3422,6 +4047,7 @@ mod tests {
             _schema: Option<String>,
             _table: &str,
         ) -> anyhow::Result<Vec<ColumnInfo>> {
+            self.record_metadata_call("columns");
             Ok(Vec::new())
         }
 
@@ -3442,6 +4068,18 @@ mod tests {
             _schema: Option<String>,
             _table: &str,
         ) -> anyhow::Result<Vec<IndexInfo>> {
+            self.record_metadata_call("indexes");
+            Ok(Vec::new())
+        }
+
+        async fn list_foreign_keys(
+            &self,
+            _connection: &dyn DbConnection,
+            _database: &str,
+            _schema: Option<String>,
+            _table: &str,
+        ) -> anyhow::Result<Vec<ForeignKeyDefinition>> {
+            self.record_metadata_call("foreign_keys");
             Ok(Vec::new())
         }
 
@@ -3701,6 +4339,20 @@ mod tests {
             _options: ExecOptions,
             sender: mpsc::Sender<StreamingProgress>,
         ) -> Result<(), DbError> {
+            if let Some(results) = &self.streaming_results {
+                let total = results.len();
+                for (index, result) in results.iter().cloned().enumerate() {
+                    if sender
+                        .send(StreamingProgress::new(index + 1, total, result))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                return Ok(());
+            }
+
             if let (Some(streaming_started), Some(streaming_dropped)) =
                 (&self.streaming_started, &self.streaming_dropped)
             {
@@ -3710,19 +4362,21 @@ mod tests {
                 unreachable!("blocking streaming mock must be cancelled");
             }
 
-            let SqlSource::Script(sql) = source else {
-                return Ok(());
+            let (sql, is_file) = match source {
+                SqlSource::Script(sql) => (sql, false),
+                SqlSource::File(_) => ("CREATE TABLE widgets (id INT)".to_string(), true),
             };
-            let progress = StreamingProgress::new(
-                1,
-                1,
-                SqlResult::Exec(ExecResult {
-                    sql,
-                    rows_affected: 0,
-                    elapsed_ms: 0,
-                    message: None,
-                }),
-            );
+            let result = SqlResult::Exec(ExecResult {
+                sql,
+                rows_affected: 0,
+                elapsed_ms: 0,
+                message: None,
+            });
+            let progress = if is_file {
+                StreamingProgress::with_file_progress(1, result, 1, 1)
+            } else {
+                StreamingProgress::new(1, 1, result)
+            };
             let _ = sender.send(progress).await;
             Ok(())
         }
@@ -3757,6 +4411,16 @@ mod tests {
         cx: &mut TestAppContext,
         connection_id: &str,
     ) -> StreamingCacheTestContext {
+        setup_streaming_cache_test_with_connection(cx, connection_id, |config| {
+            MockConnection::new(config, true)
+        })
+    }
+
+    fn setup_streaming_cache_test_with_connection(
+        cx: &mut TestAppContext,
+        connection_id: &str,
+        build_connection: impl FnOnce(DbConnectionConfig) -> MockConnection,
+    ) -> StreamingCacheTestContext {
         let cache = GlobalNodeCache::with_config(crate::metadata_cache::MetadataCacheConfig {
             enable_file_cache: false,
             ..Default::default()
@@ -3777,7 +4441,7 @@ mod tests {
         let session_config = config.clone();
         runtime.block_on(async move {
             let session = ConnectionSession::new(
-                Box::new(MockConnection::new(session_config.clone(), true)),
+                Box::new(build_connection(session_config.clone())),
                 format!("{}:session:1", session_config.id),
                 false,
             );
@@ -3811,6 +4475,15 @@ mod tests {
         test: &StreamingCacheTestContext,
         source: SqlSource,
     ) -> bool {
+        run_streaming_source_with_options(cx, test, source, None).await
+    }
+
+    async fn run_streaming_source_with_options(
+        cx: &mut TestAppContext,
+        test: &StreamingCacheTestContext,
+        source: SqlSource,
+        options: Option<ExecOptions>,
+    ) -> bool {
         let state = test.state.clone();
         let connection_id = test.config.id.clone();
         let mut progress = cx
@@ -3822,7 +4495,7 @@ mod tests {
                         source,
                         Some("postgres".to_string()),
                         Some("public".to_string()),
-                        None,
+                        options,
                     )
                     .unwrap()
             })
@@ -4009,6 +4682,119 @@ mod tests {
         assert_eq!(Some("postgres".to_string()), summaries[0].database);
     }
 
+    #[tokio::test]
+    async fn direct_table_metadata_uses_one_session_for_all_table_metadata() {
+        let created_configs = Arc::new(StdMutex::new(Vec::new()));
+        let metadata_calls = Arc::new(StdMutex::new(Vec::new()));
+        let mut state = GlobalDbState::new();
+        state.db_manager.postgresql = Arc::new(SlowOpenPlugin::recording_table_metadata(
+            created_configs.clone(),
+            metadata_calls.clone(),
+        ));
+        state.register_connection(test_config("direct-table-metadata"));
+
+        let metadata = state
+            .load_table_metadata_direct(DirectTableMetadataRequest {
+                connection_id: "direct-table-metadata".to_string(),
+                database: "app".to_string(),
+                schema: Some("public".to_string()),
+                table: "widgets".to_string(),
+                include_table_metadata: true,
+            })
+            .await
+            .unwrap();
+
+        assert!(metadata.columns.is_empty());
+        assert!(metadata.indexes.is_empty());
+        assert!(metadata.foreign_keys.is_empty());
+        assert_eq!(1, created_configs.lock().unwrap().len());
+        assert_eq!(
+            &["columns", "indexes", "foreign_keys"],
+            metadata_calls.lock().unwrap().as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_view_metadata_skips_table_only_queries() {
+        let created_configs = Arc::new(StdMutex::new(Vec::new()));
+        let metadata_calls = Arc::new(StdMutex::new(Vec::new()));
+        let mut state = GlobalDbState::new();
+        state.db_manager.postgresql = Arc::new(SlowOpenPlugin::recording_table_metadata(
+            created_configs.clone(),
+            metadata_calls.clone(),
+        ));
+        state.register_connection(test_config("direct-view-metadata"));
+
+        state
+            .load_table_metadata_direct(DirectTableMetadataRequest {
+                connection_id: "direct-view-metadata".to_string(),
+                database: "app".to_string(),
+                schema: Some("public".to_string()),
+                table: "widget_view".to_string(),
+                include_table_metadata: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(1, created_configs.lock().unwrap().len());
+        assert_eq!(&["columns"], metadata_calls.lock().unwrap().as_slice());
+    }
+
+    #[test]
+    fn streaming_invalidation_is_conservative_only_when_execution_state_is_ambiguous() {
+        let script = SqlSource::Script("CREATE TABLE widgets (id INT)".to_string());
+        let file = SqlSource::File(PathBuf::from("streaming-cache-test.sql"));
+
+        assert!(!should_conservatively_invalidate_streaming(
+            &file,
+            false,
+            StreamingExecutionOutcome::Success,
+            false,
+        ));
+        assert!(should_conservatively_invalidate_streaming(
+            &file,
+            false,
+            StreamingExecutionOutcome::Success,
+            true,
+        ));
+        assert!(should_conservatively_invalidate_streaming(
+            &file,
+            false,
+            StreamingExecutionOutcome::Cancelled,
+            false,
+        ));
+        assert!(!should_conservatively_invalidate_streaming(
+            &script,
+            false,
+            StreamingExecutionOutcome::Error,
+            true,
+        ));
+        assert!(!should_conservatively_invalidate_streaming(
+            &script,
+            false,
+            StreamingExecutionOutcome::Cancelled,
+            true,
+        ));
+        assert!(!should_conservatively_invalidate_streaming(
+            &script,
+            true,
+            StreamingExecutionOutcome::Success,
+            true,
+        ));
+        assert!(should_conservatively_invalidate_streaming(
+            &script,
+            true,
+            StreamingExecutionOutcome::Error,
+            true,
+        ));
+        assert!(should_conservatively_invalidate_streaming(
+            &script,
+            true,
+            StreamingExecutionOutcome::Cancelled,
+            false,
+        ));
+    }
+
     #[gpui::test]
     async fn streaming_ddl_invalidates_cached_schema_metadata(cx: &mut TestAppContext) {
         let test = setup_streaming_cache_test(cx, "streaming-ddl-cache-test");
@@ -4053,6 +4839,137 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn nontransactional_streaming_only_invalidates_confirmed_successful_ddl(
+        cx: &mut TestAppContext,
+    ) {
+        let test = setup_streaming_cache_test_with_connection(
+            cx,
+            "streaming-partial-ddl-cache-test",
+            |config| {
+                MockConnection::with_streaming_results(
+                    config,
+                    vec![
+                        SqlResult::Exec(ExecResult {
+                            sql: "CREATE TABLE public.widgets (id INT)".to_string(),
+                            rows_affected: 0,
+                            elapsed_ms: 0,
+                            message: None,
+                        }),
+                        SqlResult::Error(SqlErrorInfo {
+                            sql: "CREATE TABLE audit.future_table (id INT)".to_string(),
+                            message: "simulated failure".to_string(),
+                        }),
+                    ],
+                )
+            },
+        );
+        let runtime = cx.update(|cx| Tokio::handle(cx));
+        let cache = test.cache.clone();
+        let connection_id = test.config.id.clone();
+        runtime.block_on(async move {
+            cache
+                .cache_tables(&connection_id, "postgres", Some("audit"), Vec::new())
+                .await;
+        });
+
+        let public_cached = run_streaming_source(
+            cx,
+            &test,
+            SqlSource::Script(
+                "CREATE TABLE public.widgets (id INT); \
+                 CREATE TABLE audit.future_table (id INT)"
+                    .to_string(),
+            ),
+        )
+        .await;
+
+        let runtime = cx.update(|cx| Tokio::handle(cx));
+        let cache = test.cache.clone();
+        let connection_id = test.config.id.clone();
+        let audit_cached = runtime.block_on(async move {
+            cache
+                .get_tables(&connection_id, "postgres", Some("audit"))
+                .await
+                .is_some()
+        });
+
+        assert!(
+            !public_cached,
+            "confirmed successful DDL must invalidate its schema"
+        );
+        assert!(
+            audit_cached,
+            "failed or unexecuted DDL must not invalidate unrelated metadata"
+        );
+    }
+
+    #[gpui::test]
+    async fn failed_transactional_streaming_conservatively_invalidates_connection_cache(
+        cx: &mut TestAppContext,
+    ) {
+        let test = setup_streaming_cache_test_with_connection(
+            cx,
+            "streaming-transaction-error-cache-test",
+            |config| {
+                MockConnection::with_streaming_results(
+                    config,
+                    vec![
+                        SqlResult::Exec(ExecResult {
+                            sql: "CREATE TABLE public.widgets (id INT)".to_string(),
+                            rows_affected: 0,
+                            elapsed_ms: 0,
+                            message: None,
+                        }),
+                        SqlResult::Error(SqlErrorInfo {
+                            sql: "CREATE TABLE audit.future_table (id INT)".to_string(),
+                            message: "simulated failure".to_string(),
+                        }),
+                    ],
+                )
+            },
+        );
+        let runtime = cx.update(|cx| Tokio::handle(cx));
+        let cache = test.cache.clone();
+        let connection_id = test.config.id.clone();
+        runtime.block_on(async move {
+            cache
+                .cache_tables(&connection_id, "postgres", Some("audit"), Vec::new())
+                .await;
+        });
+
+        let public_cached = run_streaming_source_with_options(
+            cx,
+            &test,
+            SqlSource::Script(
+                "CREATE TABLE public.widgets (id INT); \
+                 CREATE TABLE audit.future_table (id INT)"
+                    .to_string(),
+            ),
+            Some(ExecOptions {
+                transactional: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        let runtime = cx.update(|cx| Tokio::handle(cx));
+        let cache = test.cache.clone();
+        let connection_id = test.config.id.clone();
+        let audit_cached = runtime.block_on(async move {
+            cache
+                .get_tables(&connection_id, "postgres", Some("audit"))
+                .await
+                .is_some()
+        });
+
+        assert!(!public_cached);
+        assert!(
+            !audit_cached,
+            "a failed transaction after successful progress has an ambiguous final state"
+        );
+    }
+
     #[tokio::test]
     async fn cancelling_streaming_execution_drops_query_and_closes_session() {
         let state = GlobalDbState::new();
@@ -4083,10 +5000,12 @@ mod tests {
 
         let cancellation = CancellationToken::new();
         let (tx, mut progress) = mpsc::channel(1);
+        let source = SqlSource::Script("SELECT pg_sleep(60)".to_string());
         let request = StreamingExecutionRequest {
             state: state.clone(),
             config: config.clone(),
-            source: Some(SqlSource::Script("SELECT pg_sleep(60)".to_string())),
+            source: Some(source.clone()),
+            invalidation_source: source,
             schema: Some("public".to_string()),
             opts: ExecOptions::default(),
             tx,
