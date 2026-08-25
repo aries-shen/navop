@@ -41,6 +41,7 @@ pub mod event;
 pub mod event_stream;
 pub mod framing;
 pub mod host;
+pub mod host_blob;
 pub mod job;
 pub mod lifecycle;
 pub mod method;

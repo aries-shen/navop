@@ -154,6 +154,8 @@ pub enum ExtensionRuntimeError {
     UnsupportedCommand { command_id: String },
     #[error("invalid remote file editor `{editor_id}`: {reason}")]
     InvalidRemoteFileEditor { editor_id: String, reason: String },
+    #[error("invalid declarative layout: {reason}")]
+    InvalidLayout { reason: String },
 }
 
 pub(super) fn runtime_key(extension_id: &str, runtime_id: &str) -> String {

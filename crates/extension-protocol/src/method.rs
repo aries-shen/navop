@@ -135,6 +135,10 @@ pub const HOST_SSH_OPEN_TUNNEL: &str = "host/ssh/open_tunnel";
 pub const HOST_STORAGE_GET: &str = "host/storage/get";
 pub const HOST_STORAGE_SET: &str = "host/storage/set";
 pub const HOST_LOG: &str = "host/log";
+pub const HOST_BLOB_BEGIN: &str = "host/blob/begin";
+pub const HOST_BLOB_WRITE: &str = "host/blob/write";
+pub const HOST_BLOB_FINISH: &str = "host/blob/finish";
+pub const HOST_BLOB_ABORT: &str = "host/blob/abort";
 
 // -- 事件通知(扩展 → 宿主,无 id) --
 pub const EVENT_CONN_LOST: &str = "conn/lost";
@@ -223,6 +227,10 @@ pub const ALL_METHODS: &[&str] = &[
     UI_ACTION,
     UI_DIALOG,
     UI_WINDOW,
+    HOST_BLOB_BEGIN,
+    HOST_BLOB_WRITE,
+    HOST_BLOB_FINISH,
+    HOST_BLOB_ABORT,
     REDIS_COMMAND,
     REDIS_PIPELINE,
     REDIS_PUBSUB_OPEN,

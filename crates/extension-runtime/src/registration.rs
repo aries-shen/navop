@@ -102,7 +102,7 @@ impl ExtensionRuntimeCatalog {
                     runtime_id: panel.runtime_id.clone(),
                 });
             }
-            self.declarative_panels.push(RegisteredDeclarativePanel {
+            let registered = RegisteredDeclarativePanel {
                 extension_id: manifest.id.clone(),
                 id: panel.id.clone(),
                 panel_key: runtime_key(&manifest.id, &panel.id),
@@ -116,7 +116,13 @@ impl ExtensionRuntimeCatalog {
                 placement: panel.placement,
                 icon: panel.icon.clone(),
                 activation: panel.activation.clone(),
-            });
+            };
+            self.page_registry
+                .register_legacy_panel(&registered)
+                .map_err(|error| ExtensionRuntimeError::InvalidLayout {
+                    reason: error.to_string(),
+                })?;
+            self.declarative_panels.push(registered);
         }
         Ok(())
     }

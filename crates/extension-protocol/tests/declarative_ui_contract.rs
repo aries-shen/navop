@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use extension_protocol::{
     declarative_ui::{
         UiActionRequest, UiContractError, UiDialogKind, UiDialogRequest, UiDialogResult,
-        UiStateOperation, UiStatePatch, UiWindowOperation, UiWindowRequest,
-        validate_ui_dialog_request, validate_ui_window_request,
+        UiEventSubscriptionOperation, UiStateOperation, UiStatePatch, UiWindowOperation,
+        UiWindowRequest, validate_ui_dialog_request, validate_ui_state_patch,
+        validate_ui_window_request,
     },
     method,
 };
@@ -50,6 +51,7 @@ fn ui_state_patch_has_explicit_set_and_remove_operations() {
                 key: "error".into(),
             },
         ],
+        event_subscriptions: Vec::new(),
     };
 
     let value = serde_json::to_value(&patch).unwrap();
@@ -67,6 +69,36 @@ fn ui_state_patch_has_explicit_set_and_remove_operations() {
         patch,
         serde_json::from_value::<UiStatePatch>(value).unwrap()
     );
+}
+
+#[test]
+fn ui_state_patch_event_subscriptions_round_trip_and_validate() {
+    let legacy: UiStatePatch =
+        serde_json::from_value(serde_json::json!({"operations": []})).unwrap();
+    assert!(legacy.event_subscriptions.is_empty());
+
+    let patch = UiStatePatch {
+        expected_revision: None,
+        operations: Vec::new(),
+        event_subscriptions: vec![
+            UiEventSubscriptionOperation::Subscribe {
+                subscription_id: "pods".into(),
+                kind: "kubernetes/pod/watch".into(),
+                conn_id: Some(7),
+                capacity: Some(64),
+                max_events: Some(32),
+                wait_ms: Some(1_000),
+                state_key: "pods.events".into(),
+            },
+            UiEventSubscriptionOperation::Unsubscribe {
+                subscription_id: "old-pods".into(),
+            },
+        ],
+    };
+    validate_ui_state_patch(&patch).unwrap();
+    let value = serde_json::to_value(&patch).unwrap();
+    assert_eq!("subscribe", value["event_subscriptions"][0]["operation"]);
+    assert_eq!(patch, serde_json::from_value(value).unwrap());
 }
 
 #[test]

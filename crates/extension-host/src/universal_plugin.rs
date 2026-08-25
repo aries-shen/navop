@@ -26,7 +26,7 @@ use extension_protocol::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 
-use crate::{HostError, HostResult, ProcessRpcSession};
+use crate::{HostError, HostResult, ProcessRpcSession, RequestOptions};
 
 pub type OpenAuthorizer = Arc<dyn Fn(&ResourceOpenParams) -> HostResult<()> + Send + Sync>;
 
@@ -116,7 +116,17 @@ impl UniversalPluginClient {
     }
 
     pub async fn read_event_stream(&self, params: &EventReadParams) -> HostResult<EventReadResult> {
-        self.request(method::EVENT_READ, params).await
+        self.read_event_stream_with_options(params, RequestOptions::default())
+            .await
+    }
+
+    pub async fn read_event_stream_with_options(
+        &self,
+        params: &EventReadParams,
+        options: RequestOptions,
+    ) -> HostResult<EventReadResult> {
+        self.request_with_options(method::EVENT_READ, params, options)
+            .await
     }
 
     pub async fn close_event_stream(&self, params: &EventCloseParams) -> HostResult<()> {
@@ -151,8 +161,31 @@ impl UniversalPluginClient {
             )));
         }
 
+        self.request_with_options(method_name, params, RequestOptions::default())
+            .await
+    }
+
+    async fn request_with_options<P, R>(
+        &self,
+        method_name: &str,
+        params: &P,
+        options: RequestOptions,
+    ) -> HostResult<R>
+    where
+        P: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let negotiated = self.session.session();
+        if negotiated.has_method_declarations() && !negotiated.declares_method(method_name) {
+            return Err(HostError::NotImplemented(format!(
+                "extension did not declare wire method `{method_name}`"
+            )));
+        }
         let params = serde_json::to_value(params)?;
-        self.session.request(method_name, params).await
+        self.session
+            .request_value_with_options(method_name, params, options)
+            .await
+            .and_then(|value| serde_json::from_value(value).map_err(HostError::from))
     }
 }
 

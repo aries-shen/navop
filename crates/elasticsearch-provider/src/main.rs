@@ -1103,6 +1103,7 @@ async fn ui_patch(resource: &ElasticsearchResource, request: &UiActionRequest) -
                 value: request.request_id.clone(),
             },
         ],
+        event_subscriptions: Vec::new(),
     };
     serde_json::to_value(patch).map_err(|error| boxed_invalid_params(error.to_string()))
 }

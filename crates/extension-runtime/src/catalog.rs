@@ -12,6 +12,7 @@ use one_core::{
     contributions::SlotRegistry,
 };
 
+use crate::PageRegistry;
 use crate::extension::manifest::{Manifest, WasmRuntimeKind};
 
 use super::registration::load_installed_composite_manifests;
@@ -30,6 +31,7 @@ pub struct ExtensionRuntimeCatalog {
     pub(super) wasm_runtimes: BTreeMap<String, WasmRuntimeBinding>,
     pub(super) ipc_runtimes: BTreeMap<String, RegisteredIpcRuntimeBinding>,
     pub(super) declarative_panels: Vec<RegisteredDeclarativePanel>,
+    pub(super) page_registry: PageRegistry,
     pub(super) db_tree_menus: Vec<RegisteredDbTreeMenuContribution>,
     pub(super) toolbar_slots: SlotRegistry,
     pub(super) menu_slots: SlotRegistry,
@@ -68,6 +70,7 @@ impl ExtensionRuntimeCatalog {
             wasm_runtimes: BTreeMap::new(),
             ipc_runtimes: BTreeMap::new(),
             declarative_panels: Vec::new(),
+            page_registry: PageRegistry::default(),
             db_tree_menus: Vec::new(),
             toolbar_slots: SlotRegistry::default(),
             menu_slots: SlotRegistry::default(),
@@ -163,6 +166,10 @@ impl ExtensionRuntimeCatalog {
 
     pub fn declarative_panels(&self) -> &[RegisteredDeclarativePanel] {
         &self.declarative_panels
+    }
+
+    pub fn page_registry(&self) -> &PageRegistry {
+        &self.page_registry
     }
 
     pub fn document_renderer_for_kind(

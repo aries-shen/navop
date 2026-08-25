@@ -33,6 +33,29 @@ pub struct UiStatePatch {
     pub expected_revision: Option<u64>,
     #[serde(default)]
     pub operations: Vec<UiStateOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_subscriptions: Vec<UiEventSubscriptionOperation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum UiEventSubscriptionOperation {
+    Subscribe {
+        subscription_id: String,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conn_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capacity: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_events: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u32>,
+        state_key: String,
+    },
+    Unsubscribe {
+        subscription_id: String,
+    },
 }
 
 // ============================================================================
@@ -118,6 +141,11 @@ pub const MAX_UI_MESSAGE_BYTES: usize = 8_192;
 pub const MAX_UI_LABEL_BYTES: usize = 128;
 pub const MIN_UI_WINDOW_SIZE: u32 = 200;
 pub const MAX_UI_WINDOW_SIZE: u32 = 16_384;
+pub const MAX_UI_EVENT_KIND_BYTES: usize = 256;
+pub const MAX_UI_STATE_KEY_BYTES: usize = 256;
+pub const MAX_UI_EVENT_CAPACITY: u32 = 65_536;
+pub const MAX_UI_EVENT_BATCH: u32 = 1_024;
+pub const MAX_UI_EVENT_WAIT_MS: u32 = 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum UiContractError {
@@ -131,6 +159,53 @@ pub enum UiContractError {
     InvalidLabel,
     #[error("UI window size must be between {MIN_UI_WINDOW_SIZE} and {MAX_UI_WINDOW_SIZE} pixels")]
     InvalidWindowSize,
+    #[error("UI event stream kind is empty, too long, or contains control characters")]
+    InvalidEventKind,
+    #[error("UI state key is empty, too long, or contains control characters")]
+    InvalidStateKey,
+    #[error("UI event stream limits are outside the supported range")]
+    InvalidEventLimit,
+}
+
+pub fn validate_ui_state_patch(patch: &UiStatePatch) -> Result<(), UiContractError> {
+    for operation in &patch.event_subscriptions {
+        validate_ui_event_subscription(operation)?;
+    }
+    Ok(())
+}
+
+fn validate_ui_event_subscription(
+    operation: &UiEventSubscriptionOperation,
+) -> Result<(), UiContractError> {
+    match operation {
+        UiEventSubscriptionOperation::Subscribe {
+            subscription_id,
+            kind,
+            capacity,
+            max_events,
+            wait_ms,
+            state_key,
+            ..
+        } => {
+            validate_id(subscription_id)?;
+            validate_bounded_text(
+                kind,
+                MAX_UI_EVENT_KIND_BYTES,
+                UiContractError::InvalidEventKind,
+            )?;
+            validate_bounded_text(
+                state_key,
+                MAX_UI_STATE_KEY_BYTES,
+                UiContractError::InvalidStateKey,
+            )?;
+            validate_optional_limit(*capacity, MAX_UI_EVENT_CAPACITY)?;
+            validate_optional_limit(*max_events, MAX_UI_EVENT_BATCH)?;
+            validate_optional_limit(*wait_ms, MAX_UI_EVENT_WAIT_MS)
+        }
+        UiEventSubscriptionOperation::Unsubscribe { subscription_id } => {
+            validate_id(subscription_id)
+        }
+    }
 }
 
 pub fn validate_ui_dialog_request(request: &UiDialogRequest) -> Result<(), UiContractError> {
@@ -208,6 +283,24 @@ fn validate_text(
         return Err(error);
     }
     Ok(())
+}
+
+fn validate_bounded_text(
+    value: &str,
+    max_bytes: usize,
+    error: UiContractError,
+) -> Result<(), UiContractError> {
+    if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_optional_limit(value: Option<u32>, maximum: u32) -> Result<(), UiContractError> {
+    match value {
+        Some(value) if value == 0 || value > maximum => Err(UiContractError::InvalidEventLimit),
+        _ => Ok(()),
+    }
 }
 
 fn validate_window_size(value: u32) -> Result<(), UiContractError> {

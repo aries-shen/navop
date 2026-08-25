@@ -146,6 +146,8 @@ pub struct HomePage {
     persistent_sidebar_expanded: bool,
     pub(crate) workspaces: Vec<Workspace>,
     pub(crate) universal_plugin_panels: Vec<crate::universal_plugins::UniversalPanelDescriptor>,
+    pub(crate) universal_plugin_activations:
+        BTreeMap<String, extension_plugin_adapter::ActivationHandle>,
     pub(crate) universal_plugin_status: BTreeMap<String, UniversalPluginStatus>,
     pub(crate) activating_universal_panels: HashSet<String>,
     pub(crate) universal_plugin_activation_error: Option<String>,
@@ -272,6 +274,8 @@ pub(crate) use team_permissions::TeamPermissionSnapshot;
 use connection_info::remote_desktop_connection_info;
 #[cfg(test)]
 use sync_route::sync_route_for_provider;
+#[cfg(test)]
+pub(super) use universal_panels::universal_plugin_tab_id;
 
 #[cfg(test)]
 mod tests;

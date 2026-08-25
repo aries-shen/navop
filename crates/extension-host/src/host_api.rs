@@ -9,8 +9,13 @@
 
 use std::sync::Arc;
 
+use extension_protocol::declarative_ui::{UiDialogRequest, UiDialogResult};
 use extension_protocol::error::{ErrorData, ProtocolError, error_codes};
 use extension_protocol::host;
+use extension_protocol::host_blob::{
+    HostBlobAbortParams, HostBlobBeginParams, HostBlobBeginResult, HostBlobFinishParams,
+    HostBlobFinishResult, HostBlobWriteParams, HostBlobWriteResult,
+};
 use serde_json::Value;
 
 use crate::error::{HostError, HostResult};
@@ -57,6 +62,49 @@ pub trait HostApiProvider: Send + Sync {
 
     /// 记录日志（扩展发送的日志）。
     async fn log(&self, params: host::LogParams) -> HostResult<()>;
+
+    /// Shows a host-owned declarative dialog and returns one explicit user result.
+    ///
+    /// This is the provider-originated direction of the versioned `ui/dialog`
+    /// contract. Implementations must not expose native window objects.
+    async fn show_dialog(&self, params: UiDialogRequest) -> HostResult<UiDialogResult>;
+
+    /// Starts a provider upload into host-authoritative blob storage.
+    async fn host_blob_begin(
+        &self,
+        _params: HostBlobBeginParams,
+    ) -> HostResult<HostBlobBeginResult> {
+        Err(HostError::NotImplemented(
+            "host blob uploads are not configured".into(),
+        ))
+    }
+
+    /// Appends one strictly ordered base64 chunk to a pending host blob.
+    async fn host_blob_write(
+        &self,
+        _params: HostBlobWriteParams,
+    ) -> HostResult<HostBlobWriteResult> {
+        Err(HostError::NotImplemented(
+            "host blob uploads are not configured".into(),
+        ))
+    }
+
+    /// Seals a pending upload and publishes an opaque readable blob id.
+    async fn host_blob_finish(
+        &self,
+        _params: HostBlobFinishParams,
+    ) -> HostResult<HostBlobFinishResult> {
+        Err(HostError::NotImplemented(
+            "host blob uploads are not configured".into(),
+        ))
+    }
+
+    /// Aborts a pending upload. Implementations must make this idempotent.
+    async fn host_blob_abort(&self, _params: HostBlobAbortParams) -> HostResult<()> {
+        Err(HostError::NotImplemented(
+            "host blob uploads are not configured".into(),
+        ))
+    }
 }
 
 /// Host API 处理器。
@@ -126,6 +174,32 @@ impl HostApiHandler {
                 let params: host::LogParams =
                     serde_json::from_value(params).map_err(|e| HostError::Serde(e))?;
                 self.provider.log(params).await?;
+                Ok(Value::Null)
+            }
+            extension_protocol::method::UI_DIALOG => {
+                let params: UiDialogRequest =
+                    serde_json::from_value(params).map_err(HostError::Serde)?;
+                let result = self.provider.show_dialog(params).await?;
+                Ok(serde_json::to_value(result).expect("dialog result must serialize"))
+            }
+            extension_protocol::method::HOST_BLOB_BEGIN => {
+                let params = serde_json::from_value(params).map_err(HostError::Serde)?;
+                let result = self.provider.host_blob_begin(params).await?;
+                Ok(serde_json::to_value(result).expect("host blob begin result must serialize"))
+            }
+            extension_protocol::method::HOST_BLOB_WRITE => {
+                let params = serde_json::from_value(params).map_err(HostError::Serde)?;
+                let result = self.provider.host_blob_write(params).await?;
+                Ok(serde_json::to_value(result).expect("host blob write result must serialize"))
+            }
+            extension_protocol::method::HOST_BLOB_FINISH => {
+                let params = serde_json::from_value(params).map_err(HostError::Serde)?;
+                let result = self.provider.host_blob_finish(params).await?;
+                Ok(serde_json::to_value(result).expect("host blob finish result must serialize"))
+            }
+            extension_protocol::method::HOST_BLOB_ABORT => {
+                let params = serde_json::from_value(params).map_err(HostError::Serde)?;
+                self.provider.host_blob_abort(params).await?;
                 Ok(Value::Null)
             }
             _ => {
@@ -202,6 +276,44 @@ mod tests {
         async fn log(&self, _params: host::LogParams) -> HostResult<()> {
             Ok(())
         }
+
+        async fn show_dialog(&self, _params: UiDialogRequest) -> HostResult<UiDialogResult> {
+            Ok(UiDialogResult::Cancelled)
+        }
+
+        async fn host_blob_begin(
+            &self,
+            _params: HostBlobBeginParams,
+        ) -> HostResult<HostBlobBeginResult> {
+            Ok(HostBlobBeginResult {
+                upload_id: "upload-1".into(),
+                max_bytes: 1024,
+            })
+        }
+
+        async fn host_blob_write(
+            &self,
+            params: HostBlobWriteParams,
+        ) -> HostResult<HostBlobWriteResult> {
+            Ok(HostBlobWriteResult {
+                total_bytes: params.bytes_written.into(),
+            })
+        }
+
+        async fn host_blob_finish(
+            &self,
+            _params: HostBlobFinishParams,
+        ) -> HostResult<HostBlobFinishResult> {
+            Ok(HostBlobFinishResult {
+                blob_id: "host-blob-1".into(),
+                total_bytes: 3,
+                content_type: None,
+            })
+        }
+
+        async fn host_blob_abort(&self, _params: HostBlobAbortParams) -> HostResult<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -233,5 +345,51 @@ mod tests {
         assert!(
             matches!(result, Err(HostError::Protocol(e)) if e.code == error_codes::METHOD_NOT_FOUND)
         );
+    }
+
+    #[tokio::test]
+    async fn handler_routes_host_blob_upload_lifecycle() {
+        let handler = HostApiHandler::new(Arc::new(MockProvider));
+
+        let begin = handler
+            .handle(
+                extension_protocol::method::HOST_BLOB_BEGIN,
+                serde_json::json!({"expected_bytes": 3}),
+            )
+            .await
+            .unwrap();
+        assert_eq!("upload-1", begin["upload_id"]);
+
+        let write = handler
+            .handle(
+                extension_protocol::method::HOST_BLOB_WRITE,
+                serde_json::json!({
+                    "upload_id": "upload-1",
+                    "sequence": 0,
+                    "data": "YWJj",
+                    "bytes_written": 3
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(3, write["total_bytes"]);
+
+        let finish = handler
+            .handle(
+                extension_protocol::method::HOST_BLOB_FINISH,
+                serde_json::json!({"upload_id": "upload-1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!("host-blob-1", finish["blob_id"]);
+
+        let abort = handler
+            .handle(
+                extension_protocol::method::HOST_BLOB_ABORT,
+                serde_json::json!({"upload_id": "missing"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(Value::Null, abort);
     }
 }

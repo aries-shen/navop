@@ -3,8 +3,14 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use extension_host::{HostApiProvider, HostError, HostResult};
+use extension_protocol::declarative_ui::{UiDialogRequest, UiDialogResult};
 use extension_protocol::host::{self, ResolveSecretParams, ResolveSecretResult};
+use extension_protocol::host_blob::{
+    HostBlobAbortParams, HostBlobBeginParams, HostBlobBeginResult, HostBlobFinishParams,
+    HostBlobFinishResult, HostBlobWriteParams, HostBlobWriteResult,
+};
 
+use crate::blob_store::{BlobOwner, BlobStore};
 use crate::provider_permissions::{
     ProviderPermissionError, ProviderPermissionSet, SecretReference,
 };
@@ -39,6 +45,13 @@ impl SecretResolver for MapSecretResolver {
 pub struct UniversalProviderHost {
     permissions: ProviderPermissionSet,
     secrets: Arc<dyn SecretResolver>,
+    blobs: Option<BlobCapability>,
+}
+
+#[derive(Clone)]
+struct BlobCapability {
+    store: BlobStore,
+    owner: BlobOwner,
 }
 
 impl UniversalProviderHost {
@@ -54,7 +67,19 @@ impl UniversalProviderHost {
                     .map(|value| value.as_ref().to_owned()),
             ),
             secrets,
+            blobs: None,
         }
+    }
+
+    pub fn with_blob_store(mut self, store: BlobStore, owner: BlobOwner) -> Self {
+        self.blobs = Some(BlobCapability { store, owner });
+        self
+    }
+
+    fn blob_capability(&self) -> HostResult<&BlobCapability> {
+        self.blobs
+            .as_ref()
+            .ok_or_else(|| HostError::NotImplemented("host blob uploads are not configured".into()))
     }
 
     async fn resolve_secret(&self, params: ResolveSecretParams) -> HostResult<ResolveSecretResult> {
@@ -121,6 +146,53 @@ impl HostApiProvider for UniversalProviderHost {
 
     async fn log(&self, _params: host::LogParams) -> HostResult<()> {
         Ok(())
+    }
+
+    async fn show_dialog(&self, _params: UiDialogRequest) -> HostResult<UiDialogResult> {
+        Err(HostError::NotImplemented(
+            "provider-initiated dialogs require an explicit host presenter".into(),
+        ))
+    }
+
+    async fn host_blob_begin(
+        &self,
+        params: HostBlobBeginParams,
+    ) -> HostResult<HostBlobBeginResult> {
+        let capability = self.blob_capability()?;
+        capability
+            .store
+            .begin_upload(&capability.owner, params)
+            .map_err(|error| HostError::protocol(error.into()))
+    }
+
+    async fn host_blob_write(
+        &self,
+        params: HostBlobWriteParams,
+    ) -> HostResult<HostBlobWriteResult> {
+        let capability = self.blob_capability()?;
+        capability
+            .store
+            .write_upload(&capability.owner, params)
+            .map_err(|error| HostError::protocol(error.into()))
+    }
+
+    async fn host_blob_finish(
+        &self,
+        params: HostBlobFinishParams,
+    ) -> HostResult<HostBlobFinishResult> {
+        let capability = self.blob_capability()?;
+        capability
+            .store
+            .finish_upload(&capability.owner, params)
+            .map_err(|error| HostError::protocol(error.into()))
+    }
+
+    async fn host_blob_abort(&self, params: HostBlobAbortParams) -> HostResult<()> {
+        let capability = self.blob_capability()?;
+        capability
+            .store
+            .abort_upload(&capability.owner, &params.upload_id)
+            .map_err(|error| HostError::protocol(error.into()))
     }
 }
 

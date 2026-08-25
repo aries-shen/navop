@@ -3,7 +3,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName, IconSize, Sizable, StyledExt,
+    ActiveTheme, Icon, IconName, IconNamed, IconSize, Selectable, Sizable, StyledExt,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -18,6 +18,9 @@ use super::{
 use crate::connection_visuals::ConnectionVisualSize;
 use crate::home::connection_import_window::show_connection_import_window;
 use crate::license::is_feature_enabled;
+use crate::universal_plugins::{
+    GlobalUniversalPluginService, UniversalPanelDescriptor, UniversalPanelPlacement,
+};
 use one_core::license::Feature;
 use one_core::settings::AppSettings;
 
@@ -47,6 +50,12 @@ impl HomePage {
             personal_syncing,
         });
         let syncing = self.syncing || personal_syncing;
+        let universal_home_tab_panels: Vec<UniversalPanelDescriptor> = self
+            .universal_plugin_panels
+            .iter()
+            .filter(|panel| panel.placement == UniversalPanelPlacement::HomeTab)
+            .cloned()
+            .collect();
 
         div()
             .id("modern-home-start-center")
@@ -84,6 +93,15 @@ impl HomePage {
                                         .gap_3()
                                         .child(render_create_panel(cx.entity(), window, cx))
                                         .child(render_workspace_tools(cx.entity(), window, cx))
+                                        .when(!universal_home_tab_panels.is_empty(), |column| {
+                                            column.child(
+                                                self.render_universal_plugin_home_tab_panel(
+                                                    universal_home_tab_panels,
+                                                    window,
+                                                    cx,
+                                                ),
+                                            )
+                                        })
                                         .child(render_status_panel(
                                             syncing,
                                             sync_button_state,
@@ -96,6 +114,52 @@ impl HomePage {
                 ),
             )
             .into_any_element()
+    }
+
+    fn render_universal_plugin_home_tab_panel(
+        &self,
+        panels: Vec<UniversalPanelDescriptor>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let active_panels = cx
+            .try_global::<GlobalUniversalPluginService>()
+            .map(|global| global.service().active_panel_keys())
+            .unwrap_or_default();
+
+        surface_panel("modern-home-universal-plugin-panel", cx)
+            .child(panel_header(
+                t!("Home.StartCenter.universal_panels"),
+                Some(panels.len().to_string()),
+                cx,
+            ))
+            .child(
+                v_flex().w_full().gap_1().children(
+                    panels
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, panel)| {
+                            let panel_key = panel.panel_key.clone();
+                            let icon = panel
+                                .icon
+                                .clone()
+                                .unwrap_or_else(|| IconName::ExtensionsColor.path());
+                            Button::new(format!("modern-home-universal-plugin-{index}"))
+                                .icon(Icon::default().path(icon).color())
+                                .label(panel.title.clone())
+                                .w_full()
+                                .justify_start()
+                                .selected(active_panels.contains(panel_key.as_str()))
+                                .on_click(window.listener_for(
+                                    &cx.entity(),
+                                    move |home, _, window, cx| {
+                                        home.activate_universal_panel(&panel_key, window, cx);
+                                    },
+                                ))
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            )
     }
 
     fn render_start_center_hero(

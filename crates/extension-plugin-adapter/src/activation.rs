@@ -6,13 +6,29 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
+    fmt, fs,
     sync::Arc,
     time::Duration,
 };
 
+use crate::blob_store::BlobStore;
+use crate::dialog_activation::DialogActivationManager;
+use crate::event_activation::EventActivationManager;
+use crate::job_activation::{JobActivationHandle, JobActivationManager, RecoveredJob, RetiredJob};
 use crate::provider_permissions::ResourceOpenAuthorizer;
-use extension_host::{HostError, ProcessRpcSession};
+use extension_host::{HostError, ProcessRpcSession, RequestOptions};
+use extension_protocol::blob::{
+    BlobCloseParams, BlobOpenParams, BlobReadParams, BlobReadResult, INLINE_BLOB_THRESHOLD_BYTES,
+};
+use extension_protocol::event_stream::{
+    EventCloseParams, EventOpenParams, EventOpenResult, EventReadParams, EventReadResult,
+};
+use extension_protocol::job::{
+    JobCancelParams, JobCloseParams, JobResultParams, JobResultResult, JobStartParams,
+    JobStatusParams, JobStatusResult,
+};
+use extension_protocol::resource::{ResourceInvokeParams, ResourceInvokeResult};
+use extension_protocol::result_ref::ResultRef;
 use extension_runtime::extension::manifest::DeclarativePanelPlacement;
 use extension_runtime::{
     ExtensionRuntimeCatalog, RegisteredIpcRuntimeBinding, extension::manifest::current_host_version,
@@ -45,8 +61,9 @@ pub struct SessionContext {
 }
 
 /// Creates permission-enforcing reverse Host API dispatchers for activations.
-pub type HostApiFactory =
-    Arc<dyn Fn(RegisteredIpcRuntimeBinding) -> Arc<extension_host::HostApiHandler> + Send + Sync>;
+pub type HostApiFactory = Arc<
+    dyn Fn(RegisteredIpcRuntimeBinding, u64) -> Arc<extension_host::HostApiHandler> + Send + Sync,
+>;
 
 /// The process-session capability required by the activation manager.
 ///
@@ -163,10 +180,48 @@ pub enum ActivationError {
     },
     #[error("failed to activate runtime: {0}")]
     SessionStart(String),
+    #[error("host blob cache operation failed: {0}")]
+    HostBlob(String),
     #[error("failed to activate runtime `{runtime_id}`")]
     InvalidRuntime { runtime_id: String },
     #[error("runtime `{runtime_id}` has no active session")]
     RuntimeNotReady { runtime_id: String },
+}
+
+/// A UI-safe rendering source loaded by the host after activation.
+///
+/// Only validated text crosses this boundary. Filesystem paths and activation
+/// permissions remain private to [`ActivationManager`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarativePanelSource {
+    pub extension_id: String,
+    pub panel_key: String,
+    pub title: String,
+    pub template: String,
+    pub style: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PanelSourceError {
+    #[error("declarative panel `{panel_key}` is not registered")]
+    PanelNotFound { panel_key: String },
+    #[error(
+        "registered declarative panel `{panel_key}` refers to unsupported runtime `{runtime_id}`"
+    )]
+    UnsupportedRuntime {
+        panel_key: String,
+        runtime_id: String,
+    },
+    #[error(
+        "runtime `{runtime_id}` is owned by extension `{extension_id}` and cannot serve panel `{panel_key}`"
+    )]
+    OwnerMismatch {
+        extension_id: String,
+        runtime_id: String,
+        panel_key: String,
+    },
+    #[error("failed to load declarative panel `{panel_key}`: {message}")]
+    Io { panel_key: String, message: String },
 }
 
 /// Host-owned restart timing policy.
@@ -236,6 +291,14 @@ pub struct ActivationHandle {
     pub extension_id: String,
     pub panel_key: String,
     pub runtime_id: String,
+    /// Stable identity for this panel mount.
+    ///
+    /// Unlike `runtime_generation`, this value survives provider process
+    /// restarts and changes only after the panel is fully released and
+    /// activated again.
+    pub activation_id: u64,
+    /// Process generation observed when activation completed.
+    pub runtime_generation: u64,
     pub state: RuntimeActivationState,
 }
 
@@ -251,6 +314,13 @@ pub struct DeclarativePanelDescriptor {
     pub runtime_id: String,
     pub placement: DeclarativePanelPlacement,
     pub icon: Option<String>,
+}
+
+fn panel_source_io_error(panel_key: &str, error: std::io::Error) -> PanelSourceError {
+    PanelSourceError::Io {
+        panel_key: panel_key.to_owned(),
+        message: error.to_string(),
+    }
 }
 
 impl<'a> From<&'a extension_runtime::RegisteredDeclarativePanel> for DeclarativePanelDescriptor {
@@ -274,13 +344,358 @@ impl<'a> From<&'a extension_runtime::RegisteredDeclarativePanel> for Declarative
 pub struct ManagedUniversalPluginClient {
     pub runtime_id: String,
     pub generation: u64,
+    extension_id: String,
     client: extension_host::UniversalPluginClient,
+    blobs: Option<Arc<BlobStore>>,
+    events: Option<Arc<EventActivationManager>>,
+    jobs: Option<Arc<JobActivationManager>>,
 }
 
 impl ManagedUniversalPluginClient {
     pub fn client(&self) -> &extension_host::UniversalPluginClient {
         &self.client
     }
+
+    pub fn runtime_generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn blob_owner(&self) -> crate::BlobOwner {
+        crate::BlobOwner {
+            runtime_id: self.runtime_id.clone(),
+            generation: self.generation,
+        }
+    }
+
+    pub fn blob_store(&self) -> Option<&BlobStore> {
+        self.blobs.as_deref()
+    }
+
+    pub fn event_activation(&self) -> Option<&EventActivationManager> {
+        self.events.as_deref()
+    }
+
+    pub fn job_activation(&self) -> Option<&JobActivationManager> {
+        self.jobs.as_deref()
+    }
+
+    fn with_blob_store(mut self, blobs: Arc<BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
+    }
+
+    fn with_event_activation(mut self, events: Arc<EventActivationManager>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    fn with_job_activation(mut self, jobs: Arc<JobActivationManager>) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
+    pub async fn start_job(
+        &self,
+        params: &JobStartParams,
+    ) -> Result<JobActivationHandle, HostError> {
+        let result = self.client.start_job(params).await?;
+        let Some(jobs) = &self.jobs else {
+            return Ok(JobActivationHandle {
+                extension_id: self.extension_id.clone(),
+                runtime_id: self.runtime_id.clone(),
+                generation: self.generation,
+                job_id: result.job_id,
+            });
+        };
+        match jobs.register_start(
+            &self.extension_id,
+            &self.runtime_id,
+            self.generation,
+            &result,
+        ) {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                let _ = self
+                    .client
+                    .close_job(&JobCloseParams {
+                        job_id: result.job_id,
+                    })
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn job_status(
+        &self,
+        handle: &JobActivationHandle,
+    ) -> Result<JobStatusResult, HostError> {
+        self.validate_job(handle)?;
+        let result = self
+            .client
+            .job_status(&JobStatusParams {
+                job_id: handle.job_id.clone(),
+            })
+            .await?;
+        if let Some(jobs) = &self.jobs {
+            jobs.update_status(handle, &result)?;
+        }
+        Ok(result)
+    }
+
+    pub async fn cancel_job(&self, handle: &JobActivationHandle) -> Result<(), HostError> {
+        self.validate_job(handle)?;
+        self.client
+            .cancel_job(&JobCancelParams {
+                job_id: handle.job_id.clone(),
+            })
+            .await
+    }
+
+    pub async fn job_result(
+        &self,
+        handle: &JobActivationHandle,
+    ) -> Result<JobResultResult, HostError> {
+        self.validate_job(handle)?;
+        let result = self
+            .client
+            .job_result(&JobResultParams {
+                job_id: handle.job_id.clone(),
+            })
+            .await?;
+        self.validate_job(handle)?;
+        if let Some(jobs) = &self.jobs {
+            jobs.mark_result_observed(handle)?;
+        }
+        Ok(result)
+    }
+
+    pub async fn close_job(&self, handle: &JobActivationHandle) -> Result<(), HostError> {
+        self.validate_job(handle)?;
+        let result = self
+            .client
+            .close_job(&JobCloseParams {
+                job_id: handle.job_id.clone(),
+            })
+            .await;
+        self.cleanup_job(handle);
+        result
+    }
+
+    fn validate_job(&self, handle: &JobActivationHandle) -> Result<(), HostError> {
+        if handle.extension_id != self.extension_id
+            || handle.runtime_id != self.runtime_id
+            || handle.generation != self.generation
+        {
+            return Err(HostError::protocol(extension_protocol::ProtocolError::new(
+                extension_protocol::error::error_codes::PERMISSION_DENIED,
+                "job handle is not owned by this runtime generation",
+            )));
+        }
+        if let Some(jobs) = &self.jobs {
+            jobs.validate(handle)?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_job(&self, handle: &JobActivationHandle) {
+        let Some(jobs) = &self.jobs else {
+            return;
+        };
+        let blob_ids = jobs.close(handle);
+        let Some(blobs) = &self.blobs else {
+            return;
+        };
+        for blob_id in blob_ids {
+            let _ = blobs.remove_owned_blob(&self.blob_owner(), &blob_id);
+        }
+    }
+
+    /// Opens a provider event stream and registers its host-owned identity.
+    ///
+    /// If the runtime is replaced while the provider response is in flight,
+    /// the stale result is rejected and the provider stream is closed without
+    /// being registered for the replacement generation.
+    pub async fn open_event_stream(
+        &self,
+        params: &EventOpenParams,
+    ) -> Result<EventOpenResult, HostError> {
+        let result = self.client.open_event_stream(params).await?;
+        if let Err(error) = self.register_event_stream(&result) {
+            // Registration can fail after the provider has already allocated a
+            // stream. Always attempt provider-side cleanup before surfacing the
+            // host lifecycle error.
+            let _ = self
+                .client
+                .close_event_stream(&EventCloseParams {
+                    stream_id: result.stream_id.clone(),
+                })
+                .await;
+            return Err(error);
+        }
+        Ok(result)
+    }
+
+    /// Reads an exact extension/runtime/generation-owned event stream.
+    ///
+    /// A terminal `closed` result removes host registration. Transient RPC
+    /// errors keep the registration; lifecycle cleanup remains authoritative.
+    pub async fn read_event_stream(
+        &self,
+        params: &EventReadParams,
+    ) -> Result<EventReadResult, HostError> {
+        self.read_event_stream_with_options(params, RequestOptions::default())
+            .await
+    }
+
+    pub async fn read_event_stream_with_options(
+        &self,
+        params: &EventReadParams,
+        options: RequestOptions,
+    ) -> Result<EventReadResult, HostError> {
+        self.ensure_event_read(params)?;
+        let result = self
+            .client
+            .read_event_stream_with_options(params, options)
+            .await?;
+        if result.closed {
+            self.complete_event_stream(&params.stream_id);
+        }
+        Ok(result)
+    }
+
+    /// Closes the provider stream and removes only this owner's registration.
+    ///
+    /// Host cleanup happens even when provider close fails; the process may be
+    /// gone, and retaining a permanently unusable stream would leak capacity.
+    pub async fn close_event_stream(&self, params: &EventCloseParams) -> Result<(), HostError> {
+        self.ensure_event_close(params)?;
+        let result = self.client.close_event_stream(params).await;
+        self.complete_event_stream(&params.stream_id);
+        result
+    }
+
+    fn register_event_stream(&self, result: &EventOpenResult) -> Result<(), HostError> {
+        let Some(events) = &self.events else {
+            return Ok(());
+        };
+        events.open(
+            &self.extension_id,
+            &self.runtime_id,
+            self.generation,
+            result,
+        )?;
+        Ok(())
+    }
+
+    fn ensure_event_read(&self, params: &EventReadParams) -> Result<(), HostError> {
+        let Some(events) = &self.events else {
+            return Ok(());
+        };
+        events.validate_read(
+            &self.extension_id,
+            &self.runtime_id,
+            self.generation,
+            params,
+        )?;
+        Ok(())
+    }
+
+    fn ensure_event_close(&self, params: &EventCloseParams) -> Result<(), HostError> {
+        let Some(events) = &self.events else {
+            return Ok(());
+        };
+        events.validate_close(
+            &self.extension_id,
+            &self.runtime_id,
+            self.generation,
+            params,
+        )?;
+        Ok(())
+    }
+
+    fn complete_event_stream(&self, stream_id: &str) {
+        if let Some(events) = &self.events {
+            events.complete(
+                &self.extension_id,
+                &self.runtime_id,
+                self.generation,
+                stream_id,
+            );
+        }
+    }
+
+    /// Reads either a provider-owned blob or a host-owned result blob.
+    ///
+    /// Host blob ids are a distinct wire namespace. They never fall through to
+    /// a provider, which prevents a replacement process from minting an id that
+    /// reads data from another generation's host cache.
+    pub async fn read_blob(&self, params: &BlobReadParams) -> Result<BlobReadResult, HostError> {
+        if let Some(blobs) = self
+            .blobs
+            .as_ref()
+            .filter(|_| is_host_blob_id(&params.blob_id))
+        {
+            return blobs.read(&self.owner(), params).map_err(host_blob_error);
+        }
+        self.client.read_blob(params).await
+    }
+
+    /// Closes either a provider-owned blob or the matching host-owned blob.
+    pub async fn close_blob(&self, params: &BlobCloseParams) -> Result<(), HostError> {
+        if let Some(blobs) = self
+            .blobs
+            .as_ref()
+            .filter(|_| is_host_blob_id(&params.blob_id))
+        {
+            return blobs.close(&self.owner(), params).map_err(host_blob_error);
+        }
+        self.client.close_blob(params).await
+    }
+
+    fn owner(&self) -> crate::BlobOwner {
+        self.blob_owner()
+    }
+}
+
+/// Lets the activation manager cache the inline variants of resource/job results.
+trait CachedResult {
+    fn inline_value(&self) -> Option<&serde_json::Value>;
+    fn replace_with_blob(&mut self, blob_id: extension_protocol::blob::BlobId);
+}
+
+impl CachedResult for ResourceInvokeResult {
+    fn inline_value(&self) -> Option<&serde_json::Value> {
+        match &self.result {
+            ResultRef::Inline { value } => Some(value),
+            ResultRef::Blob { .. } | ResultRef::EventStream { .. } => None,
+        }
+    }
+
+    fn replace_with_blob(&mut self, blob_id: extension_protocol::blob::BlobId) {
+        self.result = ResultRef::Blob { id: blob_id };
+    }
+}
+
+impl CachedResult for JobResultResult {
+    fn inline_value(&self) -> Option<&serde_json::Value> {
+        match &self.result {
+            ResultRef::Inline { value } => Some(value),
+            ResultRef::Blob { .. } | ResultRef::EventStream { .. } => None,
+        }
+    }
+
+    fn replace_with_blob(&mut self, blob_id: extension_protocol::blob::BlobId) {
+        self.result = ResultRef::Blob { id: blob_id };
+    }
+}
+
+fn is_host_blob_id(blob_id: &str) -> bool {
+    blob_id.starts_with("host-blob-")
+}
+
+fn host_blob_error(error: crate::BlobStoreError) -> HostError {
+    HostError::protocol(error.into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,7 +713,7 @@ pub enum RuntimeActivationState {
 
 struct ActivatedRuntime {
     extension_id: String,
-    panels: BTreeSet<String>,
+    panels: BTreeMap<String, u64>,
     state: RuntimeActivationState,
     session: Option<Arc<dyn ManagedRpcSession>>,
     start_generation: u64,
@@ -312,6 +727,18 @@ struct ActivationState {
     runtimes: BTreeMap<String, ActivatedRuntime>,
     start_locks: BTreeMap<String, Arc<Mutex<()>>>,
     deactivations: BTreeMap<String, u64>,
+    next_activation_id: u64,
+}
+
+impl ActivationState {
+    fn allocate_activation_id(&mut self) -> u64 {
+        let activation_id = self.next_activation_id;
+        self.next_activation_id = self
+            .next_activation_id
+            .checked_add(1)
+            .expect("panel activation id space exhausted");
+        activation_id
+    }
 }
 
 struct StartingRuntime {
@@ -334,7 +761,11 @@ pub struct ActivationManager {
     session_factory: SessionFactory,
     host_api_factory: HostApiFactory,
     supervision_policy: SupervisionPolicy,
-    state: SyncMutex<ActivationState>,
+    blobs: Option<Arc<BlobStore>>,
+    dialogs: Option<Arc<DialogActivationManager>>,
+    events: Option<Arc<EventActivationManager>>,
+    jobs: Option<Arc<JobActivationManager>>,
+    state: Arc<SyncMutex<ActivationState>>,
 }
 
 impl ActivationManager {
@@ -361,7 +792,11 @@ impl ActivationManager {
             session_factory,
             host_api_factory,
             supervision_policy: SupervisionPolicy::default(),
-            state: SyncMutex::new(ActivationState::default()),
+            blobs: None,
+            dialogs: None,
+            events: None,
+            jobs: None,
+            state: Arc::new(SyncMutex::new(ActivationState::default())),
         }
     }
 
@@ -370,11 +805,80 @@ impl ActivationManager {
         self
     }
 
+    /// Attaches a process-wide store for provider result blobs.
+    ///
+    /// Once attached, retired runtime generations cannot leave cached result
+    /// data behind. Restarting a provider increments its generation before
+    /// cleanup, so an old client cannot read a replacement process's data.
+    pub fn with_blob_store(mut self, blobs: BlobStore) -> Self {
+        self.blobs = Some(Arc::new(blobs));
+        self
+    }
+
+    pub fn blob_store(&self) -> Option<&BlobStore> {
+        self.blobs.as_deref()
+    }
+
+    /// Presents a provider-initiated dialog through the host-owned lifecycle.
+    ///
+    /// This service boundary keeps GPUI independent of reverse RPC wiring
+    /// while preserving the same generation and ownership checks.
+    pub async fn activate_dialog(
+        &self,
+        extension_id: &str,
+        runtime_id: &str,
+        request: extension_protocol::declarative_ui::UiDialogRequest,
+    ) -> Result<extension_protocol::declarative_ui::UiDialogResult, extension_host::HostError> {
+        let generation = self
+            .runtime_generation(runtime_id)
+            .map_err(|error| extension_host::HostError::NotImplemented(error.to_string()))?;
+        let Some(dialogs) = &self.dialogs else {
+            return Err(extension_host::HostError::NotImplemented(
+                "no dialog activation manager is attached".into(),
+            ));
+        };
+        dialogs
+            .show(extension_id, runtime_id, generation, request)
+            .await
+    }
+
+    /// Attaches the host-owned lifecycle manager for provider-initiated dialogs.
+    pub fn with_dialog_activation(mut self, dialogs: Arc<DialogActivationManager>) -> Self {
+        self.dialogs = Some(dialogs);
+        self
+    }
+
+    /// Attaches the host-owned lifecycle manager for provider event streams.
+    ///
+    /// The provider still produces and buffers events, while Navop owns the
+    /// stream registry, authorization, and cleanup across restart generations.
+    pub fn with_event_activation(mut self, events: Arc<EventActivationManager>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    pub fn event_activation(&self) -> Option<&EventActivationManager> {
+        self.events.as_deref()
+    }
+
+    pub fn with_job_activation(mut self, jobs: Arc<JobActivationManager>) -> Self {
+        self.jobs = Some(jobs);
+        self
+    }
+
+    pub fn job_activation(&self) -> Option<&JobActivationManager> {
+        self.jobs.as_deref()
+    }
+
+    pub fn shared(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+
     pub async fn activate_panel(
         &self,
         panel_key: &str,
     ) -> Result<ActivationHandle, ActivationError> {
-        let (binding, runtime_id, generation) = {
+        let (binding, runtime_id, generation, activation_id) = {
             let mut state = self.state.lock();
             let matching: Vec<_> = self
                 .catalog
@@ -412,15 +916,33 @@ impl ActivationManager {
             }
 
             if let Some(runtime) = state.runtimes.get_mut(&panel.runtime_id) {
-                runtime.panels.insert(panel_key.to_owned());
+                let activation_id = if let Some(activation_id) = runtime.panels.get(panel_key) {
+                    *activation_id
+                } else {
+                    let activation_id = state.allocate_activation_id();
+                    state
+                        .runtimes
+                        .get_mut(&panel.runtime_id)
+                        .expect("runtime still exists")
+                        .panels
+                        .insert(panel_key.to_owned(), activation_id);
+                    activation_id
+                };
+                let runtime = state
+                    .runtimes
+                    .get(&panel.runtime_id)
+                    .expect("runtime still exists");
                 return Ok(ActivationHandle {
                     extension_id: panel.extension_id.clone(),
                     panel_key: panel_key.to_owned(),
                     runtime_id: panel.runtime_id.clone(),
+                    activation_id,
+                    runtime_generation: runtime.start_generation,
                     state: runtime.state,
                 });
             }
 
+            let activation_id = state.allocate_activation_id();
             let generation = state
                 .deactivations
                 .get(&panel.runtime_id)
@@ -430,7 +952,7 @@ impl ActivationManager {
                 panel.runtime_id.clone(),
                 ActivatedRuntime {
                     extension_id: binding.extension_id.clone(),
-                    panels: BTreeSet::from([panel_key.to_owned()]),
+                    panels: BTreeMap::from([(panel_key.to_owned(), activation_id)]),
                     state: RuntimeActivationState::Starting,
                     session: None,
                     start_generation: generation,
@@ -440,7 +962,12 @@ impl ActivationManager {
                 },
             );
 
-            (binding.clone(), panel.runtime_id.clone(), generation)
+            (
+                binding.clone(),
+                panel.runtime_id.clone(),
+                generation,
+                activation_id,
+            )
         };
 
         let start_lock = {
@@ -462,11 +989,16 @@ impl ActivationManager {
                 });
             }
             if runtime.factory_claimed {
-                runtime.panels.insert(panel_key.to_owned());
+                runtime
+                    .panels
+                    .entry(panel_key.to_owned())
+                    .or_insert(activation_id);
                 return Ok(ActivationHandle {
                     extension_id: binding.extension_id.clone(),
                     panel_key: panel_key.to_owned(),
                     runtime_id: runtime_id.clone(),
+                    activation_id,
+                    runtime_generation: runtime.start_generation,
                     state: runtime.state,
                 });
             }
@@ -479,7 +1011,7 @@ impl ActivationManager {
 
         let context = SessionContext {
             binding: starting.binding.clone(),
-            host_api: (self.host_api_factory)(starting.binding.clone()),
+            host_api: (self.host_api_factory)(starting.binding.clone(), starting.generation),
         };
         let session = (self.session_factory)(context).await.map_err(|error| {
             let mut state = self.state.lock();
@@ -499,8 +1031,20 @@ impl ActivationManager {
             if let Some(runtime) = state.runtimes.get_mut(&runtime_id)
                 && runtime.start_generation == starting.generation
             {
-                runtime.panels.insert(panel_key.to_owned());
+                runtime
+                    .panels
+                    .entry(panel_key.to_owned())
+                    .or_insert(activation_id);
                 runtime.state = RuntimeActivationState::Active;
+                if let Some(dialogs) = &self.dialogs {
+                    dialogs.mark_runtime_active(&runtime_id, starting.generation);
+                }
+                if let Some(events) = &self.events {
+                    events.mark_runtime_active(&runtime_id, starting.generation);
+                }
+                if let Some(jobs) = &self.jobs {
+                    jobs.mark_runtime_active(&runtime_id, starting.generation);
+                }
                 runtime.session.replace(session)
             } else {
                 Some(session)
@@ -517,46 +1061,96 @@ impl ActivationManager {
             extension_id: starting.binding.extension_id.clone(),
             panel_key: panel_key.to_owned(),
             runtime_id,
+            activation_id,
+            runtime_generation: starting.generation,
             state: RuntimeActivationState::Active,
         })
     }
 
-    pub async fn deactivate_panel(&self, panel_key: &str) -> Result<(), ActivationError> {
-        let session =
-            {
-                let mut state = self.state.lock();
-                let Some(runtime_id) = state.runtimes.iter().find_map(|(id, runtime)| {
-                    runtime.panels.contains(panel_key).then(|| id.clone())
-                }) else {
-                    return Ok(());
-                };
-
-                let runtime = state.runtimes.get_mut(&runtime_id).ok_or_else(|| {
-                    ActivationError::RuntimeNotFound {
-                        runtime_id: runtime_id.clone(),
-                    }
-                })?;
-                runtime.panels.remove(panel_key);
-                if !runtime.panels.is_empty() {
-                    return Ok(());
-                }
-
-                let generation = runtime.start_generation;
-                let is_starting = runtime.state == RuntimeActivationState::Starting;
-                let session = runtime.session.take();
-                if runtime.state == RuntimeActivationState::Starting {
-                    state.deactivations.insert(runtime_id.clone(), generation);
-                    state.runtimes.remove(&runtime_id);
-                }
-                if !is_starting {
-                    state.runtimes.remove(&runtime_id);
-                }
-                session
-            };
+    /// Releases exactly the UI activation represented by `handle`.
+    ///
+    /// Stale handles are idempotent no-ops. In particular, a delayed GPUI tab
+    /// close cannot release a newer mount that reused the same panel key.
+    pub async fn deactivate_activation(
+        &self,
+        handle: &ActivationHandle,
+    ) -> Result<(), ActivationError> {
+        let session = self.take_panel_session(
+            &handle.extension_id,
+            &handle.runtime_id,
+            &handle.panel_key,
+            handle.activation_id,
+        )?;
         if let Some(session) = session {
             session.shutdown().await;
         }
         Ok(())
+    }
+
+    /// Legacy key-based release for non-UI callers.
+    ///
+    /// UI entities must retain and release an [`ActivationHandle`] so a stale
+    /// close cannot affect a replacement activation.
+    pub async fn deactivate_panel(&self, panel_key: &str) -> Result<(), ActivationError> {
+        let handle = {
+            let state = self.state.lock();
+            state.runtimes.iter().find_map(|(runtime_id, runtime)| {
+                runtime
+                    .panels
+                    .get(panel_key)
+                    .map(|activation_id| ActivationHandle {
+                        extension_id: runtime.extension_id.clone(),
+                        panel_key: panel_key.to_owned(),
+                        runtime_id: runtime_id.clone(),
+                        activation_id: *activation_id,
+                        runtime_generation: runtime.start_generation,
+                        state: runtime.state,
+                    })
+            })
+        };
+        match handle {
+            Some(handle) => self.deactivate_activation(&handle).await,
+            None => Ok(()),
+        }
+    }
+
+    fn take_panel_session(
+        &self,
+        extension_id: &str,
+        runtime_id: &str,
+        panel_key: &str,
+        activation_id: u64,
+    ) -> Result<Option<Arc<dyn ManagedRpcSession>>, ActivationError> {
+        let mut state = self.state.lock();
+        let Some(runtime) = state.runtimes.get_mut(runtime_id) else {
+            return Ok(None);
+        };
+        if runtime.extension_id != extension_id
+            || runtime.panels.get(panel_key) != Some(&activation_id)
+        {
+            return Ok(None);
+        }
+        runtime.panels.remove(panel_key);
+        if !runtime.panels.is_empty() {
+            return Ok(None);
+        }
+
+        let generation = runtime.start_generation;
+        let session = runtime.session.take();
+        state
+            .deactivations
+            .insert(runtime_id.to_owned(), generation);
+        state.runtimes.remove(runtime_id);
+        if let Some(blobs) = &self.blobs {
+            blobs.remove_generation(runtime_id, generation);
+        }
+        if let Some(dialogs) = &self.dialogs {
+            dialogs.remove_runtime(runtime_id);
+        }
+        if let Some(events) = &self.events {
+            events.remove_runtime(runtime_id);
+        }
+        Ok(session)
     }
 
     /// Returns a typed client for the current activated session generation.
@@ -608,11 +1202,197 @@ impl ActivationManager {
                 runtime_id: runtime_id.to_owned(),
             })?;
 
-        Ok(ManagedUniversalPluginClient {
+        let mut managed_client = ManagedUniversalPluginClient {
             runtime_id: runtime_id.to_owned(),
             generation,
+            extension_id: binding.extension_id.clone(),
             client,
-        })
+            blobs: None,
+            events: None,
+            jobs: None,
+        };
+        if let Some(blobs) = &self.blobs {
+            managed_client = managed_client.with_blob_store(blobs.clone());
+        }
+        if let Some(events) = &self.events {
+            managed_client = managed_client.with_event_activation(events.clone());
+        }
+        if let Some(jobs) = &self.jobs {
+            managed_client = managed_client.with_job_activation(jobs.clone());
+        }
+        Ok(managed_client)
+    }
+
+    /// Invokes a provider resource and caches large inline JSON in the host store.
+    ///
+    /// Small results stay inline. Provider-owned `ResultRef::Blob` and
+    /// `ResultRef::EventStream` values are passed through unchanged: this host
+    /// store only owns bytes that have already crossed the IPC boundary.
+    pub async fn invoke_resource_and_cache_blob(
+        &self,
+        runtime_id: &str,
+        params: &ResourceInvokeParams,
+    ) -> Result<ResourceInvokeResult, ActivationError> {
+        let managed_client = self.universal_plugin_client(runtime_id)?;
+        let result = managed_client
+            .client
+            .invoke_resource(params)
+            .await
+            .map_err(|error| ActivationError::SessionStart(error.to_string()))?;
+        let result = self
+            .cache_inline_result(
+                runtime_id,
+                managed_client.generation,
+                result,
+                "resource_invoke",
+                &params.method,
+            )
+            .await?;
+        Ok(result)
+    }
+
+    /// Reads a completed job result and caches large inline JSON in the host store.
+    pub async fn job_result_and_cache_blob(
+        &self,
+        runtime_id: &str,
+        params: &JobResultParams,
+    ) -> Result<JobResultResult, ActivationError> {
+        let managed_client = self.universal_plugin_client(runtime_id)?;
+        let handle = managed_client
+            .jobs
+            .as_ref()
+            .ok_or_else(|| ActivationError::SessionStart("no job activation manager".into()))?
+            .handle(
+                &managed_client.extension_id,
+                runtime_id,
+                managed_client.generation,
+                &params.job_id,
+            )
+            .map_err(ActivationError::session_start)?;
+        let result = managed_client
+            .job_result(&handle)
+            .await
+            .map_err(|error| ActivationError::SessionStart(error.to_string()))?;
+        let cached = self
+            .cache_inline_result(
+                runtime_id,
+                managed_client.generation,
+                result,
+                "job_result",
+                &params.job_id,
+            )
+            .await?;
+        if let ResultRef::Blob { id } = &cached.result
+            && id.starts_with("host-blob-")
+        {
+            managed_client
+                .jobs
+                .as_ref()
+                .expect("job manager checked above")
+                .attach_blob(&handle, id)
+                .map_err(ActivationError::session_start)?;
+        }
+        Ok(cached)
+    }
+
+    fn cleanup_retired_jobs(&self, retired: Vec<RetiredJob>) {
+        let Some(blobs) = &self.blobs else {
+            return;
+        };
+        for job in retired {
+            let owner = crate::BlobOwner {
+                runtime_id: job.handle.runtime_id,
+                generation: job.handle.generation,
+            };
+            for blob_id in job.blob_ids {
+                let _ = blobs.remove_owned_blob(&owner, &blob_id);
+            }
+        }
+    }
+
+    fn cleanup_recovered_job_blobs(&self, recovered: Vec<RecoveredJob>) {
+        let Some(blobs) = &self.blobs else {
+            return;
+        };
+        for job in recovered {
+            let owner = crate::BlobOwner {
+                runtime_id: job.previous_handle.runtime_id,
+                generation: job.previous_handle.generation,
+            };
+            for blob_id in job.retired_blob_ids {
+                let _ = blobs.remove_owned_blob(&owner, &blob_id);
+            }
+        }
+    }
+
+    async fn cache_inline_result<T>(
+        &self,
+        runtime_id: &str,
+        generation: u64,
+        mut result: T,
+        source: &str,
+        source_id: &str,
+    ) -> Result<T, ActivationError>
+    where
+        T: CachedResult,
+    {
+        let Some(value) = result.inline_value() else {
+            return Ok(result);
+        };
+        let data = serde_json::to_vec(value)
+            .map_err(|error| ActivationError::HostBlob(error.to_string()))?;
+        if data.len() as u64 <= INLINE_BLOB_THRESHOLD_BYTES {
+            return Ok(result);
+        }
+
+        // Do not create a host cache entry if the provider was replaced while
+        // its response was in flight. The next generation gets a new owner and
+        // must not make an old response visible as its own result.
+        self.ensure_runtime_generation(runtime_id, generation)?;
+        let blobs = self.blobs.as_ref().ok_or_else(|| {
+            ActivationError::HostBlob("the activation manager has no host blob store".into())
+        })?;
+        let opened = blobs
+            .open(
+                &crate::BlobOwner {
+                    runtime_id: runtime_id.to_owned(),
+                    generation,
+                },
+                &BlobOpenParams {
+                    conn_id: None,
+                    content_type: Some("application/json".into()),
+                    metadata: Some(serde_json::json!({
+                        "source": source,
+                        "source_id": source_id,
+                    })),
+                },
+                data,
+            )
+            .map_err(|error| ActivationError::HostBlob(error.to_string()))?;
+        result.replace_with_blob(opened.blob_id);
+        Ok(result)
+    }
+
+    fn ensure_runtime_generation(
+        &self,
+        runtime_id: &str,
+        generation: u64,
+    ) -> Result<(), ActivationError> {
+        let state = self.state.lock();
+        let runtime =
+            state
+                .runtimes
+                .get(runtime_id)
+                .ok_or_else(|| ActivationError::RuntimeNotFound {
+                    runtime_id: runtime_id.to_owned(),
+                })?;
+        if runtime.start_generation == generation && runtime.session.is_some() {
+            Ok(())
+        } else {
+            Err(ActivationError::RuntimeNotReady {
+                runtime_id: runtime_id.to_owned(),
+            })
+        }
     }
 
     pub async fn deactivate_runtime(&self, runtime_id: &str) -> Result<(), ActivationError> {
@@ -623,6 +1403,21 @@ impl ActivationManager {
                 state
                     .deactivations
                     .insert(runtime_id.to_owned(), runtime.start_generation);
+                if let Some(blobs) = &self.blobs {
+                    blobs.remove_generation(runtime_id, runtime.start_generation);
+                }
+                if let Some(dialogs) = &self.dialogs {
+                    dialogs.remove_runtime(runtime_id);
+                }
+                if let Some(events) = &self.events {
+                    events.remove_runtime(runtime_id);
+                }
+                self.cleanup_retired_jobs(
+                    self.jobs
+                        .as_ref()
+                        .map(|jobs| jobs.remove_runtime(runtime_id))
+                        .unwrap_or_default(),
+                );
             }
             runtime
         };
@@ -651,7 +1446,22 @@ impl ActivationManager {
                 })
                 .collect::<Vec<_>>();
             for (key, generation) in deactivations {
-                state.deactivations.insert(key, generation);
+                state.deactivations.insert(key.clone(), generation);
+                if let Some(blobs) = &self.blobs {
+                    blobs.remove_generation(&key, generation);
+                }
+                if let Some(dialogs) = &self.dialogs {
+                    dialogs.remove_runtime(&key);
+                }
+                if let Some(events) = &self.events {
+                    events.remove_runtime(&key);
+                }
+                self.cleanup_retired_jobs(
+                    self.jobs
+                        .as_ref()
+                        .map(|jobs| jobs.remove_runtime(&key))
+                        .unwrap_or_default(),
+                );
             }
             keys.into_iter()
                 .filter_map(|key| state.runtimes.remove(&key))
@@ -696,7 +1506,7 @@ impl ActivationManager {
             .lock()
             .runtimes
             .values()
-            .flat_map(|runtime| runtime.panels.iter().cloned())
+            .flat_map(|runtime| runtime.panels.keys().cloned())
             .collect()
     }
 
@@ -714,6 +1524,68 @@ impl ActivationManager {
             .collect();
         panels.sort_by(|left, right| left.panel_key.cmp(&right.panel_key));
         panels
+    }
+
+    /// Loads validated panel text without exposing paths to the UI.
+    ///
+    /// This does not start or inspect a runtime. The activation manager remains
+    /// the authorization boundary; callers should load sources only after a
+    /// successful activation and then mount the host-owned declarative view.
+    pub fn declarative_panel_source(
+        &self,
+        panel_key: &str,
+    ) -> Result<DeclarativePanelSource, PanelSourceError> {
+        let matching: Vec<_> = self
+            .catalog
+            .declarative_panels()
+            .iter()
+            .filter(|panel| panel.panel_key == panel_key)
+            .collect();
+        let panel = matching
+            .first()
+            .copied()
+            .ok_or_else(|| PanelSourceError::PanelNotFound {
+                panel_key: panel_key.to_owned(),
+            })?;
+        if matching.len() != 1 {
+            return Err(PanelSourceError::UnsupportedRuntime {
+                panel_key: panel_key.to_owned(),
+                runtime_id: panel.runtime_id.clone(),
+            });
+        }
+
+        let binding = self
+            .catalog
+            .ipc_runtime_bindings()
+            .find(|binding| binding.runtime_key == panel.runtime_id)
+            .ok_or_else(|| PanelSourceError::UnsupportedRuntime {
+                panel_key: panel_key.to_owned(),
+                runtime_id: panel.runtime_id.clone(),
+            })?;
+        if binding.extension_id != panel.extension_id {
+            return Err(PanelSourceError::OwnerMismatch {
+                extension_id: binding.extension_id.clone(),
+                runtime_id: panel.runtime_id.clone(),
+                panel_key: panel_key.to_owned(),
+            });
+        }
+
+        let template = fs::read_to_string(&panel.template_path)
+            .map_err(|error| panel_source_io_error(panel_key, error))?;
+        let style = panel
+            .style_path
+            .as_ref()
+            .map(|path| fs::read_to_string(path))
+            .transpose()
+            .map_err(|error| panel_source_io_error(panel_key, error))?;
+
+        Ok(DeclarativePanelSource {
+            extension_id: panel.extension_id.clone(),
+            panel_key: panel.panel_key.clone(),
+            title: panel.title.clone(),
+            template,
+            style,
+        })
     }
 
     /// Inspect process health without changing process state.
@@ -825,7 +1697,7 @@ impl ActivationManager {
     ) -> Option<Arc<dyn ManagedRpcSession>> {
         let context = SessionContext {
             binding: binding.clone(),
-            host_api: (self.host_api_factory)(binding.clone()),
+            host_api: (self.host_api_factory)(binding.clone(), generation + 1),
         };
         let session = (self.session_factory)(context).await.ok();
 
@@ -844,6 +1716,22 @@ impl ActivationManager {
                         runtime.start_generation += 1;
                         runtime.factory_claimed = false;
                         stale_session = runtime.session.replace(session);
+                        if let Some(blobs) = &self.blobs {
+                            blobs.remove_generation(runtime_id, generation);
+                        }
+                        if let Some(dialogs) = &self.dialogs {
+                            dialogs.retire_generation(runtime_id, generation);
+                            dialogs.mark_runtime_active(runtime_id, generation + 1);
+                        }
+                        if let Some(events) = &self.events {
+                            events.retire_generation(runtime_id, generation);
+                            events.mark_runtime_active(runtime_id, generation + 1);
+                        }
+                        if let Some(jobs) = &self.jobs {
+                            let recovered =
+                                jobs.recover_generation(runtime_id, generation, generation + 1);
+                            self.cleanup_recovered_job_blobs(recovered);
+                        }
                     }
                     None => {
                         runtime.state = if attempt >= binding.max_restart_attempts {

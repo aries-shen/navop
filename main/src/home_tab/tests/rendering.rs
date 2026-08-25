@@ -336,6 +336,30 @@ fn universal_plugin_sidebar_uses_host_owned_lazy_activation() {
 }
 
 #[test]
+fn universal_plugin_panels_mount_through_a_stable_trusted_renderer() {
+    let modern_home = include_str!("../modern_home.rs");
+    let universal_panels = include_str!("../universal_panels.rs");
+    let panel = include_str!("../../universal_plugin_panel.rs");
+
+    assert!(modern_home.contains("panel.placement == UniversalPanelPlacement::HomeTab"));
+    assert!(modern_home.contains("home.activate_universal_panel(&panel_key, window, cx);"));
+    assert!(universal_panels.contains("activate_or_add_tab_lazy"));
+    assert!(universal_panels.contains("universal_plugin_tab_id(&panel.panel_key)"));
+    assert_eq!(
+        universal_plugin_tab_id("com.navop.kafka::topics"),
+        "universal-panel:com.navop.kafka::topics"
+    );
+    assert!(universal_panels.contains("service.panel_source(&panel.panel_key)"));
+    assert!(universal_panels.contains("UniversalPluginPanel::compile(source)"));
+    assert!(panel.contains("compile_template_with_style"));
+    assert!(panel.contains("ComponentRegistry::with_defaults()"));
+    assert!(panel.contains("CompileOptions::strict()"));
+    assert!(panel.contains("Entity<DeclarativeView>"));
+    assert!(!panel.contains("PathBuf"));
+    assert!(!universal_panels.contains("ActivationManager::new"));
+}
+
+#[test]
 fn modern_home_cards_are_small_and_fill_each_row() {
     let home = include_str!("../../home_tab.rs");
     let content = include_str!("../content.rs");

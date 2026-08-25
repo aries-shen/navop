@@ -20,7 +20,8 @@ use tokio::{io::duplex, sync::mpsc};
 
 use super::*;
 use crate::{
-    JsonRpcClient, NegotiationConfig, ProcessRpcSessionConfig, SpawnConfig,
+    CancellationToken, JsonRpcClient, NegotiationConfig, ProcessRpcSessionConfig, RequestOptions,
+    SpawnConfig,
     transport::{FramedTransport, recv_async, send_async},
 };
 
@@ -382,6 +383,80 @@ async fn explicit_method_declarations_reject_missing_methods_locally() {
         HostError::NotImplemented(message) if message.contains(method::JOB_START)
     ));
     assert!(observed.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn event_read_options_propagate_cancellation_to_the_provider() {
+    let (client_side, extension_side) = duplex(16 * 1024);
+    let (client_reader, client_writer) = tokio::io::split(client_side);
+    let (mut extension_reader, mut extension_writer) = tokio::io::split(extension_side);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok(message) = recv_async::<_, RpcMessage>(&mut extension_reader).await {
+            match message {
+                RpcMessage::Request(request) if request.method == method::INIT => {
+                    let init = InitResult::new("1.0.0")
+                        .with_api("extension", "1.0")
+                        .with_method(method::EVENT_READ);
+                    send_async(
+                        &mut extension_writer,
+                        &RpcMessage::Response(Response::ok(
+                            request.id,
+                            serde_json::to_value(init).unwrap(),
+                        )),
+                    )
+                    .await
+                    .unwrap();
+                }
+                RpcMessage::Request(request) => {
+                    observed_tx.send((request.method, request.params)).unwrap();
+                }
+                RpcMessage::Notification(notification) => {
+                    observed_tx
+                        .send((notification.method, notification.params))
+                        .unwrap();
+                    break;
+                }
+                RpcMessage::Response(_) => {}
+            }
+        }
+    });
+
+    let rpc = JsonRpcClient::start(FramedTransport::new(client_reader, client_writer));
+    let config = ProcessRpcSessionConfig::new(
+        SpawnConfig::new("test-provider"),
+        NegotiationConfig::new("1.0.0", "instance").offer_api("extension", "1.0"),
+    )
+    .with_request_timeout(Duration::from_secs(1));
+    let session = ProcessRpcSession::start_with_client(rpc, None, config)
+        .await
+        .unwrap();
+    let client = UniversalPluginClient::new(Arc::new(session));
+    let cancel = CancellationToken::new();
+    let read_cancel = cancel.clone();
+    let read = tokio::spawn(async move {
+        client
+            .read_event_stream_with_options(
+                &EventReadParams {
+                    stream_id: "stream-1".into(),
+                    max_events: Some(16),
+                    wait_ms: Some(1_000),
+                },
+                RequestOptions::default().with_cancel(read_cancel),
+            )
+            .await
+    });
+
+    let (method, _) = observed_rx.recv().await.unwrap();
+    assert_eq!(method::EVENT_READ, method);
+    cancel.cancel();
+    assert!(matches!(
+        read.await.unwrap(),
+        Err(HostError::Cancelled { method }) if method == method::EVENT_READ
+    ));
+    let (method, params) = observed_rx.recv().await.unwrap();
+    assert_eq!(method::CANCEL_REQUEST, method);
+    assert!(params.get("id").is_some());
 }
 
 #[tokio::test]

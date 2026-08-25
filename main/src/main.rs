@@ -35,6 +35,7 @@ mod setting_tab;
 mod settings;
 mod sync_conflict_dialog;
 mod team_management;
+mod universal_plugin_panel;
 mod universal_plugins;
 mod update;
 mod user_avatar;

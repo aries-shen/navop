@@ -128,7 +128,7 @@ impl ProcessRpcSession {
         Self::start_with_client(client, process, config).await
     }
 
-    pub(crate) async fn start_with_client(
+    pub async fn start_with_client(
         mut client: JsonRpcClient,
         process: Option<Arc<StdMutex<Option<ProcessHandle>>>>,
         config: ProcessRpcSessionConfig,
@@ -194,15 +194,10 @@ impl ProcessRpcSession {
     /// invoke `shutdown`; activation managers therefore retain their original
     /// managed session and use clones only for typed request facades.
     pub fn clone_session(&self) -> Self {
-        let owner = self
-            .owner
-            .lock()
-            .expect("process owner mutex poisoned")
-            .clone();
         Self {
             handle: self.handle.clone(),
             session: self.session.clone(),
-            owner: StdMutex::new(owner),
+            owner: StdMutex::new(None),
             notifications: StdMutex::new(None),
             request_timeout: self.request_timeout,
             shutdown_grace_ms: self.shutdown_grace_ms,
@@ -262,7 +257,17 @@ impl ProcessRpcSession {
 
 impl Drop for ProcessRpcSession {
     fn drop(&mut self) {
-        self.handle.close();
+        // A request facade is a non-owning clone. Dropping it must not tear
+        // down the transport still retained by the activation manager.
+        if self
+            .owner
+            .lock()
+            .expect("process owner mutex poisoned")
+            .take()
+            .is_some()
+        {
+            self.handle.close();
+        }
     }
 }
 

@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = { workspace = true }
 declarative-ui-demo = { workspace = true }
 extension-host = { workspace = true }
 extension-protocol = { workspace = true }
@@ -15,13 +16,13 @@ gpui = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 uuid = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
 
 [lints]

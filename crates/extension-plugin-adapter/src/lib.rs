@@ -12,28 +12,69 @@ use std::{
 
 use declarative_ui_demo::{ActionEvent, Runtime, RuntimeError, StateChange, StateOperation};
 use extension_host::{NegotiationConfig, ProcessRpcSessionConfig, SpawnConfig};
-use extension_protocol::declarative_ui::{UiActionRequest, UiStateOperation, UiStatePatch};
+use extension_protocol::declarative_ui::{UiActionRequest, UiStateOperation};
 use extension_runtime::RegisteredIpcRuntimeBinding;
 use gpui::Context;
 use thiserror::Error;
 
 pub mod activation;
 
+pub mod blob_store;
+#[cfg(test)]
+mod blob_store_tests;
+pub mod dialog_activation;
+pub mod event_activation;
+pub mod event_supervisor;
+#[cfg(test)]
+mod event_supervisor_tests;
+pub mod job_activation;
+mod job_activation_state;
+#[cfg(test)]
+mod job_activation_tests;
 pub mod provider_permissions;
 pub mod universal_host;
+pub mod window_activation;
+#[cfg(test)]
+mod window_activation_tests;
+
+pub use extension_protocol::declarative_ui::UiStatePatch;
 
 pub use activation::{
     ActivationError, ActivationHandle, ActivationManager, DeclarativePanelDescriptor,
-    HostApiFactory, ManagedRpcSession, ManagedUniversalPluginClient, RuntimeActivationState,
-    RuntimeHealth, RuntimeMonitor, RuntimeMonitorConfig, RuntimeMonitorError, RuntimeMonitorEvent,
-    SessionContext, SessionFactory, SupervisionPolicy, process_session_factory,
+    DeclarativePanelSource, HostApiFactory, ManagedRpcSession, ManagedUniversalPluginClient,
+    PanelSourceError, RuntimeActivationState, RuntimeHealth, RuntimeMonitor, RuntimeMonitorConfig,
+    RuntimeMonitorError, RuntimeMonitorEvent, SessionContext, SessionFactory, SupervisionPolicy,
+    process_session_factory,
 };
 
+pub use blob_store::{
+    BlobInfo, BlobOwner, BlobStore, BlobStoreError, BlobStoreLimits, DEFAULT_MAX_BLOB_BYTES,
+    DEFAULT_MAX_TOTAL_BLOB_BYTES,
+};
+pub use dialog_activation::{
+    DEFAULT_MAX_PENDING_DIALOGS, DialogActivationError, DialogActivationKey,
+    DialogActivationManager, DialogActivationRequest, DialogHostProvider, DialogPresenter,
+    DialogTerminalResult, DialogUserResult, QueueingDialogPresenter,
+};
+pub use event_activation::{
+    DEFAULT_MAX_OPEN_EVENT_STREAMS, EventActivationError, EventActivationManager, EventStreamKey,
+};
+pub use event_supervisor::{
+    DEFAULT_EVENT_BRIDGE_CAPACITY, EventStreamBatch, EventStreamSubscription,
+    EventStreamSubscriptionConfig,
+};
+pub use job_activation::{
+    JobActivationError, JobActivationHandle, JobActivationManager, RecoveredJob, RetiredJob,
+};
 pub use provider_permissions::{
     NetworkEndpoint, ProviderPermissionError, ProviderPermissionSet, ResourceOpenAuthorizer,
     SecretReference,
 };
 pub use universal_host::{MapSecretResolver, SecretResolver, UniversalProviderHost};
+pub use window_activation::{
+    PresentedWindow, WindowActivationKey, WindowActivationManager, WindowActivationRequest,
+    WindowPresentationError, WindowPresenter,
+};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PluginAdapterError {

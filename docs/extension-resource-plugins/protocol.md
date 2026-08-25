@@ -54,8 +54,58 @@ job/close
 { "kind": "event_stream", "id": "stream-123" }
 ```
 
+inline JSON 是便利路径，不是无限大的传输通道。宿主对 `resource/invoke` 与
+`job/result` 的返回值应用统一边界：序列化后超过 4 MiB 的 inline 结果会被宿主
+复制为 `host-blob-*` 并仍以 `ResultRef::Blob` 返回。provider 自己返回的
+`blob-123` 保持 provider 所有权并路由回该 provider；`host-blob-*` 是宿主专用
+命名空间，provider 不能探测、伪造或要求宿主透传。host blob 的读取授权绑定
+exact runtime + generation，provider 进程重启或 deactivation 后自动失效。
+
 `ProgressPercent` 限制在 `0..=100`。取消必须幂等；provider 应尽快停止网络、
 文件和子进程工作。
+
+## Event streams
+
+持续日志、watch 或消息消费使用：
+
+```text
+event/open
+event/read
+event/close
+```
+
+`event/open` 返回 provider-local `stream_id`。provider 必须为每个 stream 维护
+有界 buffer；宿主通过 `event/read` 拉取 batch：
+
+```json
+{
+  "stream_id": "stream-123",
+  "max_events": 128,
+  "wait_ms": 250
+}
+```
+
+`max_events` 未提供时默认 128，有效范围会被限制在 `1..=1024`。返回值携带事件
+batch、`closed` 终态标记和 buffer overflow 时累计的 `dropped_count`：
+
+```json
+{
+  "events": [],
+  "closed": false,
+  "dropped_count": 0
+}
+```
+
+宿主把 `stream_id` 注册为 extension + runtime + generation + stream 的精确
+所有权。同一 runtime generation 内 duplicate stream 会被拒绝，open stream 数量
+有 per-runtime limit。旧 generation 的 client 不能读取或关闭 replacement
+process 的同 ID stream；runtime deactivation、extension deactivation 或成功
+重启会使旧 generation 的注册项失效。provider 返回 `closed` 或宿主执行
+`event/close` 后，宿主注册项被释放；provider close 失败不能让已失效注册项
+永久占用配额。
+
+当前宿主完成的是 stream registry、owner 校验和 lifecycle cleanup。后台订阅
+任务、UI bridge、跨 restart 恢复和统一 backpressure/cancellation 策略仍待实现。
 
 ## Declarative UI actions
 
@@ -138,6 +188,12 @@ request，由宿主 activation manager 检查权限、owner、panel 注册和生
 `confirmed`。`expected_revision` 只是 UI state patch 语义；`request_id` 用于 host
 去重，不承担 revision 冲突检测。
 
+Reverse Host API 的宿主实现会把 request 放入 extension + runtime + generation +
+`request_id` 命名空间。generation 已被替换或 request 尚未完成的重复 ID 会被
+拒绝；同一 runtime 的 pending dialog 有数量上限。runtime deactivation、
+extension deactivation 或成功重启会返回显式 `dismissed`。该结果表示宿主清理，
+不是用户确认；provider 必须把它作为终态处理。
+
 ### `ui/window`
 
 ```json
@@ -179,8 +235,9 @@ typed client 发送 RPC 前会拒绝：
 
 这两个方法需要对应 UI permission：建议 gate 为 `ui:dialog` 与 declarative panel
 所属的 `ui:window` permission。危险确认还必须复用 destructive operation
-confirmation 与 audit 流程。当前 Phase 1 只提供 wire DTO 与 typed facade，真实
-GPUI dialog/window activation lifecycle 尚未实现。
+confirmation 与 audit 流程。当前 `ui/dialog` 已有宿主生命周期管理与生产排队
+presenter，但真实 GPUI modal presenter、focus owner、permission gate 与 audit
+仍未完成；`ui/window` 尚未实现 activation lifecycle。
 
 ## Domain method registry
 

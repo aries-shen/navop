@@ -67,6 +67,7 @@ impl HomePage {
             persistent_sidebar_expanded: AppSettings::current(cx).connection_sidebar_expanded,
             workspaces: Vec::new(),
             universal_plugin_panels: Vec::new(),
+            universal_plugin_activations: BTreeMap::new(),
             universal_plugin_status: BTreeMap::new(),
             activating_universal_panels: HashSet::new(),
             universal_plugin_activation_error: None,

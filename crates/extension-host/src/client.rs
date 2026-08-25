@@ -25,7 +25,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
@@ -56,10 +56,20 @@ impl RequestOptions {
     }
 }
 
-/// 简易取消令牌——多份 clone 共享同一个 `AtomicBool`。
-#[derive(Debug, Clone, Default)]
+/// 可等待的取消令牌——多份 clone 共享状态并立即唤醒等待者。
+#[derive(Debug, Clone)]
 pub struct CancellationToken {
     flag: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
 }
 
 impl CancellationToken {
@@ -69,11 +79,25 @@ impl CancellationToken {
 
     /// 触发取消;所有 clone 立即可见。
     pub fn cancel(&self) {
-        self.flag.store(true, Ordering::SeqCst);
+        if !self.flag.swap(true, Ordering::SeqCst) {
+            self.notify.notify_waiters();
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -142,7 +166,7 @@ impl JsonRpcClientHandle {
         let resp = if let Some(token) = options.cancel.clone() {
             tokio::select! {
                 biased;
-                _ = wait_cancelled(token.clone()) => {
+                _ = token.cancelled() => {
                     drop(guard);
                     let _ = self.send_cancel(id).await;
                     return Err(HostError::Cancelled { method: method.to_string() });
@@ -478,15 +502,10 @@ fn wake_all_pending(shared: &Arc<ClientShared>) {
     }
 }
 
-async fn wait_cancelled(token: CancellationToken) {
-    while !token.is_cancelled() {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use extension_protocol::declarative_ui::{UiDialogRequest, UiDialogResult};
     use extension_protocol::envelope::{Notification, Response, RpcMessage};
     use extension_protocol::host::{ResolveSecretParams, ResolveSecretResult};
     use extension_protocol::{conn::SecretRef, host};
@@ -653,6 +672,10 @@ mod tests {
             }
 
             async fn log(&self, _params: host::LogParams) -> HostResult<()> {
+                unimplemented!()
+            }
+
+            async fn show_dialog(&self, _params: UiDialogRequest) -> HostResult<UiDialogResult> {
                 unimplemented!()
             }
         }

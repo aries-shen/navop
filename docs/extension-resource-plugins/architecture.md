@@ -56,6 +56,9 @@ job_status
 cancel_job
 job_result
 close_job
+open_event_stream
+read_event_stream
+close_event_stream
 ui_action
 ui_dialog
 ui_window
@@ -63,10 +66,32 @@ ui_window
 
 不把 GPUI `Entity`、`dyn ComponentRenderer`、闭包或任意 UI 对象跨进程发送。
 
-`ui_dialog` 与 `ui_window` 的 typed facade 会在发送 RPC 前执行本地 wire contract
-校验；provider 只是发起描述性 request。真实 GPUI dialog、modal owner、window
-focus、panel 绑定和 owner runtime / panel / extension 关闭时的自动清理，仍属于
-后续 activation manager 的宿主权威职责，当前 Phase 1 不声称已经实现。
+`ui_window` 的 typed facade 会在发送 RPC 前执行本地 wire contract 校验；
+provider 只是发起描述性 request。真实 GPUI window focus、panel 绑定和 window
+activation manager 仍属于后续宿主权威职责。
+
+`ui_dialog` 已进入 reverse Host API 的宿主激活链路：`DialogHostProvider` 只把
+声明式 request 交给 `DialogActivationManager`。manager 使用 extension +
+runtime + generation + `request_id` 作为 pending key，拒绝 stale generation、
+duplicate pending request 和超出 per-runtime limit 的请求。真实 GPUI modal、
+focus owner 与 danger confirmation 样式由 `DialogPresenter` 实现；用户动作、
+Esc / mask / close 或 owner cleanup 都通过同一 completion 语义返回。runtime
+deactivation、extension deactivation 与成功重启会产生显式 `dismissed`，不会
+伪造成用户 `confirmed`。当前生产 presenter 仍是排队 fallback，真实 GPUI
+presenter 尚未完成。
+
+`event/*` 同样是 host-authoritative 生命周期。provider 负责生产事件并维护有界
+buffer，但 Navop 的 `EventActivationManager` 拥有 stream registry：
+
+- stream key 由 extension ID、runtime ID、process generation 和 stream ID 组成；
+- `open` 后注册，duplicate stream 与 per-runtime open limit 会被拒绝；
+- `read` / `close` 先做 exact owner 校验，旧 generation 的 client 不能把
+  provider-local stream ID 路由到 replacement process；
+- provider `read` 返回 `closed` 或宿主 `close` 完成后释放注册项；
+- runtime deactivation、extension deactivation 和成功重启会清理旧代际流。
+
+当前实现是 pull-oriented read 生命周期，不包含后台订阅任务、UI bridge 或跨
+restart 恢复。
 
 ## UI 与异步工作的边界
 
@@ -104,5 +129,12 @@ action 只传 secret reference；宿主在 provider 启动或请求时按权限�
 - 短小 JSON 结果：`ResultRef::Inline`。
 - 大查询、批量导出、日志：`ResultRef::Blob`。
 - 消费消息、容器日志、watch/event：`ResultRef::EventStream`。
-- 仍需增加宿主级 backing store、订阅、背压和清理实现。
+- Blob 已有宿主级 bounded store 和结果入口：超过 4 MiB 的
+  `resource/invoke` / `job/result` inline JSON 会复制到 host store 并以
+  `host-blob-*` 返回；数据绑定 runtime generation，支持分块读取、幂等 close、
+  quota 与 restart/deactivation 清理。provider 返回的普通 blob ID 仍由 provider
+  持有并路由回原 provider；`host-blob-` 是独立命名空间，不允许透传给 provider。
+  reverse Host API 写入、磁盘 spilling 与 TTL 调度仍未实现。
+- Event stream 已有宿主注册表、exact owner 校验、per-runtime limit 与
+  lifecycle 清理。后台订阅、UI bridge、跨 restart 恢复和统一背压策略仍需实现。
 - `job/start` 用于长操作；领域方法本身不需要污染公共 protocol enum。

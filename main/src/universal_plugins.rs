@@ -11,8 +11,10 @@ use std::sync::{
 
 use extension_plugin_adapter::{
     ActivationError, ActivationHandle, ActivationManager, DeclarativePanelDescriptor,
-    HostApiFactory, RuntimeActivationState, RuntimeHealth, RuntimeMonitor, RuntimeMonitorConfig,
-    RuntimeMonitorEvent, SessionFactory,
+    DeclarativePanelSource, DialogActivationManager, DialogHostProvider, EventActivationManager,
+    HostApiFactory, PanelSourceError, QueueingDialogPresenter, RuntimeActivationState,
+    RuntimeHealth, RuntimeMonitor, RuntimeMonitorConfig, RuntimeMonitorEvent, SessionFactory,
+    UniversalProviderHost,
 };
 use extension_runtime::{
     ExtensionRuntimeCatalog, GlobalExtensionRuntimeCatalog,
@@ -45,6 +47,7 @@ impl GlobalUniversalPluginService {
 pub(crate) struct UniversalPluginService {
     manager: Arc<ActivationManager>,
     monitor: Arc<RuntimeMonitor>,
+    dialogs: Arc<DialogActivationManager>,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
     stopped: Arc<AtomicBool>,
 }
@@ -130,11 +133,23 @@ impl From<RuntimeActivationState> for UniversalPluginStatus {
 
 impl UniversalPluginService {
     fn from_catalog(catalog: Arc<ExtensionRuntimeCatalog>) -> Self {
-        let manager = Arc::new(ActivationManager::from_shared_catalog(
-            catalog,
-            production_session_factory(),
-            production_host_api_factory(),
-        ));
+        let dialogs = Arc::new(DialogActivationManager::new(Arc::new(
+            QueueingDialogPresenter::default(),
+        )));
+        let events = Arc::new(EventActivationManager::new());
+        let jobs = Arc::new(extension_plugin_adapter::JobActivationManager::new());
+        let blobs = extension_plugin_adapter::BlobStore::default();
+        let manager = Arc::new(
+            ActivationManager::from_shared_catalog(
+                catalog,
+                production_session_factory(),
+                production_host_api_factory(Arc::clone(&dialogs), blobs.clone()),
+            )
+            .with_blob_store(blobs)
+            .with_dialog_activation(Arc::clone(&dialogs))
+            .with_job_activation(jobs)
+            .with_event_activation(Arc::clone(&events)),
+        );
         let monitor = Arc::new(RuntimeMonitor::new(
             Arc::clone(&manager),
             RuntimeMonitorConfig::default(),
@@ -142,6 +157,25 @@ impl UniversalPluginService {
         Self {
             manager,
             monitor,
+            dialogs,
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            stopped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_activation_manager(manager: ActivationManager) -> Self {
+        let manager = Arc::new(manager);
+        let monitor = Arc::new(RuntimeMonitor::new(
+            Arc::clone(&manager),
+            RuntimeMonitorConfig::default(),
+        ));
+        Self {
+            manager,
+            monitor,
+            dialogs: Arc::new(DialogActivationManager::new(Arc::new(
+                QueueingDialogPresenter::default(),
+            ))),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             stopped: Arc::new(AtomicBool::new(false)),
         }
@@ -155,6 +189,17 @@ impl UniversalPluginService {
     /// UI-safe catalog projection without template/style paths or permissions.
     pub(crate) fn panel_catalog(&self) -> Vec<DeclarativePanelDescriptor> {
         self.manager.declarative_panel_catalog()
+    }
+
+    /// Loads UI-safe panel text through the activation manager boundary.
+    ///
+    /// This is deliberately not part of the catalog projection: source loading
+    /// happens only after activation, and paths never reach GPUI.
+    pub(crate) fn panel_source(
+        &self,
+        panel_key: &str,
+    ) -> Result<DeclarativePanelSource, PanelSourceError> {
+        self.manager.declarative_panel_source(panel_key)
     }
 
     pub(crate) fn runtime_healths(&self) -> Vec<(String, RuntimeHealth)> {
@@ -196,6 +241,17 @@ impl UniversalPluginService {
         result
     }
 
+    pub(crate) async fn deactivate_activation(
+        &self,
+        handle: &ActivationHandle,
+    ) -> Result<(), ActivationError> {
+        let result = self.manager.deactivate_activation(handle).await;
+        if result.is_ok() && self.manager.runtime_state(&handle.runtime_id).is_err() {
+            self.monitor.untrack(&handle.runtime_id);
+        }
+        result
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) async fn deactivate_extension(
@@ -219,6 +275,49 @@ impl UniversalPluginService {
 
     pub(crate) fn active_panel_keys(&self) -> BTreeSet<String> {
         self.manager.active_panel_keys()
+    }
+
+    /// Returns the current session generation for restart-aware panel clients.
+    pub(crate) fn runtime_generation(&self, runtime_id: &str) -> Result<u64, ActivationError> {
+        self.manager.runtime_generation(runtime_id)
+    }
+
+    /// Acquires a client bound to the current activation-owned session.
+    ///
+    /// The panel compares the returned generation with its mount-time value to
+    /// avoid applying a stale provider patch after supervisor replacement.
+    pub(crate) fn universal_plugin_client(
+        &self,
+        runtime_id: &str,
+    ) -> Result<
+        extension_plugin_adapter::ManagedUniversalPluginClient,
+        extension_plugin_adapter::ActivationError,
+    > {
+        self.manager.universal_plugin_client(runtime_id)
+    }
+
+    pub(crate) async fn invoke_resource_and_cache_blob(
+        &self,
+        runtime_id: &str,
+        params: &extension_protocol::resource::ResourceInvokeParams,
+    ) -> Result<
+        extension_protocol::resource::ResourceInvokeResult,
+        extension_plugin_adapter::ActivationError,
+    > {
+        self.manager
+            .invoke_resource_and_cache_blob(runtime_id, params)
+            .await
+    }
+
+    pub(crate) async fn job_result_and_cache_blob(
+        &self,
+        runtime_id: &str,
+        params: &extension_protocol::job::JobResultParams,
+    ) -> Result<extension_protocol::job::JobResultResult, extension_plugin_adapter::ActivationError>
+    {
+        self.manager
+            .job_result_and_cache_blob(runtime_id, params)
+            .await
     }
 
     /// Gracefully stops active runtimes and then stops the monitor task.
@@ -255,13 +354,30 @@ fn production_session_factory() -> SessionFactory {
     extension_plugin_adapter::process_session_factory()
 }
 
-fn production_host_api_factory() -> HostApiFactory {
-    Arc::new(|binding| {
-        let host = extension_plugin_adapter::UniversalProviderHost::new(
+fn production_host_api_factory(
+    dialogs: Arc<DialogActivationManager>,
+    blobs: extension_plugin_adapter::BlobStore,
+) -> HostApiFactory {
+    Arc::new(move |binding, generation| {
+        let base = UniversalProviderHost::new(
             binding.permissions.iter().cloned(),
             Arc::new(extension_plugin_adapter::MapSecretResolver::default()),
+        )
+        .with_blob_store(
+            blobs.clone(),
+            extension_plugin_adapter::BlobOwner {
+                runtime_id: binding.runtime_key.clone(),
+                generation,
+            },
         );
-        Arc::new(extension_host::HostApiHandler::new(Arc::new(host)))
+        let dialog_host = DialogHostProvider::new(
+            binding.extension_id.clone(),
+            binding.runtime_key.clone(),
+            generation,
+            Arc::clone(&dialogs),
+            Arc::new(base),
+        );
+        Arc::new(extension_host::HostApiHandler::new(Arc::new(dialog_host)))
     })
 }
 
