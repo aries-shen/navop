@@ -2,6 +2,7 @@ use super::{
     DetectedZmodem, ZCAN, ZmodemDirection, ZmodemPickerResponse, ZmodemResponder,
     is_channel_closed, run_transfer,
 };
+use crate::TerminalEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 use ssh::{ChannelEvent, ForwardRequest, PtyConfig, SshChannel};
@@ -78,6 +79,16 @@ async fn cancelled_picker_sends_zcan() {
     let response_task = tokio::spawn(async move {
         event_rx.recv().await.expect("picker request event");
         assert!(task_responder.submit(ZmodemPickerResponse::Cancel));
+        loop {
+            match event_rx.recv().await.expect("transfer outcome event") {
+                TerminalEvent::ZmodemTransferFinished {
+                    outcome: super::ZmodemTransferOutcome::Cancelled,
+                    ..
+                } => break,
+                TerminalEvent::ZmodemRequestChanged | TerminalEvent::ZmodemProgressChanged(_) => {}
+                event => panic!("unexpected terminal event: {event:?}"),
+            }
+        }
     });
     let mut channel = MockChannel::default();
     let sent = channel.sent.clone();
@@ -96,6 +107,47 @@ async fn cancelled_picker_sends_zcan() {
     assert!(result.is_err());
     response_task.await.unwrap();
     assert_eq!(sent.lock().unwrap().as_slice(), &[ZCAN.to_vec()]);
+}
+
+#[tokio::test]
+async fn cancellation_during_picker_reports_cancelled_outcome() {
+    let (event_tx, mut event_rx) = unbounded_channel();
+    let responder = ZmodemResponder::new(event_tx);
+    let cancellation = CancellationToken::new();
+    let cancel_token = cancellation.clone();
+    let cancellation_task = tokio::spawn(async move {
+        event_rx.recv().await.expect("picker request event");
+        sleep(Duration::from_millis(10)).await;
+        cancel_token.cancel();
+        loop {
+            match event_rx.recv().await.expect("progress event") {
+                TerminalEvent::ZmodemTransferFinished {
+                    transfer_id: _,
+                    outcome: super::ZmodemTransferOutcome::Cancelled,
+                    ..
+                } => {
+                    break;
+                }
+                TerminalEvent::ZmodemProgressChanged(_) | TerminalEvent::ZmodemRequestChanged => {}
+                event => panic!("unexpected terminal event: {event:?}"),
+            }
+        }
+    });
+    let mut channel = MockChannel::default();
+
+    let result = run_transfer(
+        &mut channel,
+        DetectedZmodem {
+            direction: ZmodemDirection::Upload,
+            wire: Vec::new(),
+        },
+        &responder,
+        &cancellation,
+    )
+    .await;
+
+    assert!(result.is_err());
+    cancellation_task.await.unwrap();
 }
 
 #[tokio::test]

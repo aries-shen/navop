@@ -125,6 +125,7 @@ mod tests {
         let mut connection = StoredConnection::new_ssh(
             "prod-bastion".to_string(),
             SshParams {
+                sftp_account: None,
                 host: "bastion.example.com".to_string(),
                 port: 2222,
                 username: "deploy".to_string(),
@@ -147,6 +148,7 @@ mod tests {
                 credential_reference: None,
                 os_id: None,
                 icon: None,
+                icon_file_path: None,
                 account_expect: Default::default(),
             },
             Some(7),

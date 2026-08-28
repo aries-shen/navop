@@ -19,6 +19,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     scroll::Scrollbar,
     select::{Select, SelectEvent, SelectItem, SelectState},
+    spinner::Spinner,
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -277,9 +278,13 @@ fn find_loaded_table_info(
         if table.name != table_name {
             return false;
         }
-        match schema_name {
-            Some(schema) => table.schema.as_deref() == Some(schema),
-            None => true,
+        match (schema_name, table.schema.as_deref()) {
+            // 驱动没有返回 schema 信息时,退化按表名匹配。
+            // 宿主调用 list_tables 时已带上 schema 过滤条件,所以同名表
+            // 在结果集中通常唯一。
+            (Some(_), None) => true,
+            (Some(schema), Some(table_schema)) => schema == table_schema,
+            (None, _) => true,
         }
     })
 }
@@ -306,6 +311,9 @@ pub struct TableDesigner {
     ddl_preview_input: Entity<InputState>,
     preview_refresh_state: PreviewRefreshScheduleState,
     metadata_load_seq: usize,
+    preview_generation: usize,
+    sql_preview_loading: bool,
+    executing: bool,
     original_design: Option<TableDesign>,
     _subscriptions: Vec<Subscription>,
 }
@@ -533,6 +541,9 @@ impl TableDesigner {
             ddl_preview_input,
             preview_refresh_state: PreviewRefreshScheduleState::default(),
             metadata_load_seq: 0,
+            preview_generation: 0,
+            sql_preview_loading: false,
+            executing: false,
             original_design: None,
             _subscriptions: vec![
                 name_sub,
@@ -680,77 +691,106 @@ impl TableDesigner {
             .collect()
     }
 
-    fn build_diff_preview_sql(
-        &self,
-        design: &TableDesign,
-        column_renames: &[(String, String)],
-        cx: &App,
-    ) -> String {
-        let global_state = cx.global::<GlobalDbState>().clone();
-
-        if let Ok(plugin) = global_state
-            .db_manager
-            .get_plugin(&self.config.database_type)
-        {
-            if let Some(original) = &self.original_design {
-                let normalized = Self::normalize_column_renames(original, design, column_renames);
-                plugin.build_alter_table_sql_with_renames(original, design, &normalized)
-            } else {
-                plugin.build_create_table_sql(design)
-            }
-        } else {
-            String::new()
-        }
-    }
-
-    fn build_ddl_preview_sql(&self, design: &TableDesign, cx: &App) -> String {
-        if design.table_name.trim().is_empty() || design.columns.is_empty() {
-            return String::new();
-        }
-
-        let global_state = cx.global::<GlobalDbState>().clone();
-        if let Ok(plugin) = global_state
-            .db_manager
-            .get_plugin(&self.config.database_type)
-        {
-            plugin.build_create_table_sql(design)
-        } else {
-            String::new()
-        }
-    }
-
     fn update_previews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let global_state = cx.global::<GlobalDbState>().clone();
+        let connection_id = self.config.connection_id.clone();
+        let database_name = self.config.database_name.clone();
+        let schema_name = self.config.schema_name.clone();
         let design = self.collect_design(cx);
         let column_renames = self.collect_column_renames(cx);
-        let sql = self.build_diff_preview_sql(&design, &column_renames, cx);
-        let ddl = self.build_ddl_preview_sql(&design, cx);
+        let original = self.original_design.clone();
+        let column_renames = match &original {
+            Some(original) => Self::normalize_column_renames(original, &design, &column_renames),
+            None => column_renames,
+        };
 
-        if let Some(original) = &self.original_design {
-            if Self::sql_has_changes(&sql) {
-                let original_order = column_order_snapshot(original);
-                let current_order = column_order_snapshot(&design);
-                tracing::warn!(
-                    target: "table_designer_diag",
-                    table = %design.table_name,
-                    database_type = ?self.config.database_type,
-                    ?column_renames,
-                    ?original_order,
-                    ?current_order,
-                    original_columns = ?original.columns,
-                    current_columns = ?design.columns,
-                    sql = %sql,
-                    "[table_designer_diag] existing table preview detected diff"
-                );
-            }
-        }
-
-        self.sql_preview_input.update(cx, |state, cx| {
-            state.set_value(sql, window, cx);
-        });
-        self.ddl_preview_input.update(cx, |state, cx| {
-            state.set_value(ddl, window, cx);
-        });
+        // 预览与保存共用同一条异步驱动路径（build_table_design_sql），由插件
+        // （driver jar）生成方言正确的 DDL / COMMENT，其他数据库同样受益。
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
+        self.sql_preview_loading = true;
         cx.notify();
+        let window_handle = window.window_handle();
+
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let sql_result = global_state
+                .build_table_design_sql(
+                    cx,
+                    connection_id.clone(),
+                    database_name.clone(),
+                    schema_name.clone(),
+                    original.clone(),
+                    design.clone(),
+                    column_renames.clone(),
+                )
+                .await;
+
+            // 完整 CREATE TABLE 预览：新建表时与 SQL 预览相同；编辑既有表时
+            // 单独通过驱动生成完整建表 DDL。
+            let ddl_result = if original.is_some() {
+                Some(
+                    global_state
+                        .build_table_design_sql(
+                            cx,
+                            connection_id,
+                            database_name,
+                            schema_name,
+                            None,
+                            design.clone(),
+                            Vec::new(),
+                        )
+                        .await,
+                )
+            } else {
+                None
+            };
+
+            let _ = cx.update(|cx: &mut App| {
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    let _ = this.update(cx, |designer, cx| {
+                        if designer.preview_generation != generation {
+                            return;
+                        }
+                        designer.sql_preview_loading = false;
+                        if let Ok(sql) = &sql_result {
+                            if let Some(original) = &designer.original_design {
+                                if Self::sql_has_changes(sql) {
+                                    let original_order = column_order_snapshot(original);
+                                    let current_order = column_order_snapshot(&design);
+                                    tracing::warn!(
+                                        target: "table_designer_diag",
+                                        table = %design.table_name,
+                                        database_type = ?designer.config.database_type,
+                                        ?column_renames,
+                                        ?original_order,
+                                        ?current_order,
+                                        original_columns = ?original.columns,
+                                        current_columns = ?design.columns,
+                                        sql = %sql,
+                                        "[table_designer_diag] existing table preview detected diff"
+                                    );
+                                }
+                            }
+                            designer.sql_preview_input.update(cx, |state, cx| {
+                                state.set_value(sql.clone(), window, cx);
+                            });
+                            if ddl_result.is_none() {
+                                designer.ddl_preview_input.update(cx, |state, cx| {
+                                    state.set_value(sql.clone(), window, cx);
+                                });
+                            }
+                        }
+                        if let Some(Ok(ddl)) = &ddl_result {
+                            designer.ddl_preview_input.update(cx, |state, cx| {
+                                state.set_value(ddl.clone(), window, cx);
+                            });
+                        }
+                        cx.notify();
+                    });
+                });
+            });
+        })
+        .detach();
     }
 
     fn schedule_preview_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -801,6 +841,9 @@ impl TableDesigner {
         let global_state = cx.global::<GlobalDbState>().clone();
         let window_handle = window.window_handle();
 
+        self.executing = true;
+        cx.notify();
+
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = global_state
                 .execute_script(
@@ -816,6 +859,10 @@ impl TableDesigner {
             let _ = cx.update(|cx: &mut App| {
                 let _ = cx.update_window(window_handle, |_, window, cx| match &result {
                     Ok(results) => {
+                        let _ = this.update(cx, |designer, cx| {
+                            designer.executing = false;
+                            cx.notify();
+                        });
                         let has_error = results.iter().any(|r| r.is_error());
                         if has_error {
                             let error_msg = results
@@ -887,6 +934,10 @@ impl TableDesigner {
                             t!("Table.modify_failed").to_string()
                         };
                         window.push_notification(format!("{}: {}", msg, e), cx);
+                        let _ = this.update(cx, |designer, cx| {
+                            designer.executing = false;
+                            cx.notify();
+                        });
                     }
                 });
             });
@@ -907,6 +958,11 @@ impl TableDesigner {
 
         self.active_tab = DesignerTab::SqlPreview;
         self.update_previews(window, cx);
+
+        // 确认对话框打开期间先取消保存按钮的 loading，
+        // 确认执行时 execute_request 会重新置为 loading，取消则不会卡住。
+        self.executing = false;
+        cx.notify();
 
         let designer_entity = cx.entity().clone();
         window.open_dialog(cx, move |dialog, _window, _cx| {
@@ -956,6 +1012,9 @@ impl TableDesigner {
         let table_name = design.table_name.clone();
         let window_handle = window.window_handle();
 
+        self.executing = true;
+        cx.notify();
+
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let sql_result = global_state
                 .build_table_design_sql(
@@ -972,20 +1031,25 @@ impl TableDesigner {
             let _ = cx.update(|cx: &mut App| {
                 let _ = cx.update_window(window_handle, |_, window, cx| {
                     let _ = this.update(cx, |designer, cx| match sql_result {
-                        Ok(sql) if !Self::sql_has_changes(&sql) => match &success_behavior {
-                            ExecuteSuccessBehavior::StayOpen { .. } => {
-                                window.push_notification(t!("Table.no_changes").to_string(), cx);
+                        Ok(sql) if !Self::sql_has_changes(&sql) => {
+                            designer.executing = false;
+                            cx.notify();
+                            match &success_behavior {
+                                ExecuteSuccessBehavior::StayOpen { .. } => {
+                                    window
+                                        .push_notification(t!("Table.no_changes").to_string(), cx);
+                                }
+                                ExecuteSuccessBehavior::CloseTab {
+                                    tab_container,
+                                    tab_id,
+                                    ..
+                                } => {
+                                    tab_container.update(cx, |container: &mut TabContainer, cx| {
+                                        container.force_close_tab_by_id(tab_id, window, cx);
+                                    });
+                                }
                             }
-                            ExecuteSuccessBehavior::CloseTab {
-                                tab_container,
-                                tab_id,
-                                ..
-                            } => {
-                                tab_container.update(cx, |container: &mut TabContainer, cx| {
-                                    container.force_close_tab_by_id(tab_id, window, cx);
-                                });
-                            }
-                        },
+                        }
                         Ok(sql) => {
                             let request = TableDesignerExecutionRequest {
                                 connection_id,
@@ -999,6 +1063,8 @@ impl TableDesigner {
                             designer.maybe_confirm_and_execute(request, window, cx);
                         }
                         Err(error) => {
+                            designer.executing = false;
+                            cx.notify();
                             let msg = if is_new_table {
                                 t!("Table.create_failed").to_string()
                             } else {
@@ -1266,6 +1332,7 @@ impl TableDesigner {
                 Button::new("execute")
                     .small()
                     .primary()
+                    .loading(self.executing)
                     .label(t!("Common.save").to_string())
                     .on_click(cx.listener(Self::handle_execute)),
             )
@@ -1392,10 +1459,25 @@ impl TableDesigner {
             .into_any_element()
     }
 
-    fn render_sql_preview(&self, _cx: &Context<Self>) -> AnyElement {
+    fn render_sql_preview(&self, cx: &Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
             .p_4()
+            .gap_3()
+            .when(self.sql_preview_loading, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Spinner::new().with_size(Size::Small))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t!("Table.generating_sql_preview").to_string()),
+                        ),
+                )
+            })
             .child(
                 Input::new(&self.sql_preview_input)
                     .size_full()
@@ -4802,5 +4884,66 @@ mod tests {
 
         assert_eq!(items[selected_idx].info.name, "utf8mb4_custom_ci");
         assert_eq!(items[selected_idx].info.charset, "utf8mb4");
+    }
+
+    fn table_info(name: &str, schema: Option<&str>, comment: Option<&str>) -> TableInfo {
+        TableInfo {
+            name: name.into(),
+            object_type: Default::default(),
+            schema: schema.map(Into::into),
+            comment: comment.map(Into::into),
+            engine: None,
+            create_time: None,
+            charset: None,
+            collation: None,
+        }
+    }
+
+    #[test]
+    fn find_loaded_table_info_matches_schema_when_available() {
+        let found = find_loaded_table_info(
+            vec![
+                table_info("other", Some("testuser"), None),
+                table_info("demo_child", Some("testuser"), Some("demo表")),
+            ],
+            "demo_child",
+            Some("testuser"),
+        );
+        assert_eq!(found.and_then(|t| t.comment).as_deref(), Some("demo表"));
+    }
+
+    #[test]
+    fn find_loaded_table_info_rejects_schema_mismatch() {
+        let found = find_loaded_table_info(
+            vec![table_info("demo_child", Some("other_owner"), None)],
+            "demo_child",
+            Some("testuser"),
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_loaded_table_info_falls_back_to_name_when_schema_absent() {
+        // 部分驱动(如 go dbipc)不在 schema/objects 返回 owner/schema,
+        // wire 对标 None;此时应退化为按表名匹配,保证表注释能回显。
+        let found = find_loaded_table_info(
+            vec![table_info("demo_child", None, Some("demo表"))],
+            "demo_child",
+            Some("testuser"),
+        );
+        assert_eq!(found.and_then(|t| t.comment).as_deref(), Some("demo表"));
+    }
+
+    #[test]
+    fn find_loaded_table_info_matches_by_name_when_no_schema_requested() {
+        let found = find_loaded_table_info(
+            vec![
+                table_info("demo_child", Some("a"), Some("demo表")),
+                table_info("demo_child", Some("b"), None),
+            ],
+            "demo_child",
+            None,
+        );
+        assert_eq!(found.and_then(|t| t.comment).as_deref(), Some("demo表"));
     }
 }

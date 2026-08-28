@@ -63,17 +63,18 @@
 
 ### Remote access and operations
 
-- Use SSH and local terminals with draggable split panes in any direction, quick commands, history, broadcast input, shell integration, and terminal AI. Configure SSH encodings (UTF-8, GBK, Big5, Shift_JIS, and more) and terminal types to match legacy environments.
-- Lock sessions with a password, lock all active sessions at once, or hide the output of the current session.
+- Use SSH and local terminals with draggable split panes in any direction, quick commands (including execute-on-click), history, broadcast input, shell integration, and terminal AI. Configure SSH encodings (UTF-8, GBK, Big5, Shift_JIS, and more) and terminal types to match legacy environments.
+- Lock sessions with a password, lock all active sessions at once, or hide the output of the current session. Tabs can show SecureCRT-style status badges for connected, disconnected, and locked states.
 - Record sessions and replay them in a read-only timeline viewer that blocks input and online operations.
 - Duplicate tabs with automatic numbering that reuses freed numbers (e.g. `192.168.1.1` → `192.168.1.1(1)`), and tab widths adapt to content so long titles are not truncated.
-- Connect over Telnet with automatic login scripts and manual credential overrides.
+- Connect over Telnet with automatic login scripts, manual credential overrides, and configurable backspace codes.
 - Review SSH, serial, and local terminal session logs in a static history viewer with scrollback, selection, search, and TXT export.
 - Manage remote files with SFTP uploads, directory uploads, downloads, search, favorites, remote editing, drag-and-drop, and server-to-server copy; transfer files over SSH with ZMODEM.
 - Import SecureCRT sessions and quick commands, and batch-manage connections from the sidebar.
 - Create reusable local, remote (`ssh -R`), and dynamic SOCKS port-forwarding connections.
-- Confirm SSH and SFTP host-key changes with explicit fingerprint warnings, and enable legacy SSH algorithms only when a server requires them.
-- Open serial connections, monitor servers, and connect to remote desktops through installable RDP and VNC providers.
+- Confirm SSH and SFTP host-key changes with explicit fingerprint warnings, and enable legacy SSH algorithms only when a server requires them; Windows also supports Pageant authentication.
+- Forward remote X11 GUI applications to a local X server over SSH, with automatic detection of the local X11 environment (XMing on Windows, XQuartz on macOS).
+- Open serial connections, monitor servers, and connect to remote desktops through installable RDP and VNC providers. On Windows, dedicated fullscreen RDP windows open through the system Remote Desktop client (`mstsc.exe`).
 
 ### Editing, AI, and extensibility
 
@@ -185,6 +186,17 @@ Download the latest build from [GitHub Releases](https://github.com/feigeCode/na
 | Windows | x86_64 | `navop-<version>-windows-x64.msi`, `navop-<version>-windows-x64.exe`, `navop-<version>-windows-x64.zip`, `navop-<version>-windows-x64-portable.zip` |
 | Windows | x86 (32-bit) | `navop-<version>-win32.msi`, `navop-<version>-win32.exe`, `navop-<version>-win32.zip`, `navop-<version>-win32-portable.zip` |
 
+### Linux Flatpak
+
+Navop is also available from [FlatPark](https://flatpark.org/apps/dev.navop.Navop/) as a developer-endorsed community Flatpak package. Add the FlatPark remote and install Navop for the current user:
+
+```bash
+flatpak --user remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+flatpak --user install flatpark dev.navop.Navop
+```
+
+The Flatpak package runs in a sandbox, so some integrations may require additional permissions. See the [FlatPark package page](https://flatpark.org/apps/dev.navop.Navop/) for details and troubleshooting guidance.
+
 The Windows `.msi` and `.exe` are bilingual per-user installers and do not require administrator privileges when using the default location. The EXE installer wraps the same MSI installation. The standard `.zip` requires no installation but still uses the normal per-user data directories and supports remembered master-key unlock. Use `-portable.zip` only when the application data must stay beside the executable. Portable archives (Linux and Windows) ask for the master key on every start by default. You may explicitly choose in Settings to store an encrypted, automatically recoverable copy under `data/state/key_storage`, but this uses a key embedded in the application rather than device-bound protection; anyone who obtains both the application and the complete `data` directory may be able to recover the master key.
 
 > **Upgrading from the Windows ZIP in v0.10.1 or earlier:** those archives enabled portable mode. Download the new `-portable.zip`, extract it to a new directory, and copy the complete existing `data` directory into it. Extracting the new standard `.zip` to a different directory, or switching to the MSI/EXE installer, uses the normal Windows user data location and does not automatically migrate portable data. The old connections and settings may therefore appear missing even though the original portable data has not been deleted.
@@ -246,6 +258,6 @@ ER diagram rendering is based on [ferrum-flow](https://github.com/tu6ge/ferrum-f
 
 ## License
 
-Navop source code is licensed under [Apache License 2.0](LICENSE-APACHE). Navop-authored portions are additionally subject to the [Navop Supplementary License](NAVOP_LICENSE), which adds restrictions on redistribution, resale, competing products or services, and unauthorized distribution platforms. Third-party components remain subject to their own licenses.
+Navop source code is licensed under [Apache License 2.0](LICENSE-APACHE). Navop-authored portions are additionally subject to the [Navop Supplementary License](NAVOP_LICENSE), which permits free redistribution through free distribution channels (such as GitHub Releases, Flatpak repositories, and free app stores) while prohibiting commercial resale, charging fees, competing products or services, and paid distribution platforms. Third-party components remain subject to their own licenses.
 
 For licensing inquiries, contact xiaofei.hf@gmail.com.

@@ -1,4 +1,7 @@
-use super::{DetectedZmodem, ZmodemDirection, ZmodemPickerResponse, ZmodemResponder, run_transfer};
+use super::{
+    DetectedZmodem, ZmodemDirection, ZmodemPickerResponse, ZmodemResponder,
+    download::create_download_target, run_transfer,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use ssh::{ChannelEvent, ForwardRequest, PtyConfig, SshChannel};
@@ -9,30 +12,31 @@ use zmodem2::{Action, Event, FileInfo, Position, Sender};
 
 struct SenderPeerChannel {
     sender: Sender,
-    payload: Vec<u8>,
+    files: Vec<PeerFile>,
+    current_file: usize,
     pending: Vec<u8>,
     outgoing: VecDeque<Vec<u8>>,
-    session_complete: bool,
     trailing: Vec<u8>,
 }
 
+struct PeerFile {
+    name: &'static [u8],
+    payload: Vec<u8>,
+}
+
 impl SenderPeerChannel {
-    fn new(payload: Vec<u8>, trailing: Vec<u8>) -> (Self, Vec<u8>) {
+    fn new(files: Vec<PeerFile>, trailing: Vec<u8>) -> (Self, Vec<u8>) {
+        assert!(!files.is_empty());
         let mut sender = Sender::new().expect("sender");
-        sender
-            .start_file(FileInfo::new(
-                b"remote.bin",
-                Some(Position::new(payload.len() as u32)),
-            ))
-            .expect("start file");
+        start_peer_file(&mut sender, &files[0]).expect("start file");
         let initial = take_sender_wire(&mut sender);
         (
             Self {
                 sender,
-                payload,
+                files,
+                current_file: 0,
                 pending: Vec::new(),
                 outgoing: VecDeque::new(),
-                session_complete: false,
                 trailing,
             },
             initial,
@@ -41,6 +45,7 @@ impl SenderPeerChannel {
 
     fn drive(&mut self) -> Result<()> {
         let mut response = Vec::new();
+        let mut session_completed = false;
         loop {
             let mut idle = false;
             match self.sender.poll() {
@@ -51,11 +56,19 @@ impl SenderPeerChannel {
                 }
                 Action::ReadFile { offset, max_len } => {
                     let start = offset.get() as usize;
-                    let end = (start + max_len).min(self.payload.len());
-                    self.sender.submit_file(&self.payload[start..end])?;
+                    let payload = &self.files[self.current_file].payload;
+                    let end = (start + max_len).min(payload.len());
+                    self.sender.submit_file(&payload[start..end])?;
                 }
-                Action::Event(Event::FileCompleted) => self.sender.finish()?,
-                Action::Event(Event::SessionCompleted) => self.session_complete = true,
+                Action::Event(Event::FileCompleted) => {
+                    self.current_file += 1;
+                    if let Some(file) = self.files.get(self.current_file) {
+                        start_peer_file(&mut self.sender, file)?;
+                    } else {
+                        self.sender.finish()?;
+                    }
+                }
+                Action::Event(Event::SessionCompleted) => session_completed = true,
                 Action::Event(Event::Aborted) => panic!("sender aborted"),
                 Action::Event(_) => {}
                 Action::Idle => idle = true,
@@ -66,10 +79,20 @@ impl SenderPeerChannel {
                 break;
             }
         }
-        if self.session_complete && response.ends_with(b"OO") {
-            response.extend(std::mem::take(&mut self.trailing));
+        if response.ends_with(b"\r\n") {
+            replace_crlf_with_lrzsz_terminator(&mut response);
+            let parity_lf = response.pop().expect("lrzsz terminator byte");
+            self.outgoing.push_back(response);
+            self.outgoing.push_back(vec![parity_lf]);
+            return Ok(());
         }
-        if !response.is_empty() {
+        if session_completed {
+            assert!(response.ends_with(b"OO"));
+            self.outgoing.push_back(vec![b'O']);
+            let mut second = vec![b'O'];
+            second.extend(std::mem::take(&mut self.trailing));
+            self.outgoing.push_back(second);
+        } else if !response.is_empty() {
             self.outgoing.push_back(response);
         }
         Ok(())
@@ -86,6 +109,19 @@ impl SenderPeerChannel {
         self.pending.drain(..consumed);
         Ok(true)
     }
+}
+
+fn replace_crlf_with_lrzsz_terminator(bytes: &mut [u8]) {
+    let len = bytes.len();
+    bytes[len - 1] = b'\n' | 0x80;
+}
+
+fn start_peer_file(sender: &mut Sender, file: &PeerFile) -> Result<()> {
+    sender.start_file(FileInfo::new(
+        file.name,
+        Some(Position::new(file.payload.len() as u32)),
+    ))?;
+    Ok(())
 }
 
 fn take_sender_wire(sender: &mut Sender) -> Vec<u8> {
@@ -148,11 +184,37 @@ impl SshChannel for SenderPeerChannel {
 }
 
 #[tokio::test]
-async fn download_round_trip_consumes_oo_and_preserves_terminal_bytes() {
+async fn existing_download_file_uses_a_unique_name() {
     let directory = tempfile::tempdir().unwrap();
-    let payload: Vec<u8> = (0..8192).map(|index| (index % 251) as u8).collect();
+    let requested = directory.path().join("skills-lock.json");
+    tokio::fs::write(&requested, b"existing").await.unwrap();
+
+    let (path, file) = create_download_target(&requested).await.unwrap();
+
+    drop(file);
+    assert_eq!(path, directory.path().join("skills-lock (1).json"));
+    assert_eq!(tokio::fs::read(&requested).await.unwrap(), b"existing");
+}
+
+#[tokio::test]
+async fn download_round_trip_strips_lrzsz_terminator_consumes_oo_and_preserves_terminal_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_payload: Vec<u8> = (0..8192).map(|index| (index % 251) as u8).collect();
+    let second_payload = b"second payload with escaped \0\x10\x11 bytes".to_vec();
     let trailing = b"\r\nremote-shell$ ".to_vec();
-    let (mut channel, initial_wire) = SenderPeerChannel::new(payload.clone(), trailing.clone());
+    let (mut channel, initial_wire) = SenderPeerChannel::new(
+        vec![
+            PeerFile {
+                name: b"remote-one.bin",
+                payload: first_payload.clone(),
+            },
+            PeerFile {
+                name: b"remote-two.bin",
+                payload: second_payload.clone(),
+            },
+        ],
+        trailing.clone(),
+    );
     let (event_tx, mut event_rx) = unbounded_channel();
     let responder = ZmodemResponder::new(event_tx);
     let task_responder = responder.clone();
@@ -175,9 +237,17 @@ async fn download_round_trip_consumes_oo_and_preserves_terminal_bytes() {
     .unwrap();
 
     response_task.await.unwrap();
-    let downloaded = tokio::fs::read(directory.path().join("remote.bin"))
+    let downloaded = tokio::fs::read(directory.path().join("remote-one.bin"))
         .await
         .unwrap();
-    assert_eq!(downloaded, payload);
+    assert_eq!(downloaded, first_payload);
+    let downloaded = tokio::fs::read(directory.path().join("remote-two.bin"))
+        .await
+        .unwrap();
+    assert_eq!(downloaded, second_payload);
     assert_eq!(result, trailing);
+    assert!(
+        channel.outgoing.is_empty(),
+        "protocol OO must not reach the terminal"
+    );
 }

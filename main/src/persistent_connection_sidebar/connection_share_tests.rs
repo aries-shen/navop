@@ -9,6 +9,7 @@ fn ssh_connection() -> StoredConnection {
     StoredConnection::new_ssh(
         "Production SSH".to_string(),
         SshParams {
+            sftp_account: None,
             host: "ssh.example.test".to_string(),
             port: 2222,
             username: "alice".to_string(),
@@ -33,6 +34,7 @@ fn ssh_connection() -> StoredConnection {
             proxy: None,
             os_id: None,
             icon: None,
+            icon_file_path: None,
             account_expect: Default::default(),
         },
         None,
@@ -92,6 +94,7 @@ fn basic_info_omits_nested_credentials_and_embedded_private_keys() {
     let connection = StoredConnection::new_ssh(
         "Nested SSH".to_string(),
         SshParams {
+            sftp_account: None,
             host: "ssh.example.test".to_string(),
             port: 22,
             username: "alice".to_string(),
@@ -132,6 +135,7 @@ fn basic_info_omits_nested_credentials_and_embedded_private_keys() {
             }),
             os_id: None,
             icon: None,
+            icon_file_path: None,
             account_expect: Default::default(),
         },
         None,
@@ -153,6 +157,7 @@ fn full_info_keeps_credentials_but_always_redacts_embedded_private_key_contents(
     let mut connection = StoredConnection::new_ssh(
         "Sensitive SSH".to_string(),
         SshParams {
+            sftp_account: None,
             host: "ssh.example.test".to_string(),
             port: 22,
             username: "alice".to_string(),
@@ -193,6 +198,7 @@ fn full_info_keeps_credentials_but_always_redacts_embedded_private_key_contents(
             }),
             os_id: None,
             icon: None,
+            icon_file_path: None,
             account_expect: Default::default(),
         },
         Some(17),

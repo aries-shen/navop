@@ -93,17 +93,18 @@ use mouse_input::{
     should_scroll_to_bottom_on_user_input, should_start_selection_from_pending_sgr_press,
     take_whole_scroll_lines, terminal_selection_autoscroll_delta_rows,
 };
+use one_core::background_tasks::BackgroundTaskId;
 use one_core::layout::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, TOOLBAR_WIDTH};
 use one_core::sidebar_contribution::{SidebarContribution, SidebarPlacement};
 use one_core::storage::models::{ActiveConnections, StoredConnection};
 use one_core::storage::{ConnectionRepository, GlobalStorageState, traits::Repository};
 use one_core::tab_container::{TabContent, TabContentEvent, TabContentView};
 use one_ui::resize_handle::{HandlePlacement, ResizePanel, resize_handle};
+#[cfg(test)]
+use paste_safety::has_unterminated_shell_quote;
 use paste_safety::{
     UnbracketedPasteHazard, detect_unbracketed_paste_hazard, multiline_non_empty_line_count,
 };
-#[cfg(test)]
-use paste_safety::{has_trailing_line_continuation, has_unterminated_shell_quote};
 use remote_image_preview::image_from_local_path;
 use rust_i18n::t;
 use sftp::{RusshSftpClient, SftpClient};
@@ -111,6 +112,7 @@ use ssh::SshSessionManager;
 use std::ops::Deref;
 use terminal::GpuiEventProxy;
 use terminal::LocalConfig;
+use terminal::selection_text_from_term;
 use terminal::terminal::{
     ConnectionState, HostKeyVerificationDecision, SshConnectionUpdate, Terminal,
     TerminalConnectionKind, TerminalModelEvent, TerminalScrollProxy, TerminalScrollSnapshot,
@@ -122,6 +124,7 @@ use workspace_explorer::{WorkspaceEditor, WorkspaceEditorEvent};
 
 mod actions;
 mod appearance;
+mod background_tasks;
 mod clipboard;
 mod clipboard_image;
 mod close;
@@ -295,6 +298,8 @@ pub struct TerminalView {
     ssh_mfa_inputs: Vec<SshMfaInput>,
     /// 当前已打开系统选择器的 ZMODEM 请求 ID，用于去重和拒绝过期结果。
     zmodem_picker_request_id: Option<u64>,
+    /// 已桥接到全局后台任务面板、尚未收到终态的 ZMODEM 传输任务。
+    zmodem_background_tasks: HashMap<terminal::zmodem::ZmodemTransferId, BackgroundTaskId>,
     focus_terminal_after_connect: bool,
     reconnect_success_pending: bool,
 

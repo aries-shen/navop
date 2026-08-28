@@ -474,6 +474,22 @@ fn terminal_command_bar_sits_with_primary_content_and_playback_keeps_its_footer(
 }
 
 #[test]
+fn zmodem_progress_uses_only_the_global_background_task_panel() {
+    let view_source = include_str!("../../view.rs");
+    let render_source = include_str!("../render_layout.rs");
+    let event_source = include_str!("../terminal_events.rs");
+    let background_task_source = include_str!("../background_tasks.rs");
+
+    assert!(!view_source.contains("mod zmodem_progress;"));
+    assert!(!render_source.contains("render_zmodem_progress"));
+    assert!(event_source.contains("self.sync_zmodem_background_task(None, cx);"));
+    assert!(event_source.contains("self.sync_zmodem_background_task(Some(progress.clone()), cx);"));
+    assert!(event_source.contains("self.finish_zmodem_background_task("));
+    assert!(event_source.contains("progress.clone(),"));
+    assert!(background_task_source.contains(r#"BackgroundTaskSpec::new("zmodem-transfer""#));
+}
+
+#[test]
 fn terminal_ui_does_not_expose_the_internal_operation_audit() {
     let view_source = include_str!("../../view.rs");
     let initialization_source = include_str!("../initialization.rs");

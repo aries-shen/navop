@@ -4,6 +4,154 @@ Navop user-facing release notes. Generate and review each bilingual version entr
 
 <!-- NAVOP_RELEASES -->
 
+## [v0.13.0] - 2026-08-28
+
+### 中文
+
+#### 更新内容
+
+- SQL 编辑器大幅增强：支持函数签名提示、行内内联小组件与编辑器生命周期管理；多语句执行、`@set` 变量、IN 列表与 INSERT 子句智能提示、通配符补全；执行错误映射到准确源码位置，配合来源映射便于定位问题。
+- 终端新增运行时 SSH Shell 集成：无需写入远端即可实时感知提示符、命令开始/结束与当前目录，为自动化执行与脚本提示提供基础。
+- 后台任务能力升级：文件操作支持按标签页分组显示；SFTP 传输、远程删除等转移为全局后台任务；终端与后台任务面板新增传输进度展示。
+- 连接树自动隐藏模式优化：点击设置、扩展、AI 工作台等非连接区域时自动收起连接树；同时支持将连接树固定为常驻侧栏。
+- 连接支持自定义 SSH 图标。
+- MCP 审批等待时间可配置，超时后返回 `approval_timeout`。
+- AI 工具调用默认改为「手动确认」模式：模型请求业务工具前需用户确认，降低误操作风险。
+- 刷新内置模型目录，接入最新模型列表。
+- 会话日志支持删除操作。
+
+#### 修复与优化
+
+- 修复 zmodem 上传/下载的传输竞态、任务生命周期与帧解析问题，进度更新更准确且不冲突。
+- 修复终端大段粘贴导致 SSH 超时的问题。
+- 修复 Redis 空用户名存储为 null 导致默认用户认证超时的问题。
+- 修复数据库表/对象树未按字母排序的问题，子节点排序更稳定。
+- 修复带注释的 DDL 导出：补充主键、表/列注释的导出，并在驱动仅返回注释时回退到 DDL 构建器。
+- 修复真 schema 驱动在表导出时错误附加数据库限定名的问题。
+- 修复后台任务进度完成时未固定到 100% 的问题；进度条默认使用主题主色。
+- 修复连接树浮层滚动事件传播到标签内容的问题。
+- 修复文件管理器面包屑标签过长时未截断的问题。
+- 后台任务展示由浮层改为独立对话框，信息更完整。
+- 转发窗口表单高度调整，避免内容挤压。
+
+---
+
+### English
+
+#### What's New
+
+- Major SQL editor upgrade: function signature hints, inline widgets and editor lifecycle management; multi-statement execution, `@set` variables, IN-list and INSERT-clause smart completion, and wildcard completion; execution errors now map to precise source locations for easier troubleshooting.
+- The terminal gains runtime SSH shell integration: prompts, command start/end, and the current directory are sensed in real time without any writes to the remote host, laying the groundwork for automation and script hints.
+- Background task capabilities improved: file operations can be grouped by tab; SFTP transfers and remote deletes move to global background tasks; transfer progress is shown in the terminal and the background task panel.
+- Connection tree auto-hide mode refined: clicking non-connection areas such as Settings, Extensions, or the AI Workbench now collapses the tree automatically; the tree can also be pinned as a fixed sidebar.
+- Connections support custom SSH icons.
+- MCP approval wait time is configurable and returns `approval_timeout` when it expires.
+- AI tool calls now default to manual confirmation: the user confirms before the model runs business tools, reducing the risk of accidental operations.
+- Refreshed the built-in model catalog with the latest model list.
+- Session logs support deletion.
+
+#### Fixes and Improvements
+
+- Fixed zmodem upload/download transfer races, task lifecycle, and frame parsing issues; progress updates are more accurate and no longer collide.
+- Fixed SSH timeouts caused by large terminal pastes.
+- Fixed Redis storing an empty username as null, which caused default-user auth timeouts.
+- Fixed database table/object tree children not sorted alphabetically.
+- Fixed DDL export for commented objects: PRIMARY KEY and table/column comments are now exported, with a fallback to the DDL builder when a driver returns only comments.
+- Fixed true-schema drivers incorrectly appending a database qualifier during table export.
+- Fixed background task progress not pinning to 100% when complete; the progress bar now uses the theme primary color by default.
+- Fixed scroll events from the floating connection tree propagating into tab content.
+- Fixed file manager breadcrumb labels not truncating when too long.
+- Background tasks now show in a dedicated dialog instead of a popover for a fuller view.
+- Adjusted the forwarding window form height to avoid content squeezing.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.12.1...v0.13.0
+
+## [v0.12.1] - 2026-08-26
+
+### 中文
+
+#### 更新内容
+
+- SSH 连接支持为 SFTP 单独配置一套账户：在连接表单新增「SFTP 账户」页签，可启用独立 SFTP 用户名/密码；启用后 SFTP 传输、远程文件浏览与远程文件编辑使用该账户连接远端，SSH 终端仍使用主账户，未配置时 SFTP 与 SSH 共用一套凭据。
+- SFTP 文件浏览的面包屑导航优化了最小宽度处理：根目录标签不再强制保留额外宽度，窄窗口下路径显示更紧凑。
+- 连接树新增「自动隐藏」开关（默认开启）：开启时连接树以浮层显示，双击打开会话后自动收起、不再遮挡终端；关闭后连接树改为与终端并排固定的分割面板，保持展开，方便持续浏览连接列表。
+
+#### 修复与优化
+
+- 修复终端粘贴误拦截：粘贴带行尾反斜杠续行的多行命令（如多行 wget/curl）不再被当作「不安全的多行粘贴」硬拦截，改为走普通多行粘贴确认；对 heredoc、未闭合引号等高风险粘贴，提示框新增「仍然粘贴」按钮，可在确认后继续粘贴。
+- 修复从终端复制表格内容时列对齐丢失的问题，复制结果保留原始列间距。
+- 修复 RDP 连接测试（IronRDP 路径）依赖完整 RDP/TLS/NLA 认证的问题：改为 TCP 可达性探测（支持直连与代理），无需账号凭据也能快速反馈目标主机是否可达。
+- 修复 Windows 下 RDP 重连时选择重连方式的仲裁对话框被自动隐藏/中断的问题，保持对话框可见直至用户选择。
+- 修复从对象页签（对象树）双击打开 MySQL 表数据时数据库名为空、报 "Incorrect database name"（ERROR 42000）的问题。
+- 修复查询结果编辑时带引号表名（反引号、双引号、方括号等）被二次加引号、导致 INSERT/UPDATE/DELETE 语句异常的问题。
+- 修复导入数据库连接后在新连接表单中编辑并保存时误按「更新已有连接」处理的问题：现在保存为全新连接。
+
+---
+
+### English
+
+#### What's New
+
+- SSH connections can now use a separate SFTP account: a new "SFTP Account" tab in the connection form lets you enable an independent SFTP username/password. When enabled, SFTP transfers, remote file browsing, and remote file editing connect with that account while the SSH terminal keeps using the main account; when unset, SFTP and SSH share the same credentials.
+- The SFTP file browser breadcrumb now handles minimum widths more smartly: the root label no longer reserves extra width, keeping the path compact in narrow windows.
+- The connection tree gains an auto-hide toggle (enabled by default): when on, the tree shows as a floating overlay and collapses automatically after you open a session so it never covers the terminal; when off, the tree renders as a fixed split panel docked beside the terminal and stays expanded for continuous browsing.
+
+#### Fixes and Improvements
+
+- Fixed terminal paste blocking: multi-line commands with trailing backslash line continuations (e.g., multi-line wget/curl) are no longer hard-blocked as "unsafe multi-line paste" and now use the normal multi-line paste confirmation; the unsafe-paste warning for heredoc and unterminated quotes now offers a "Paste Anyway" button so you can proceed after confirming.
+- Fixed copying table output from the terminal losing column alignment; copied text now keeps the original column spacing.
+- Fixed the RDP connection test (IronRDP path) depending on full RDP/TLS/NLA authentication: it now performs a TCP reachability probe (direct or proxy-aware) and reports whether the target host is reachable without needing account credentials.
+- Fixed the reconnect arbitration dialog on Windows RDP being dismissed/interrupted on reconnect; it now stays visible until you choose.
+- Fixed opening a MySQL table from the object tab failing with "Incorrect database name" (ERROR 42000) when the database metadata was empty.
+- Fixed editable result sets mis-handling quoted table names (backticks, double quotes, brackets): generated INSERT/UPDATE/DELETE statements no longer double-quote the table name.
+- Fixed saving an edited database draft imported into the new-connection form treating it as an update to an existing connection; it now saves as a brand-new connection.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.12.0...v0.12.1
+
+## [v0.12.0] - 2026-08-25
+
+### 中文
+
+#### 更新内容
+
+- 扩展市场新增更新提醒：应用启动后在后台检查扩展市场，与已安装的插件版本对比，发现新版本时弹出通知，并可直接跳转到扩展市场查看更新；同一批更新仅提醒一次，确认后不再重复打扰。
+- 离线安装包下载窗口现在展示全部下载渠道：扩展市场、GitHub Releases 与国内扩展下载镜像，每个渠道都支持复制地址与一键打开。
+- 连接树改为浮动面板：展开连接树时不再挤压或推动终端与标签栏，点击连接也不会误收起侧栏；展开/收起按钮在窗口控件下不再跳动。
+
+#### 修复与优化
+
+- 表设计器 SQL 预览改为通过数据库驱动异步生成，与保存共用同一路径：方言级 DDL（如 COMMENT ON）由数据库插件生成而非宿主内置，修复 DM、金仓（Kingbase）等表/列注释修改时预览为空白或「没有需要变更的语句」的问题。
+- 表设计器打开时正确回显表注释：通过 IPC 传递 Schema 匹配已加载的表，驱动未返回 Schema 时按表名兜底匹配。
+- 表设计器 SQL 预览与保存增加加载状态：预览生成期间显示进度条，保存期间禁用保存按钮。
+- 修复 Oracle 在对象页签右键「设计表」无法打开的问题：对象树节点 ID 统一从父节点派生，与左侧树保持一致。
+- 修复多显示器场景下弹窗位置错误：新建连接、导入、设置、更新等弹窗现在会出现在当前活动窗口所在的屏幕。
+- 修复数据比较中 JSON 字段控制字符显示不一致的问题：比较面板不再将 `\r\n` 显示为自动换行的多行文本，与查询面板保持一致。
+- 修复 Moonshot Kimi 系列模型（kimi-k2 等）调用报错的问题：强制使用模型要求的 temperature=1。
+- 授权协议调整：允许免费渠道分发 Navop，禁止商业转售。
+
+---
+
+### English
+
+#### What's New
+
+- Extension marketplace update notifications: Navop now checks the extension marketplace in the background on startup, compares it with installed plugin versions, and shows a notification when updates are available, with a direct link to view them in the marketplace; each batch of updates is announced only once.
+- The offline package download dialog now lists all download channels: the extension marketplace, GitHub Releases, and the domestic mirror, each with copy-address and open buttons.
+- The connection tree is now a floating panel: expanding it no longer squeezes or pushes the terminal/tab bar, clicking a connection no longer accidentally collapses the sidebar, and the expand/collapse toggle no longer jumps under the window controls.
+
+#### Fixes and Improvements
+
+- Table designer SQL preview is now generated asynchronously by the database driver, sharing the same code path as saving: dialect-specific DDL such as `COMMENT ON` is produced by the IPC plugin instead of a host-local builder, fixing blank or "no changes detected" previews when editing table/column comments on DM, Kingbase, and others.
+- The table designer now echoes the table comment on load by plumbing the schema through IPC, falling back to matching by table name when a driver does not report a schema.
+- Table designer SQL preview and save now show loading states: a spinner while the preview is generated and a disabled save button while DDL is built and executed.
+- Fixed "Design Table" from the object tab for Oracle by deriving object tree node IDs from their parent node so they match the left-side tree.
+- Fixed popup placement on multi-monitor setups: dialogs such as New Connection, Import, Settings, and Update now appear on the screen of the active window.
+- Fixed inconsistent JSON control-character rendering in data comparison, so `\r\n` no longer wraps into multi-line text and now matches the query panel.
+- Fixed invocation errors with Moonshot Kimi models (kimi-k2 and newer) by forcing the model-required `temperature=1`.
+- License update: free distribution channels are permitted; commercial resale is prohibited.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.11.0...v0.12.0
+
 ## [v0.11.0] - 2026-08-24
 
 ### 中文

@@ -267,6 +267,7 @@ fn repo() -> Arc<ConnectionRepository> {
 
 fn ssh_params() -> SshParams {
     SshParams {
+        sftp_account: None,
         host: "127.0.0.1".to_string(),
         port: 22,
         username: "app".to_string(),
@@ -289,6 +290,7 @@ fn ssh_params() -> SshParams {
         proxy: None,
         os_id: None,
         icon: None,
+        icon_file_path: None,
         account_expect: Default::default(),
     }
 }

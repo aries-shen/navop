@@ -921,6 +921,7 @@ mod tests {
 
     fn ssh_params(host: &str) -> SshParams {
         SshParams {
+            sftp_account: None,
             host: host.to_string(),
             port: 22,
             username: "root".to_string(),
@@ -943,6 +944,7 @@ mod tests {
             proxy: None,
             os_id: None,
             icon: None,
+            icon_file_path: None,
             account_expect: Default::default(),
         }
     }

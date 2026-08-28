@@ -11,8 +11,8 @@ use connection_form::team::{
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, AsyncApp, ColorExt as _, Context, Div, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px, relative,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, Size, WindowExt,
@@ -25,6 +25,7 @@ use gpui_component::{
     scroll::ScrollableElement,
     select::{Select, SelectItem, SelectState},
     tab::{Tab, TabBar},
+    tooltip::Tooltip,
     v_flex,
 };
 use one_core::cloud_sync::TeamOption;
@@ -32,9 +33,9 @@ use one_core::connection_notifier::{ConnectionDataEvent, get_notifier};
 use one_core::gpui_tokio::Tokio;
 use one_core::storage::traits::Repository;
 use one_core::storage::{
-    JumpServerConfig, ProxyConfig, ProxyType as StorageProxyType, SSH_ICON_IDS, SshAccountExpect,
-    SshAuthMethod, SshParams, StoredConnection, StoredTerminalEncoding, StoredTerminalType,
-    Workspace, ssh_os_icon,
+    JumpServerConfig, ProxyConfig, ProxyType as StorageProxyType, SSH_ICON_IDS, SftpAccount,
+    SshAccountExpect, SshAuthMethod, SshParams, StoredConnection, StoredTerminalEncoding,
+    StoredTerminalType, Workspace, ssh_os_icon,
 };
 use rust_i18n::t;
 use ssh::{
@@ -216,6 +217,11 @@ pub struct SshFormWindow {
     jump_mfa_inputs: Vec<JumpMfaInput>,
     jump_mfa_signature: Option<String>,
 
+    // 独立 SFTP 账户设置
+    sftp_account_use_custom: bool,
+    sftp_username_input: Entity<InputState>,
+    sftp_password_input: Entity<InputState>,
+
     // 代理设置
     enable_proxy: bool,
     proxy_type: ProxyTypeSelection,
@@ -243,12 +249,11 @@ pub struct SshFormWindow {
     detected_os_id: Option<String>,
     /// 手动指定的连接图标 ID（None = 自动跟随探测结果）
     manual_icon: Option<String>,
+    /// 本机自定义连接图标路径（优先于内置图标）
+    custom_icon_file_path: Option<String>,
 
     // 云同步开关
     sync_enabled: bool,
-
-    // 关闭 shell integration 注入(走裸 request_shell,失去 OSC 集成)
-    disable_shell_integration: bool,
 
     // 启用 X11 转发(需要本机有可用 X server,如 macOS 的 XQuartz)
     x11_forwarding: bool,
@@ -573,6 +578,15 @@ impl SshFormWindow {
                 .masked(true)
         });
 
+        // 独立 SFTP 账户设置
+        let sftp_username_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("SSH.username_placeholder")));
+        let sftp_password_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("SSH.password_placeholder"))
+                .masked(true)
+        });
+
         // 代理设置
         let proxy_host_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(t!("SSH.proxy_host")));
@@ -666,11 +680,12 @@ impl SshFormWindow {
         let mut enable_proxy = false;
         let mut proxy_type = ProxyTypeSelection::default();
         let mut sync_enabled = true; // 默认启用云同步
-        let mut disable_shell_integration = false;
         let mut x11_forwarding = false;
         let mut allow_legacy_algorithms = false;
+        let mut sftp_account_use_custom = false;
         let mut detected_os_id: Option<String> = None;
         let mut manual_icon: Option<String> = None;
+        let mut custom_icon_file_path: Option<String> = None;
         let mut credential_reference = None;
         let mut jump_credential_reference = None;
         let mut proxy_credential_reference = None;
@@ -686,6 +701,7 @@ impl SshFormWindow {
                 keyboard_interactive = params.keyboard_interactive_enabled();
                 detected_os_id = params.os_id.clone();
                 manual_icon = params.icon.clone();
+                custom_icon_file_path = params.icon_file_path.clone();
                 name_input.update(cx, |s, cx| s.set_value(&conn.name, window, cx));
                 host_input.update(cx, |s, cx| s.set_value(&params.host, window, cx));
                 port_input.update(cx, |s, cx| {
@@ -751,7 +767,6 @@ impl SshFormWindow {
                 if let Some(ref script) = params.init_script {
                     init_script_input.update(cx, |s, cx| s.set_value(script, window, cx));
                 }
-                disable_shell_integration = params.disable_shell_integration.unwrap_or(false);
                 x11_forwarding = params.x11_forwarding.unwrap_or(false);
                 allow_legacy_algorithms = params.allow_legacy_algorithms.unwrap_or(false);
                 terminal_encoding_select.update(cx, |select, cx| {
@@ -809,6 +824,15 @@ impl SshFormWindow {
                             jump_auth_method = AuthMethodSelection::AutoPublicKey;
                         }
                     }
+                }
+
+                // 加载独立 SFTP 账户设置
+                if let Some(ref sftp_account) = params.sftp_account {
+                    sftp_account_use_custom = true;
+                    sftp_username_input
+                        .update(cx, |s, cx| s.set_value(&sftp_account.username, window, cx));
+                    sftp_password_input
+                        .update(cx, |s, cx| s.set_value(&sftp_account.password, window, cx));
                 }
 
                 // 加载代理设置
@@ -923,6 +947,9 @@ impl SshFormWindow {
             jump_mfa_request: None,
             jump_mfa_inputs: Vec::new(),
             jump_mfa_signature: None,
+            sftp_account_use_custom,
+            sftp_username_input,
+            sftp_password_input,
             enable_proxy,
             proxy_type,
             proxy_host_input,
@@ -940,8 +967,8 @@ impl SshFormWindow {
             last_tested_signature: None,
             detected_os_id,
             manual_icon,
+            custom_icon_file_path,
             sync_enabled,
-            disable_shell_integration,
             x11_forwarding,
             is_testing: false,
             is_uninstalling_shell_integration: false,
@@ -1158,7 +1185,24 @@ impl SshFormWindow {
             None
         };
 
+        // 独立 SFTP 账户：仅在启用且至少填了一项凭据时生效，否则回退到主账户
+        let sftp_account = if self.sftp_account_use_custom {
+            let sftp_username = self.sftp_username_input.read(cx).text().to_string();
+            let sftp_password = self.sftp_password_input.read(cx).text().to_string();
+            if sftp_username.trim().is_empty() && sftp_password.is_empty() {
+                None
+            } else {
+                Some(SftpAccount {
+                    username: sftp_username,
+                    password: sftp_password,
+                })
+            }
+        } else {
+            None
+        };
+
         Some(SshParams {
+            sftp_account,
             host,
             port,
             username,
@@ -1187,11 +1231,7 @@ impl SshFormWindow {
             keepalive_max,
             default_directory,
             init_script,
-            disable_shell_integration: if self.disable_shell_integration {
-                Some(true)
-            } else {
-                None
-            },
+            disable_shell_integration: None,
             x11_forwarding: if self.x11_forwarding {
                 Some(true)
             } else {
@@ -1206,6 +1246,7 @@ impl SshFormWindow {
             proxy,
             os_id: self.detected_os_id.clone(),
             icon: self.manual_icon.clone(),
+            icon_file_path: self.custom_icon_file_path.clone(),
             account_expect: SshAccountExpect::default(),
         })
     }
@@ -1817,93 +1858,170 @@ impl SshFormWindow {
         Input::new(input).w_full()
     }
 
-    /// 渲染连接图标选择器：自动（跟随测试连接探测结果）或手动固定图标。
-    fn render_icon_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().border;
-        let list_active = cx.theme().list_active;
-        let list_active_border = cx.theme().list_active_border;
-        let list_hover = cx.theme().list_hover;
+    fn prompt_for_custom_icon(&mut self, cx: &mut Context<Self>) {
+        let future = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(t!("SSH.icon_select_file").to_string().into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = future.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.custom_icon_file_path = Some(path.to_string_lossy().into_owned());
+                this.manual_icon = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_icon_selection_indicator(
+        &self,
+        id: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let indicator_background = cx.theme().button_primary;
         let indicator_foreground = cx.theme().button_primary_foreground;
 
-        let tile = |id: &str, selected: bool, icon: Option<IconName>| {
-            let id_string = (!id.is_empty()).then(|| id.to_string());
-            let tile_id = format!("ssh-icon-{}", if id.is_empty() { "auto" } else { id });
-            let tile_selector = tile_id.clone();
-            let mut tile = div()
-                .id(SharedString::from(tile_id.clone()))
-                .debug_selector(move || tile_selector.clone())
-                .w(px(36.0))
-                .h(px(36.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .relative()
-                .cursor_pointer();
-            if selected {
-                tile = tile
-                    .border_2()
-                    .border_color(list_active_border)
-                    .bg(list_active);
-            } else {
-                tile = tile
-                    .border_1()
-                    .border_color(border)
-                    .hover(|style| style.bg(list_hover));
-            }
+        div()
+            .id(SharedString::from(id.clone()))
+            .debug_selector(move || id.clone())
+            .absolute()
+            .top(px(-5.0))
+            .right(px(-5.0))
+            .size(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(indicator_background)
+            .border_1()
+            .border_color(indicator_foreground)
+            .child(
+                Icon::new(IconName::Check)
+                    .with_size(px(9.0))
+                    .text_color(indicator_foreground),
+            )
+    }
 
-            let tile = match icon {
-                Some(icon) => tile.child(icon.color().with_size(px(22.0))),
-                None => tile.child(
+    fn render_builtin_icon_tile(
+        &self,
+        id: &str,
+        selected: bool,
+        icon: Option<IconName>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id_string = (!id.is_empty()).then(|| id.to_string());
+        let tile_id = format!("ssh-icon-{}", if id.is_empty() { "auto" } else { id });
+        let tile_selector = tile_id.clone();
+        div()
+            .id(SharedString::from(tile_id.clone()))
+            .debug_selector(move || tile_selector.clone())
+            .w(px(36.0))
+            .h(px(36.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .relative()
+            .cursor_pointer()
+            .when(selected, |tile| {
+                tile.border_2()
+                    .border_color(cx.theme().list_active_border)
+                    .bg(cx.theme().list_active)
+            })
+            .when(!selected, |tile| {
+                tile.border_1()
+                    .border_color(cx.theme().border)
+                    .hover(|style| style.bg(cx.theme().list_hover))
+            })
+            .when_some(icon, |tile, icon| {
+                tile.child(icon.color().with_size(px(22.0)))
+            })
+            .when(icon.is_none(), |tile| {
+                tile.child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(t!("SSH.icon_auto").to_string()),
-                ),
-            };
-
-            tile.when(selected, move |tile| {
-                let indicator_id = format!("{tile_id}-selected");
-                tile.child(
-                    div()
-                        .id(SharedString::from(indicator_id.clone()))
-                        .debug_selector(move || indicator_id.clone())
-                        .absolute()
-                        .top(px(-5.0))
-                        .right(px(-5.0))
-                        .size(px(14.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(indicator_background)
-                        .border_1()
-                        .border_color(indicator_foreground)
-                        .child(
-                            Icon::new(IconName::Check)
-                                .with_size(px(9.0))
-                                .text_color(indicator_foreground),
-                        ),
                 )
+            })
+            .when(selected, |tile| {
+                tile.child(self.render_icon_selection_indicator(format!("{tile_id}-selected"), cx))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.manual_icon = id_string.clone();
+                this.custom_icon_file_path = None;
                 cx.notify();
             }))
-        };
+    }
 
+    fn render_custom_icon_tile(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.custom_icon_file_path.is_some();
+        let icon = self
+            .custom_icon_file_path
+            .as_ref()
+            .map(|path| Icon::default().file_path(path).color().with_size(px(22.0)))
+            .unwrap_or_else(|| Icon::new(IconName::Upload).with_size(px(18.0)));
+
+        div()
+            .id("ssh-icon-local")
+            .debug_selector(|| "ssh-icon-local".to_string())
+            .w(px(36.0))
+            .h(px(36.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .relative()
+            .cursor_pointer()
+            .when(selected, |tile| {
+                tile.border_2()
+                    .border_color(cx.theme().list_active_border)
+                    .bg(cx.theme().list_active)
+                    .child(
+                        self.render_icon_selection_indicator(
+                            "ssh-icon-local-selected".to_string(),
+                            cx,
+                        ),
+                    )
+            })
+            .when(!selected, |tile| {
+                tile.border_1()
+                    .border_color(cx.theme().border)
+                    .hover(|style| style.bg(cx.theme().list_hover))
+            })
+            .child(icon)
+            .tooltip(|window, cx| Tooltip::new(t!("SSH.icon_local").to_string()).build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.prompt_for_custom_icon(cx);
+            }))
+    }
+
+    /// 渲染连接图标选择器：自动、内置图标或本地图片。
+    fn render_icon_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = h_flex().gap_2().flex_wrap().items_center();
-        // 自动：跟随测试连接探测到的系统图标（未探测到时为默认企鹅）
-        row = row.child(tile("", self.manual_icon.is_none(), None));
+        row = row.child(self.render_builtin_icon_tile(
+            "",
+            self.manual_icon.is_none() && self.custom_icon_file_path.is_none(),
+            None,
+            cx,
+        ));
         for id in SSH_ICON_IDS {
-            row = row.child(tile(
+            row = row.child(self.render_builtin_icon_tile(
                 id,
-                self.manual_icon.as_deref() == Some(*id),
+                self.custom_icon_file_path.is_none() && self.manual_icon.as_deref() == Some(*id),
                 Some(ssh_os_icon(Some(id))),
+                cx,
             ));
         }
-        row.child(
+        row.child(self.render_custom_icon_tile(cx)).child(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
@@ -2244,34 +2362,6 @@ impl SshFormWindow {
             )
             .child(
                 self.render_form_row(
-                    &t!("SSH.disable_shell_integration"),
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_start()
-                        .child(
-                            div().flex_shrink_0().child(
-                                Checkbox::new("disable-shell-integration")
-                                    .checked(self.disable_shell_integration)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.disable_shell_integration =
-                                            !this.disable_shell_integration;
-                                        cx.notify();
-                                    })),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(t!("SSH.disable_shell_integration_desc").to_string()),
-                        ),
-                ),
-            )
-            .child(
-                self.render_form_row(
                     &t!("SSH.x11_forwarding"),
                     h_flex()
                         .w_full()
@@ -2311,36 +2401,60 @@ impl SshFormWindow {
                 ),
             )
             .child(
-                self.render_form_row(
-                    &t!("SSH.remote_shell_integration"),
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            h_flex().gap_2().child(
-                                Button::new("uninstall-shell-integration")
-                                    .icon(IconName::Remove)
-                                    .danger()
-                                    .small()
-                                    .label(if self.is_uninstalling_shell_integration {
-                                        t!("SSH.uninstalling_shell_integration").to_string()
-                                    } else {
-                                        t!("SSH.uninstall_shell_integration").to_string()
-                                    })
-                                    .disabled(
-                                        self.is_testing || self.is_uninstalling_shell_integration,
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.on_uninstall_shell_integration(window, cx);
-                                    })),
+                // 说明性区块不占表单 label 列，通栏卡片避免长标题挤压换行。
+                div()
+                    .id("ssh-shell-integration-card")
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .px_3()
+                    .py_2p5()
+                    .rounded_md()
+                    .bg(cx.theme().muted)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .pt(px(1.0))
+                            .child(IconName::Info.color().with_size(px(14.0))),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(t!("SSH.remote_shell_integration").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .line_height(relative(1.5))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(t!("SSH.uninstall_shell_integration_desc").to_string()),
                             ),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(t!("SSH.uninstall_shell_integration_desc").to_string()),
+                    )
+                    .child(
+                        div().flex_shrink_0().child(
+                            Button::new("uninstall-shell-integration")
+                                .icon(IconName::Remove)
+                                .ghost()
+                                .small()
+                                .label(if self.is_uninstalling_shell_integration {
+                                    t!("SSH.uninstalling_shell_integration").to_string()
+                                } else {
+                                    t!("SSH.uninstall_shell_integration").to_string()
+                                })
+                                .disabled(
+                                    self.is_testing || self.is_uninstalling_shell_integration,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_uninstall_shell_integration(window, cx);
+                                })),
                         ),
-                ),
+                    ),
             )
     }
 
@@ -2579,6 +2693,56 @@ impl SshFormWindow {
                             })),
                     )
                 })
+            })
+    }
+
+    /// 渲染独立 SFTP 账户标签页
+    fn render_sftp_account_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let use_custom = self.sftp_account_use_custom;
+
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                self.render_form_row(
+                    &t!("SSH.sftp_account"),
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_start()
+                        .child(
+                            div().flex_shrink_0().child(
+                                Checkbox::new("enable-sftp-account")
+                                    .checked(use_custom)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sftp_account_use_custom =
+                                            !this.sftp_account_use_custom;
+                                        cx.notify();
+                                    })),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t!("SSH.sftp_account_desc").to_string()),
+                        ),
+                ),
+            )
+            .when(use_custom, |this| {
+                this.child(self.render_form_row(
+                    &t!("SSH.sftp_username"),
+                    self.render_form_input(&self.sftp_username_input),
+                ))
+                .child(
+                    self.render_form_row(
+                        &t!("SSH.sftp_password"),
+                        self.render_form_input(&self.sftp_password_input)
+                            .mask_toggle(),
+                    ),
+                )
             })
     }
 
@@ -2821,6 +2985,7 @@ impl Render for SshFormWindow {
                         .child(Tab::new().label(t!("SSH.tab_basic").to_string()))
                         .child(Tab::new().label(t!("SSH.tab_init").to_string()))
                         .child(Tab::new().label(t!("SSH.tab_jump_server").to_string()))
+                        .child(Tab::new().label(t!("SSH.tab_sftp_account").to_string()))
                         .child(Tab::new().label(t!("SSH.tab_proxy").to_string()))
                         .child(Tab::new().label(t!("SSH.tab_advanced").to_string()))
                         .child(Tab::new().label(t!("SSH.tab_other").to_string())),
@@ -2840,9 +3005,10 @@ impl Render for SshFormWindow {
                             0 => self.render_basic_tab(cx).into_any_element(),
                             1 => self.render_init_tab(cx).into_any_element(),
                             2 => self.render_jump_server_tab(cx).into_any_element(),
-                            3 => self.render_proxy_tab(cx).into_any_element(),
-                            4 => self.render_advanced_tab(cx).into_any_element(),
-                            5 => self.render_other_tab().into_any_element(),
+                            3 => self.render_sftp_account_tab(cx).into_any_element(),
+                            4 => self.render_proxy_tab(cx).into_any_element(),
+                            5 => self.render_advanced_tab(cx).into_any_element(),
+                            6 => self.render_other_tab().into_any_element(),
                             _ => div().into_any_element(),
                         },
                     )),
@@ -2926,7 +3092,8 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use one_core::settings::AppSettings;
     use one_core::storage::{
-        SshAuthMethod, SshParams, StoredConnection, StoredTerminalEncoding, StoredTerminalType,
+        SftpAccount, SshAuthMethod, SshParams, StoredConnection, StoredTerminalEncoding,
+        StoredTerminalType,
     };
     use rust_i18n::t;
     use ssh::{HostKeyDetails, HostKeyIdentity, HostKeyRejection, HostKeyRoute};
@@ -2935,6 +3102,7 @@ mod tests {
 
     fn sample_params() -> SshParams {
         SshParams {
+            sftp_account: None,
             host: "127.0.0.1".to_string(),
             port: 22,
             username: "root".to_string(),
@@ -2955,6 +3123,7 @@ mod tests {
             proxy: None,
             os_id: None,
             icon: None,
+            icon_file_path: None,
             x11_forwarding: None,
             allow_legacy_algorithms: None,
             account_expect: Default::default(),
@@ -3176,6 +3345,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn ssh_form_loads_and_builds_separate_sftp_account(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(AppSettings::default());
+            gpui_component::init(cx);
+        });
+        let mut params = sample_params();
+        params.sftp_account = Some(SftpAccount {
+            username: "sftp-user".to_string(),
+            password: "sftp-secret".to_string(),
+        });
+        let initial_connection =
+            StoredConnection::new_ssh("sftp-account".to_string(), params, None);
+        let (form, cx) = cx.add_window_view(|window, cx| {
+            super::SshFormWindow::new(
+                super::SshFormWindowConfig {
+                    editing_connection: None,
+                    initial_connection: Some(initial_connection),
+                    on_saved: None,
+                    workspaces: Vec::new(),
+                    teams: Vec::new(),
+                },
+                window,
+                cx,
+            )
+        });
+
+        form.read_with(cx, |form, _| {
+            assert!(form.sftp_account_use_custom);
+        });
+        let built = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("预填独立 SFTP 账户的表单应能构建参数");
+        assert_eq!(
+            built.sftp_account,
+            Some(SftpAccount {
+                username: "sftp-user".to_string(),
+                password: "sftp-secret".to_string(),
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn ssh_form_without_sftp_account_shares_ssh_credentials(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(AppSettings::default());
+            gpui_component::init(cx);
+        });
+        let (form, cx) = cx.add_window_view(|window, cx| {
+            let mut form = super::SshFormWindow::new(
+                super::SshFormWindowConfig {
+                    editing_connection: None,
+                    initial_connection: None,
+                    on_saved: None,
+                    workspaces: Vec::new(),
+                    teams: Vec::new(),
+                },
+                window,
+                cx,
+            );
+            form.host_input
+                .update(cx, |state, cx| state.set_value("share.example", window, cx));
+            form.username_input
+                .update(cx, |state, cx| state.set_value("main-user", window, cx));
+            form
+        });
+
+        form.read_with(cx, |form, _| {
+            assert!(!form.sftp_account_use_custom);
+        });
+        let built = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("未启用独立 SFTP 账户时应能构建参数");
+        assert_eq!(built.sftp_account, None);
+    }
+
+    #[gpui::test]
     fn ssh_form_does_not_prompt_for_password_with_non_password_auth(cx: &mut TestAppContext) {
         cx.update(|cx| {
             cx.set_global(AppSettings::default());
@@ -3288,6 +3533,53 @@ mod tests {
             cx.debug_bounds("ssh-icon-ubuntu-selected").is_some(),
             "the selected icon should render an unambiguous selection indicator"
         );
+    }
+
+    #[gpui::test]
+    fn ssh_form_preserves_custom_icon_path_and_builtin_selection_clears_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(AppSettings::default());
+            gpui_component::init(cx);
+        });
+        let mut params = sample_params();
+        params.icon_file_path = Some("/tmp/custom-ssh-icon.svg".to_string());
+        let initial_connection = StoredConnection::new_ssh("custom-icon".to_string(), params, None);
+        let (form, cx) = cx.add_window_view(|window, cx| {
+            super::SshFormWindow::new(
+                super::SshFormWindowConfig {
+                    editing_connection: None,
+                    initial_connection: Some(initial_connection),
+                    on_saved: None,
+                    workspaces: Vec::new(),
+                    teams: Vec::new(),
+                },
+                window,
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        let built = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("预填自定义图标路径的表单应能构建参数");
+        assert_eq!(
+            built.icon_file_path,
+            Some("/tmp/custom-ssh-icon.svg".to_string())
+        );
+        assert!(cx.debug_bounds("ssh-icon-local-selected").is_some());
+
+        let ubuntu = cx
+            .debug_bounds("ssh-icon-ubuntu")
+            .expect("Ubuntu icon tile should be rendered");
+        cx.simulate_click(ubuntu.center(), Modifiers::default());
+        let built = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("选择内置图标后表单应能构建参数");
+
+        assert_eq!(built.icon, Some("ubuntu".to_string()));
+        assert_eq!(built.icon_file_path, None);
     }
 
     #[test]

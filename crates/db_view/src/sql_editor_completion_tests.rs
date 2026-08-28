@@ -5,7 +5,10 @@
 #[cfg(test)]
 mod tests {
     use crate::sql_editor::{
-        DefaultSqlCompletionProvider, SqlSchema, TableMentionCompletionProvider,
+        DefaultSqlCompletionProvider, SqlCompletionSources, SqlDotCompletionTarget, SqlSchema,
+        TableMentionCompletionProvider, clip_sql_offset, current_statement_has_from_keyword,
+        cursor_is_in_sql_literal_or_comment, dot_completion_qualifier, insert_column_target_table,
+        sql_dot_completion_target, update_target_table,
     };
     use db::plugin::SqlCompletionInfo;
     use db::sql_editor::sql_context_inferrer::{ContextInferrer, SqlContext};
@@ -54,6 +57,73 @@ mod tests {
         let tokens = tokenizer.tokenize();
         let symbol_table = SymbolTable::build_from_tokens(&tokens);
         ContextInferrer::infer(&tokens, offset, &symbol_table)
+    }
+
+    fn tokenize(sql: &str) -> Vec<db::sql_editor::sql_tokenizer::SqlToken> {
+        SqlTokenizer::new(sql).tokenize()
+    }
+
+    #[test]
+    fn clips_completion_offsets_to_utf8_boundaries() {
+        let sql = "中SELECT";
+        assert_eq!(clip_sql_offset(sql, 1), 0);
+        assert_eq!(clip_sql_offset(sql, 2), 0);
+        assert_eq!(clip_sql_offset(sql, 3), 3);
+        assert_eq!(clip_sql_offset(sql, usize::MAX), sql.len());
+    }
+
+    #[test]
+    fn detects_cursor_inside_sql_literals_and_comments() {
+        for sql in [
+            "SELECT 'unterminated",
+            "SELECT 1 -- comment",
+            "SELECT /* comment",
+        ] {
+            let tokens = tokenize(sql);
+            assert!(
+                cursor_is_in_sql_literal_or_comment(sql, &tokens, sql.len()),
+                "expected cursor to be ignored for {sql:?}"
+            );
+        }
+
+        for sql in [
+            "SELECT 'a--b' || us",
+            "SELECT 'closed' ",
+            "SELECT /* closed */ us",
+            "SELECT 1 -- comment\nus",
+        ] {
+            let tokens = tokenize(sql);
+            assert!(
+                !cursor_is_in_sql_literal_or_comment(sql, &tokens, sql.len()),
+                "expected cursor to remain completable for {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_from_keyword_only_in_current_statement_code() {
+        for sql in [
+            "SELECT id\nFROM users",
+            "SELECT id FROM(users)",
+            "SELECT id\tFROM\tusers",
+        ] {
+            let tokens = tokenize(sql);
+            assert!(current_statement_has_from_keyword(
+                sql,
+                &tokens,
+                sql.find("id").unwrap() + 1
+            ));
+        }
+
+        for sql in [
+            "SELECT ' FROM fake '",
+            "SELECT id /* FROM fake */",
+            "SELECT id -- FROM fake",
+            "SELECT id; SELECT 'FROM fake'",
+        ] {
+            let tokens = tokenize(sql);
+            assert!(!current_statement_has_from_keyword(sql, &tokens, sql.len()));
+        }
     }
 
     /// Simulate DotColumn completion filtering logic
@@ -120,6 +190,7 @@ mod tests {
                 columns: vec![],
                 functions: vec![],
                 columns_by_table,
+                ..Default::default()
             };
 
             // Build SQL with alias
@@ -184,6 +255,7 @@ mod tests {
                 columns: vec![],
                 functions: vec![],
                 columns_by_table,
+                ..Default::default()
             };
 
             // Build SQL with alias
@@ -234,6 +306,7 @@ mod tests {
                 columns: vec![],
                 functions: vec![],
                 columns_by_table,
+                ..Default::default()
             };
 
             // Build SQL with both aliases
@@ -289,6 +362,7 @@ mod tests {
                 columns: vec![],
                 functions: vec![],
                 columns_by_table,
+                ..Default::default()
             };
 
             // Build SQL without alias (table maps to itself)
@@ -333,6 +407,7 @@ mod tests {
                 columns: vec![],
                 functions: vec![],
                 columns_by_table,
+                ..Default::default()
             };
 
             // Build SQL with AS keyword
@@ -374,6 +449,7 @@ mod tests {
                 columns: vec![],
                 functions: vec![],
                 columns_by_table,
+                ..Default::default()
             };
 
             // Build SQL with lowercase alias
@@ -871,6 +947,33 @@ mod tests {
         accepts_completion_provider(trait_obj);
     }
 
+    #[test]
+    fn metadata_source_updates_share_long_lived_provider() {
+        let provider = DefaultSqlCompletionProvider::new(SqlSchema::default());
+        let cloned = provider.clone();
+
+        provider.set_sources(
+            SqlSchema::default().with_tables([("orders", "Order table")]),
+            SqlCompletionInfo {
+                keywords: vec![("OVER", "SQL window clause")],
+                ..SqlCompletionInfo::default()
+            },
+        );
+
+        let SqlCompletionSources {
+            schema,
+            db_completion_info,
+        } = cloned.sources();
+        assert_eq!(schema.tables.len(), 1);
+        assert_eq!(schema.tables[0].0, "orders");
+        assert_eq!(
+            db_completion_info
+                .expect("metadata should be attached")
+                .keywords,
+            vec![("OVER", "SQL window clause")]
+        );
+    }
+
     /// Test: SqlSchema Clone implementation
     /// **Validates: Requirement 7.2 (Clone is needed for internal use)**
     #[test]
@@ -1024,6 +1127,55 @@ mod tests {
         assert!(
             provider.is_completion_trigger_check("."),
             "Dot should trigger completion (table.column)"
+        );
+    }
+
+    #[test]
+    fn database_or_user_dot_completes_tables_while_alias_dot_completes_columns() {
+        let schema = SqlSchema::default()
+            .with_scope(Some("app_db".to_string()), Some("APP_USER".to_string()))
+            .with_tables([("users", "User table"), ("orders", "Order table")])
+            .with_table_columns("users", [("id", "User ID"), ("name", "User name")]);
+
+        assert_eq!(
+            SqlDotCompletionTarget::Tables,
+            sql_dot_completion_target(&schema, "APP_DB")
+        );
+        assert_eq!(
+            SqlDotCompletionTarget::Tables,
+            sql_dot_completion_target(&schema, "app_user")
+        );
+        assert_eq!(
+            SqlDotCompletionTarget::Columns("users".to_string()),
+            sql_dot_completion_target(&schema, "USERS")
+        );
+        assert_eq!(
+            SqlDotCompletionTarget::None,
+            sql_dot_completion_target(&schema, "missing")
+        );
+    }
+
+    #[test]
+    fn completion_context_resolves_insert_and_update_target_tables() {
+        let insert = "INSERT INTO users (na";
+        assert_eq!(
+            Some("users".to_string()),
+            insert_column_target_table(insert, insert.len())
+        );
+
+        let update = "UPDATE users SET na";
+        assert_eq!(
+            Some("users".to_string()),
+            update_target_table(update, update.len())
+        );
+    }
+
+    #[test]
+    fn dot_completion_keeps_the_source_qualifier_before_alias_resolution() {
+        let sql = "SELECT r. FROM recent r";
+        assert_eq!(
+            Some("r".to_string()),
+            dot_completion_qualifier(sql, sql.find("r. ").unwrap() + 2)
         );
     }
 
@@ -1366,6 +1518,7 @@ mod tests {
             columns: vec![],
             functions: vec![],
             columns_by_table,
+            ..Default::default()
         };
 
         // 验证 schema 中两个表都有 id 列
@@ -1511,6 +1664,7 @@ mod tests {
             columns: vec![],
             functions: vec![],
             columns_by_table,
+            ..Default::default()
         };
 
         // 使用小写查找

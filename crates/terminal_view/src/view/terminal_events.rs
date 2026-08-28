@@ -38,7 +38,7 @@ impl TerminalView {
                 self.sync_recording_ticker(cx);
                 self.sync_credential_inputs(window, cx);
                 self.sync_ssh_mfa_inputs(window, cx);
-                self.sync_zmodem_picker(cx);
+                self.sync_zmodem_background_task(None, cx);
                 self.focus_terminal_after_connect_if_ready(window, cx);
                 self.refresh_history_prompt_matches(cx);
                 cx.emit(TabContentEvent::ContentChanged);
@@ -70,6 +70,18 @@ impl TerminalView {
             }
             TerminalModelEvent::ZmodemRequestChanged => {
                 self.sync_zmodem_picker(cx);
+            }
+            TerminalModelEvent::ZmodemProgressChanged(progress) => {
+                self.sync_zmodem_background_task(Some(progress.clone()), cx);
+                cx.notify();
+            }
+            TerminalModelEvent::ZmodemTransferFinished {
+                transfer_id,
+                outcome,
+                progress,
+            } => {
+                self.finish_zmodem_background_task(*transfer_id, outcome, progress.clone(), cx);
+                cx.notify();
             }
             TerminalModelEvent::PromptStart
             | TerminalModelEvent::InputStart

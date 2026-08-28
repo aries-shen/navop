@@ -32,6 +32,7 @@ fn insert_vault_ssh(repository: &ConnectionRepository) -> i64 {
     let mut ssh = StoredConnection::new_ssh(
         "Shared bastion".to_string(),
         SshParams {
+            sftp_account: None,
             host: "bastion.example.com".to_string(),
             port: 2222,
             username: "manual-user".to_string(),
@@ -56,6 +57,7 @@ fn insert_vault_ssh(repository: &ConnectionRepository) -> i64 {
             proxy: None,
             os_id: None,
             icon: None,
+            icon_file_path: None,
             account_expect: Default::default(),
         },
         None,

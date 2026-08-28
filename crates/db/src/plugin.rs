@@ -1078,7 +1078,7 @@ pub trait DatabasePlugin: Send + Sync {
         .with_parent_context(id)
         .with_metadata(metadata.clone());
         if table_count > 0 {
-            let children: Vec<DbNode> = tables
+            let mut children: Vec<DbNode> = tables
                 .into_iter()
                 .map(|table_info| {
                     let mut meta: HashMap<String, String> = metadata.clone();
@@ -1099,6 +1099,7 @@ pub trait DatabasePlugin: Send + Sync {
                     .with_metadata(meta)
                 })
                 .collect();
+            children.sort();
             table_folder.set_children(children)
         }
         nodes.push(table_folder);
@@ -1119,7 +1120,7 @@ pub trait DatabasePlugin: Send + Sync {
             .with_parent_context(id)
             .with_metadata(metadata.clone());
             if view_count > 0 {
-                let children: Vec<DbNode> = views
+                let mut children: Vec<DbNode> = views
                     .into_iter()
                     .map(|view| {
                         let mut meta: HashMap<String, String> = metadata.clone();
@@ -1142,6 +1143,7 @@ pub trait DatabasePlugin: Send + Sync {
                         vnode
                     })
                     .collect();
+                children.sort();
                 views_folder.set_children(children);
             }
             nodes.push(views_folder);
@@ -1164,7 +1166,7 @@ pub trait DatabasePlugin: Send + Sync {
             .with_parent_context(id)
             .with_metadata(metadata.clone());
             if function_count > 0 {
-                let children: Vec<DbNode> = functions
+                let mut children: Vec<DbNode> = functions
                     .into_iter()
                     .map(|func| {
                         routine_node(
@@ -1178,6 +1180,7 @@ pub trait DatabasePlugin: Send + Sync {
                         )
                     })
                     .collect();
+                children.sort();
                 functions_folder.set_children(children);
             }
             nodes.push(functions_folder);
@@ -1200,7 +1203,7 @@ pub trait DatabasePlugin: Send + Sync {
             .with_parent_context(id)
             .with_metadata(metadata.clone());
             if procedure_count > 0 {
-                let children: Vec<DbNode> = procedures
+                let mut children: Vec<DbNode> = procedures
                     .into_iter()
                     .map(|procedure| {
                         routine_node(
@@ -1214,6 +1217,7 @@ pub trait DatabasePlugin: Send + Sync {
                         )
                     })
                     .collect();
+                children.sort();
                 procedures_folder.set_children(children);
             }
             nodes.push(procedures_folder);
@@ -1236,7 +1240,7 @@ pub trait DatabasePlugin: Send + Sync {
             .with_parent_context(id)
             .with_metadata(metadata.clone());
             if sequence_count > 0 {
-                let children: Vec<DbNode> = sequences
+                let mut children: Vec<DbNode> = sequences
                     .into_iter()
                     .map(|seq| {
                         let mut seq_meta: HashMap<String, String> = metadata.clone();
@@ -1263,6 +1267,7 @@ pub trait DatabasePlugin: Send + Sync {
                         .with_metadata(seq_meta)
                     })
                     .collect();
+                children.sort();
                 sequences_folder.set_children(children);
             }
             nodes.push(sequences_folder);
@@ -1363,7 +1368,7 @@ pub trait DatabasePlugin: Send + Sync {
         match node.node_type {
             DbNodeType::TablesFolder => {
                 let tables = self.list_tables(connection, database, schema).await?;
-                Ok(tables
+                let mut children: Vec<DbNode> = tables
                     .into_iter()
                     .map(|t| {
                         let mut meta = node.metadata.clone();
@@ -1382,14 +1387,16 @@ pub trait DatabasePlugin: Send + Sync {
                         .with_parent_context(id)
                         .with_metadata(meta)
                     })
-                    .collect())
+                    .collect();
+                children.sort();
+                Ok(children)
             }
             DbNodeType::ViewsFolder => {
                 if !self.capabilities().supports_views {
                     return Ok(Vec::new());
                 }
                 let views = self.list_views(connection, database, schema).await?;
-                Ok(views
+                let mut children: Vec<DbNode> = views
                     .into_iter()
                     .map(|v| {
                         let mut meta = node.metadata.clone();
@@ -1406,14 +1413,16 @@ pub trait DatabasePlugin: Send + Sync {
                         .with_parent_context(id)
                         .with_metadata(meta)
                     })
-                    .collect())
+                    .collect();
+                children.sort();
+                Ok(children)
             }
             DbNodeType::FunctionsFolder => {
                 let functions = self
                     .list_functions_in_schema(connection, database, schema.clone())
                     .await
                     .unwrap_or_default();
-                Ok(functions
+                let mut children: Vec<DbNode> = functions
                     .into_iter()
                     .map(|f| {
                         routine_node(
@@ -1426,14 +1435,16 @@ pub trait DatabasePlugin: Send + Sync {
                             &node.metadata,
                         )
                     })
-                    .collect())
+                    .collect();
+                children.sort();
+                Ok(children)
             }
             DbNodeType::ProceduresFolder => {
                 let procedures = self
                     .list_procedures_in_schema(connection, database, schema.clone())
                     .await
                     .unwrap_or_default();
-                Ok(procedures
+                let mut children: Vec<DbNode> = procedures
                     .into_iter()
                     .map(|p| {
                         routine_node(
@@ -1446,7 +1457,9 @@ pub trait DatabasePlugin: Send + Sync {
                             &node.metadata,
                         )
                     })
-                    .collect())
+                    .collect();
+                children.sort();
+                Ok(children)
             }
             DbNodeType::SequencesFolder => {
                 let sequences = self
@@ -1460,7 +1473,7 @@ pub trait DatabasePlugin: Send + Sync {
                         .collect(),
                     None => sequences,
                 };
-                Ok(filtered
+                let mut children: Vec<DbNode> = filtered
                     .into_iter()
                     .map(|seq| {
                         let mut meta = node.metadata.clone();
@@ -1486,7 +1499,9 @@ pub trait DatabasePlugin: Send + Sync {
                         .with_parent_context(id)
                         .with_metadata(meta)
                     })
-                    .collect())
+                    .collect();
+                children.sort();
+                Ok(children)
             }
             _ => Ok(Vec::new()),
         }
@@ -2611,24 +2626,7 @@ pub trait DatabasePlugin: Send + Sync {
         schema: Option<&str>,
         table: &str,
     ) -> Result<String> {
-        let columns = self
-            .list_columns(connection, database, schema.map(|s| s.to_string()), table)
-            .await?;
-        if columns.is_empty() {
-            return Ok(String::new());
-        }
-
-        let table_ref = self.format_export_table_reference(database, schema, table);
-        let mut sql = format!("CREATE TABLE {} (\n", table_ref);
-        for (i, col) in columns.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(",\n");
-            }
-            sql.push_str("    ");
-            sql.push_str(&self.build_column_definition(col, true));
-        }
-        sql.push_str("\n)");
-        Ok(sql)
+        default_export_table_create_sql(self, connection, database, schema, table).await
     }
 
     /// Export table data as INSERT statements
@@ -2929,6 +2927,24 @@ pub trait DatabasePlugin: Send + Sync {
         Ok(self.build_create_table_sql(design))
     }
 
+    /// Build CREATE TABLE SQL through an async-capable path with an explicit
+    /// target schema.
+    ///
+    /// The default implementation delegates to
+    /// [`DatabasePlugin::build_create_table_sql_async`]. External IPC plugins
+    /// override this so the driver can qualify the table with the target
+    /// schema instead of falling back to the connection database name, which
+    /// Oracle/PostgreSQL-compatible drivers (DM, Kingbase) otherwise treat as
+    /// the schema/owner.
+    async fn build_create_table_sql_with_schema_async(
+        &self,
+        connection: &dyn DbConnection,
+        _schema: Option<&str>,
+        design: &TableDesign,
+    ) -> Result<String> {
+        self.build_create_table_sql_async(connection, design).await
+    }
+
     /// Build ALTER TABLE SQL from original and new TableDesign
     /// Returns a series of ALTER TABLE statements for the differences
     fn build_alter_table_sql(&self, original: &TableDesign, new: &TableDesign) -> String;
@@ -2984,6 +3000,24 @@ pub trait DatabasePlugin: Send + Sync {
         column_renames: &[(String, String)],
     ) -> Result<String> {
         Ok(self.build_alter_table_sql_with_renames(original, new, column_renames))
+    }
+
+    /// Async-capable ALTER TABLE builder with an explicit target schema.
+    ///
+    /// The default implementation delegates to
+    /// [`DatabasePlugin::build_alter_table_sql_with_renames_async`]. External
+    /// IPC plugins override this so the driver can qualify the table with the
+    /// target schema instead of the connection database name.
+    async fn build_alter_table_sql_with_schema_async(
+        &self,
+        connection: &dyn DbConnection,
+        _schema: Option<&str>,
+        original: &TableDesign,
+        new: &TableDesign,
+        column_renames: &[(String, String)],
+    ) -> Result<String> {
+        self.build_alter_table_sql_with_renames_async(connection, original, new, column_renames)
+            .await
     }
 
     /// Check if a column definition has changed
@@ -3085,6 +3119,84 @@ pub trait DatabasePlugin: Send + Sync {
         config: &ExportConfig,
         progress_tx: Option<ExportProgressSender>,
     ) -> Result<ExportResult>;
+}
+
+/// Default column-based CREATE TABLE export shared by the `DatabasePlugin`
+/// trait default. Driver overrides that need to opt back into the generic
+/// builder (e.g. when the driver's own structure export is unavailable) call
+/// this free function directly: a `Trait::method(self)` call from inside an
+/// override would dispatch back to the override instead of the default body.
+pub(crate) async fn default_export_table_create_sql<P>(
+    plugin: &P,
+    connection: &dyn DbConnection,
+    database: &str,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<String>
+where
+    P: DatabasePlugin + ?Sized,
+{
+    let columns = plugin
+        .list_columns(connection, database, schema.map(|s| s.to_string()), table)
+        .await?;
+    if columns.is_empty() {
+        return Ok(String::new());
+    }
+
+    let table_ref = plugin.format_export_table_reference(database, schema, table);
+    let mut definitions = columns
+        .iter()
+        .map(|column| format!("    {}", plugin.build_column_definition(column, true)))
+        .collect::<Vec<_>>();
+    let primary_keys = columns
+        .iter()
+        .filter(|column| column.is_primary_key)
+        .map(|column| plugin.quote_identifier(&column.name))
+        .collect::<Vec<_>>();
+    if !primary_keys.is_empty() {
+        definitions.push(format!("    PRIMARY KEY ({})", primary_keys.join(", ")));
+    }
+
+    let mut sql = format!(
+        "CREATE TABLE {} (\n{}\n)",
+        table_ref,
+        definitions.join(",\n")
+    );
+
+    // Best-effort table comment: drivers that cannot list table metadata are
+    // still able to export the structure (columns + primary key + column comments).
+    let mut statements = Vec::new();
+    if let Ok(tables) = plugin
+        .list_tables(connection, database, schema.map(|s| s.to_string()))
+        .await
+    {
+        if let Some(comment) = tables
+            .iter()
+            .find(|info| info.name == table)
+            .and_then(|info| info.comment.clone())
+        {
+            statements.push(format!(
+                "COMMENT ON TABLE {} IS {}",
+                table_ref,
+                plugin.escape_sql_value(&comment)
+            ));
+        }
+    }
+    statements.extend(columns.iter().filter_map(|column| {
+        column.comment.as_ref().map(|comment| {
+            format!(
+                "COMMENT ON COLUMN {}.{} IS {}",
+                table_ref,
+                plugin.quote_identifier(&column.name),
+                plugin.escape_sql_value(comment)
+            )
+        })
+    }));
+    if !statements.is_empty() {
+        sql.push('\n');
+        sql.push_str(&statements.join(";\n"));
+    }
+    Ok(sql)
 }
 
 fn foreign_key_action_sql(action: &str) -> Option<String> {
@@ -3400,13 +3512,24 @@ fn direct_table_identity(relation: &TableFactor) -> Option<(String, Option<Strin
         || sample.is_some()
         || !index_hints.is_empty()
         || name.0.is_empty()
-        || name.0.iter().any(|part| part.as_ident().is_none())
     {
         return None;
     }
 
+    // Build the table name from the unquoted identifier values. Using
+    // `name.to_string()` would preserve the original quoting characters (e.g.
+    // `` `ADDRESSBOOK` ``), which later get quoted again by `quote_identifier`
+    // when generating INSERT/UPDATE/DELETE statements, producing doubled
+    // quote symbols. `.value` holds the identifier without its quotes.
+    let table_name = name
+        .0
+        .iter()
+        .map(|part| part.as_ident().map(|ident| ident.value.as_str()))
+        .collect::<Option<Vec<_>>>()?
+        .join(".");
+
     Some((
-        name.to_string(),
+        table_name,
         alias.as_ref().map(|alias| alias.name.value.clone()),
     ))
 }
@@ -4201,6 +4324,53 @@ mod tests {
             let result = analyze_query_editability(query);
             assert!(result.is_none());
         }
+    }
+
+    #[test]
+    fn test_analyze_select_query_does_not_preserve_quotes_in_table_name() {
+        let plugin = MySqlPlugin::new();
+
+        // Backtick-quoted table name must not carry the quote characters into
+        // the analyzed table name (otherwise `quote_identifier` doubles them
+        // when generating UPDATE/INSERT/DELETE statements).
+        let analysis = plugin.analyze_select_query("SELECT * FROM `ADDRESSBOOK`");
+        assert_eq!(analysis.table_name.as_deref(), Some("ADDRESSBOOK"));
+        assert!(analysis.editable);
+        assert!(analysis.schema_metadata_safe);
+
+        // Quoted qualified name keeps the dotted structure but drops quotes.
+        let analysis = plugin.analyze_select_query("SELECT * FROM `ai_app`.`ADDRESSBOOK`");
+        assert_eq!(analysis.table_name.as_deref(), Some("ai_app.ADDRESSBOOK"));
+        assert!(analysis.editable);
+
+        // Unquoted names are unaffected.
+        let analysis = plugin.analyze_select_query("SELECT * FROM users");
+        assert_eq!(analysis.table_name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn test_analyze_select_query_unquotes_other_dialect_identifiers() {
+        let plugin = MySqlPlugin::new();
+
+        // Double-quoted identifiers (PostgreSQL/Oracle/SQLite/DuckDB style).
+        let analysis = plugin.analyze_select_query("SELECT * FROM \"orders\"");
+        assert_eq!(analysis.table_name.as_deref(), Some("orders"));
+
+        // Escaped backtick inside a quoted identifier must be unescaped to the
+        // real value (`` a``b `` is the table named `a`b`).
+        let analysis = plugin.analyze_select_query("SELECT * FROM `a``b`");
+        assert_eq!(analysis.table_name.as_deref(), Some("a`b"));
+
+        // Bracket-quoted identifiers (MSSQL style) need the MSSQL dialect so
+        // the parser recognizes `[orders]` as a quoted identifier.
+        let plugin = crate::mssql::MsSqlPlugin::new();
+        let analysis = plugin.analyze_select_query("SELECT * FROM [orders]");
+        assert_eq!(analysis.table_name.as_deref(), Some("orders"));
+
+        // Double-quoted identifiers in a PostgreSQL dialect.
+        let plugin = crate::postgresql::PostgresPlugin::new();
+        let analysis = plugin.analyze_select_query("SELECT * FROM \"orders\"");
+        assert_eq!(analysis.table_name.as_deref(), Some("orders"));
     }
 
     // ==================== analyze_select_editability_fallback tests ====================

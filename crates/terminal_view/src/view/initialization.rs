@@ -267,6 +267,7 @@ impl TerminalView {
             credential_inputs: None,
             ssh_mfa_inputs: Vec::new(),
             zmodem_picker_request_id: None,
+            zmodem_background_tasks: HashMap::new(),
             focus_terminal_after_connect: false,
             reconnect_success_pending: false,
             current_theme: default_theme,
@@ -295,6 +296,8 @@ impl TerminalView {
         this.sync_ssh_mfa_inputs(window, cx);
         this.register_broadcast_input(cx);
         this.start_performance_diagnostics(connection_id, connection_kind, cx);
+        this._subscriptions
+            .push(cx.on_release(|this, cx| this.cancel_zmodem_background_tasks(cx)));
         this
     }
 }

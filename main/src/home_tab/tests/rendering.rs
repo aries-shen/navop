@@ -23,16 +23,14 @@ fn local_terminal_launcher_is_visible_in_home_toolbar() {
 fn both_home_styles_expose_credential_vault_in_their_sidebars() {
     let toolbar = include_str!("../toolbar.rs");
     let legacy_sidebar = include_str!("../sidebar_navigation.rs");
-    let persistent_sidebar =
-        include_str!("../../persistent_connection_sidebar/navigation_sections.rs");
+    let modern_home = include_str!("../modern_home.rs");
     let navigation = include_str!("../navigation.rs");
     let quick_open = include_str!("../../navigation_quick_open.rs");
-    let modern_home = include_str!("../modern_home.rs");
-    let workspace_tools = modern_home
-        .split("fn render_workspace_tools")
+    let applications_panel = modern_home
+        .split("fn render_applications_panel")
         .nth(1)
-        .and_then(|source| source.split("fn render_status_panel").next())
-        .expect("modern workspace tools section");
+        .and_then(|source| source.split("fn render_account_panel").next())
+        .expect("modern applications panel section");
 
     assert!(!toolbar.contains("\"credential-vault-button\""));
     assert!(!toolbar.contains("add_credential_vault_tab"));
@@ -43,18 +41,17 @@ fn both_home_styles_expose_credential_vault_in_their_sidebars() {
         legacy_sidebar.contains("home.activate_navigation_application(application, window, cx)")
     );
 
-    assert!(persistent_sidebar.contains("\"persistent-open-credential-vault\""));
-    assert!(persistent_sidebar.contains("NavigationApplication::CredentialVault"));
+    assert!(applications_panel.contains("home_application_id("));
     assert!(
-        persistent_sidebar
+        applications_panel
             .contains("home.activate_navigation_application(application, window, cx)")
     );
+    assert!(modern_home.contains("\"home-app-credential-vault\""));
+    assert!(modern_home.contains("NavigationApplication::CredentialVault"));
     assert!(navigation.contains("NavigationApplication::CredentialVault =>"));
     assert!(navigation.contains("self.add_credential_vault_tab(window, cx)"));
     assert!(quick_open.contains("t!(\"Home.credential_vault\")"));
-
-    assert!(!workspace_tools.contains("\"modern-home-credential-vault\""));
-    assert!(!workspace_tools.contains("home.add_credential_vault_tab(window, cx)"));
+    assert!(!applications_panel.contains("home.add_credential_vault_tab(window, cx)"));
 }
 
 #[test]
@@ -161,18 +158,32 @@ fn home_overview_is_compact_and_avoids_duplicate_search() {
     assert!(!card.contains(".shadow_sm()\n            .group"));
     assert!(render.contains("self.render_modern_home(window, cx)"));
     assert!(modern_home.contains("modern-home-start-center"));
-    assert!(modern_home.contains("START_CENTER_MAX_WIDTH: gpui::Pixels = px(1040.0)"));
+    assert!(modern_home.contains("START_CENTER_MAX_WIDTH: gpui::Pixels = px(1200.0)"));
     assert!(modern_home.contains(".max_w(START_CENTER_MAX_WIDTH)"));
     assert!(modern_home.contains("modern-home-hero"));
     assert!(modern_home.contains("modern-home-recent-column"));
     assert!(modern_home.contains("modern-home-side-column"));
     assert!(!modern_home.contains("render_connection_card"));
-    assert!(!modern_home.contains("view.update(cx, |home"));
+    // Direct view.update is only allowed inside the recent-row dropdown menu
+    // (PopupMenuItem callbacks do not go through window.listener_for).
+    assert!(
+        !modern_home.replace(
+            "open_view.update(cx, |home, cx| {\n                                    home.open_connection_from_quick(&open_conn, window, cx);\n                                });",
+            ""
+        ).replace(
+            "edit_view.update(cx, |home, cx| {\n                                    home.edit_connection(edit_conn.clone(), window, cx);\n                                });",
+            ""
+        ).replace("new_tab_view.update", "")
+        .replace("remove_view.update", "")
+        .contains("view.update(cx, |home")
+    );
     assert!(modern_home.contains("modern-home-sync"));
     assert!(modern_home.contains("modern-home-keys"));
+    // 开始中心固定在窗口高度内，不允许整页滚动。
     assert!(modern_home.contains(
-        ".size_full()\n            .overflow_y_scroll()\n            .scrollbar_width(px(0.0))"
+        ".id(\"modern-home-start-center\")\n            .size_full()\n            .overflow_hidden()"
     ));
+    assert!(!modern_home.contains("modern-home-start-center\"\n            .size_full()\n            .overflow_y_scroll()"));
     assert!(!modern_home.contains(".min_h_full()"));
     assert!(modern_home.contains("self.render_local_terminal_button(window, cx)"));
     assert!(!modern_home.contains("modern-home-local-terminal"));
@@ -187,11 +198,13 @@ fn modern_start_center_separates_primary_work_from_supporting_tools() {
     for stable_id in [
         "modern-home-hero",
         "modern-home-recent-panel",
+        "modern-home-applications-panel",
+        "modern-home-side-panel",
         "modern-home-create-panel",
-        "modern-home-tools-panel",
         "modern-home-status-panel",
         "modern-home-sync",
         "modern-home-keys",
+        "modern-home-account-panel",
     ] {
         assert!(modern_home.contains(stable_id));
     }
@@ -200,14 +213,33 @@ fn modern_start_center_separates_primary_work_from_supporting_tools() {
     assert!(modern_home.contains(".items_stretch()"));
     assert!(modern_home.contains(".flex_grow_factor(2.0)"));
     assert!(modern_home.contains(".flex_grow_1()"));
+    // 最近列表内部滚动、状态区不拉伸、账户紧跟状态之后。
+    assert!(modern_home.contains(".w_full()\n                            .overflow_y_scroll()"));
+    let status_panel = modern_home
+        .split("fn render_status_panel")
+        .nth(1)
+        .and_then(|source| source.split("fn surface_panel").next())
+        .expect("render_status_panel source");
     assert!(
-        modern_home
-            .contains("surface_panel(\"modern-home-status-panel\", cx)\n        .flex_grow_1()")
+        status_panel.contains(".flex_shrink_0()"),
+        "状态面板不应吸收侧栏剩余高度"
     );
+    assert!(
+        !status_panel.contains(".flex_grow_1()"),
+        "状态面板拉伸会把账户面板挤出首屏"
+    );
+    assert!(modern_home.contains("surface_panel(\"modern-home-side-panel\", cx)"));
+    // 创建与导入是独立卡片，不再挤在 side-panel 内部。
+    assert!(modern_home.contains("surface_panel(\"modern-home-create-panel\", cx)"));
+    assert!(!modern_home.contains("fn render_create_panel"));
+    assert!(modern_home.contains(".self_stretch()"));
+    assert!(modern_home.contains(".id(\"modern-home-status-panel\")"));
+    assert!(modern_home.contains(".flex_1()"));
     assert!(modern_home.contains("render_recent_connections_panel"));
-    assert!(modern_home.contains("render_create_panel"));
-    assert!(modern_home.contains("render_workspace_tools"));
+    assert!(modern_home.contains("render_applications_panel"));
     assert!(modern_home.contains("render_status_panel"));
+    assert!(modern_home.contains("render_account_panel"));
+    assert!(!modern_home.contains("render_workspace_tools"));
     assert!(!modern_home.contains("start_center_card_slot"));
     assert!(modern_home.contains(".filter(|conn| conn.last_used_at.is_some())"));
     assert!(
@@ -217,20 +249,44 @@ fn modern_start_center_separates_primary_work_from_supporting_tools() {
     assert!(modern_home.contains(".min_h(px(50.0))"));
     assert!(modern_home.contains(".min_h(px(140.0))"));
     assert!(!modern_home.contains(".min_h(px(210.0))"));
-    assert!(modern_home.contains("home.open_connection_from_quick(&open_connection, window, cx)"));
+    assert!(modern_home.contains("home.open_connection_from_quick(&row_open_connection, window, cx)"));
+    // Quick-open rows open on a single click: the start center is a dashboard,
+    // and double-click adds friction to the most frequent recovery action.
+    assert!(modern_home.contains(".on_click(window.listener_for(&view, move |home, _, window, cx|"));
     assert!(!modern_home.contains(".on_double_click("));
+    // Rows carry a context menu on the trailing chevron for secondary actions.
+    assert!(modern_home.contains("recent-conn-menu-"));
+    assert!(modern_home.contains("Home.recent_actions_tooltip"));
+    assert!(modern_home.contains("IconName::ExternalLink"));
+    assert!(modern_home.contains("IconName::Edit"));
+    // 菜单还提供"在新标签打开"，复用 quick-open 的后台打开模式。
+    assert!(modern_home.contains("Home.open_in_new_tab"));
+    assert!(modern_home.contains("IconName::PanelRight"));
+    assert!(modern_home.contains("TabOpenMode::Background"));
+    // 以及"移除最近记录"，仅清空最近使用时间，不删除连接本身。
+    assert!(modern_home.contains("Home.remove_recent"));
+    assert!(modern_home.contains("IconName::Remove"));
+    assert!(modern_home.contains("remove_recent_connection(remove_conn_id, cx)"));
+    // Subtitle shows the connection endpoint, not just the type label.
+    assert!(modern_home.contains("card_connection_info(&conn)"));
+    assert!(modern_home.contains("conn.connection_type.label()"));
 }
 
 #[test]
 fn modern_start_center_shortcuts_are_attached_to_their_actions() {
     let modern_home = include_str!("../modern_home.rs");
     let shortcuts = include_str!("../modern_home_shortcuts.rs");
+    let local_terminal = include_str!("../local_terminal.rs");
 
-    assert!(modern_home.contains("new_connection_shortcut(cx)"));
-    assert!(modern_home.contains("terminal_shortcut(cx)"));
-    assert!(modern_home.contains("quick_open_shortcut(cx)"));
-    assert!(!modern_home.contains("render_shortcuts(cx)"));
-    assert!(shortcuts.contains("fn shortcut_badge_for"));
+    // Shortcuts live in button tooltips, not as standalone badges that
+    // fragment the hero action row.
+    assert!(modern_home.contains("new_connection_tooltip(cx)"));
+    assert!(modern_home.contains("quick_open_tooltip(cx)"));
+    assert!(!modern_home.contains("new_connection_shortcut(cx)"));
+    assert!(!modern_home.contains("quick_open_shortcut(cx)"));
+    assert!(!modern_home.contains("terminal_shortcut(cx)"));
+    assert!(local_terminal.contains("modern_home_shortcuts::terminal_tooltip(cx)"));
+    assert!(shortcuts.contains("fn shortcut_text_for"));
     assert!(shortcuts.contains("action_id::HOME_QUICK_OPEN"));
     assert!(shortcuts.contains("action_id::HOME_NEW_CONNECTION"));
     assert!(shortcuts.contains("action_id::HOME_OPEN_LOCAL_TERMINAL"));
@@ -279,8 +335,8 @@ fn legacy_and_modern_home_layouts_are_both_kept() {
     let card = include_str!("../connection_card.rs");
     let sidebar = include_str!("../sidebar.rs");
     let sidebar_navigation = include_str!("../sidebar_navigation.rs");
-    let persistent_navigation =
-        include_str!("../../persistent_connection_sidebar/navigation_sections.rs");
+    let filter_bar = include_str!("../../persistent_connection_sidebar/filter_bar.rs");
+    let modern_home = include_str!("../modern_home.rs");
     let quick_open = include_str!("../../navigation_quick_open.rs");
 
     assert!(render.contains("self.render_legacy_home(window, cx)"));
@@ -292,7 +348,8 @@ fn legacy_and_modern_home_layouts_are_both_kept() {
     assert!(!sidebar.contains("\"legacy-open-home\""));
     assert!(sidebar_navigation.contains("visible_connection_types()"));
     assert!(sidebar_navigation.contains("this.set_selected_filter(filter, cx);"));
-    assert!(persistent_navigation.contains("visible_connection_types()"));
+    assert!(filter_bar.contains("ConnectionType::all()"));
+    assert!(modern_home.contains("all_navigation_applications("));
     assert!(quick_open.contains("fn overflow_connection_types()"));
     assert!(sidebar.contains("legacy-home-sidebar-toggle"));
     assert!(sidebar_navigation.contains("FunctionalIcon::new(IconName::User)"));
@@ -304,12 +361,10 @@ fn legacy_and_modern_home_layouts_are_both_kept() {
         2,
         "the two legacy overflow buttons should render only their ellipsis icon"
     );
-    assert!(persistent_navigation.contains("\"persistent-more-connection-types\""));
-    assert!(persistent_navigation.contains("\"persistent-more-applications\""));
+    assert!(filter_bar.contains("\"persistent-filter-button\""));
     assert!(sidebar_navigation.contains("show_legacy_connection_navigation_quick_open"));
     assert!(sidebar_navigation.contains("show_application_navigation_quick_open"));
-    assert!(persistent_navigation.contains("NavigationQuickOpenRequest::connections"));
-    assert!(persistent_navigation.contains("show_application_navigation_quick_open"));
+    assert!(filter_bar.contains(".checked(selected_filter == filter)"));
 }
 
 #[test]

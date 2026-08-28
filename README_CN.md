@@ -63,17 +63,18 @@
 
 ### 远程连接与运维
 
-- 在可拖拽分屏中使用 SSH 与本地终端，并提供快捷命令、历史记录、广播输入、Shell integration 和终端 AI；SSH 可配置字符集（UTF-8、GBK、Big5、Shift_JIS 等）与终端类型以适配旧环境。
-- 使用密码锁定会话，可一键锁定全部会话，或隐藏当前会话输出。
+- 在可拖拽分屏中使用 SSH 与本地终端，并提供快捷命令（支持点击执行）、历史记录、广播输入、Shell integration 和终端 AI；SSH 可配置字符集（UTF-8、GBK、Big5、Shift_JIS 等）与终端类型以适配旧环境。
+- 使用密码锁定会话，可一键锁定全部会话，或隐藏当前会话输出；标签页可显示 SecureCRT 风格的连接状态徽章（已连接、断开、已锁定等）。
 - 录制终端会话并通过只读时间线回放，回放期间会阻止输入与在线操作。
 - 复制标签页时自动追加序号并复用已释放的编号（例如 `192.168.1.1` → `192.168.1.1(1)`），标签宽度随内容自适应，长标题不再被截断。
-- 支持 Telnet 连接、自动登录脚本和手动凭据覆盖。
+- 支持 Telnet 连接、自动登录脚本、手动凭据覆盖和可自定义的退格键编码。
 - 通过静态历史查看器查看 SSH、串口和本地终端会话日志，支持滚动、文本选择、搜索与 TXT 导出。
 - 通过 SFTP 上传下载、目录上传、搜索、收藏、远程编辑、拖拽传输和跨服务器复制文件；并支持 SSH 下的 ZMODEM 文件传输。
 - 支持导入 SecureCRT 会话与快捷命令，并在连接侧边栏批量管理连接。
 - 创建可复用的本地、远程（`ssh -R`）端口转发与动态 SOCKS 隧道。
-- SSH/SFTP 主机密钥变更时会展示新旧指纹并要求明确确认，且可按连接启用旧版 SSH 算法。
-- 使用串口连接、服务器监控，以及通过扩展 provider 提供的 RDP/VNC 远程桌面。
+- SSH/SFTP 主机密钥变更时会展示新旧指纹并要求明确确认，且可按连接启用旧版 SSH 算法；Windows 上还支持 Pageant 认证。
+- 支持通过 SSH 将远端 X11 图形应用转发到本机 X server 显示，并自动探测本机 X11 环境（Windows 使用 XMing，macOS 使用 XQuartz）。
+- 使用串口连接、服务器监控，以及通过扩展 provider 提供的 RDP/VNC 远程桌面；Windows 上独立全屏 RDP 窗口通过系统远程桌面客户端（`mstsc.exe`）打开。
 
 ### 编辑、AI 与扩展
 
@@ -185,6 +186,17 @@ npx -y @navop/mcp@latest
 | Windows | x86_64 | `navop-<version>-windows-x64.msi`、`navop-<version>-windows-x64.exe`、`navop-<version>-windows-x64.zip`、`navop-<version>-windows-x64-portable.zip` |
 | Windows | x86（32 位） | `navop-<version>-win32.msi`、`navop-<version>-win32.exe`、`navop-<version>-win32.zip`、`navop-<version>-win32-portable.zip` |
 
+### Linux Flatpak
+
+Navop 也已在 [FlatPark](https://flatpark.org/zh-Hans/apps/dev.navop.Navop/) 上架，并标注为开发者认可的社区 Flatpak 软件包。运行以下命令添加 FlatPark 软件源，并为当前用户安装 Navop：
+
+```bash
+flatpak --user remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+flatpak --user install flatpark dev.navop.Navop
+```
+
+Flatpak 软件包运行在沙盒中，部分集成功能可能需要授予额外权限。详细说明与问题排查请参阅 [FlatPark 软件包页面](https://flatpark.org/zh-Hans/apps/dev.navop.Navop/)。
+
 Windows `.msi` 和 `.exe` 都是中英双语的当前用户安装程序，使用默认位置时不需要管理员权限；EXE 安装包封装的是同一套 MSI 安装流程。普通 `.zip` 是免安装版，仍使用正常的 Windows 用户数据目录，并支持记住主密钥后自动解锁。只有需要把应用数据放在程序同级目录时才应下载 `-portable.zip`。便携版（Linux 与 Windows）默认每次启动都要求输入主密钥。用户也可以在设置中明确选择把可自动恢复的加密主密钥副本保存到 `data/state/key_storage`，但该加密使用程序内置密钥，不具备设备绑定保护；任何同时获得应用程序和完整 `data` 目录的人都可能恢复主密钥。
 
 > **从 v0.10.1 或更早版本的 Windows ZIP 升级：**这些历史 ZIP 已启用便携模式。请下载新的 `-portable.zip`，解压到新目录，并把原目录中的整个 `data` 复制进去。如果把新的普通 `.zip` 解压到另一个目录，或改用 MSI/EXE 安装版，Navop 会使用正常的 Windows 用户数据目录，而且不会自动迁移便携数据。原有连接和设置可能因此看起来消失，但旧便携目录中的数据并未被删除。
@@ -246,6 +258,6 @@ ER 图渲染基于 [ferrum-flow](https://github.com/tu6ge/ferrum-flow.git)。
 
 ## 许可证
 
-Navop 源代码基于 [Apache License 2.0](LICENSE-APACHE) 开源。Navop 自有代码还须遵守 [Navop 补充协议](NAVOP_LICENSE)，其中包含对二次分发、转售、竞争性产品或服务以及未经授权分发平台的限制。第三方组件继续适用其各自的许可证。
+Navop 源代码基于 [Apache License 2.0](LICENSE-APACHE) 开源。Navop 自有代码还须遵守 [Navop 补充协议](NAVOP_LICENSE)，该协议允许通过免费分发渠道（如 GitHub Releases、Flatpak 仓库和免费应用商店）免费分发，但禁止商业转售、收取费用、竞争性产品或服务以及付费分发平台。第三方组件继续适用其各自的许可证。
 
 如有许可证与版权相关问题，请联系 xiaofei.hf@gmail.com。

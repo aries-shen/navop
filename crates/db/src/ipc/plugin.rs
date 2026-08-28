@@ -1434,17 +1434,26 @@ impl DatabasePlugin for ExternalDatabasePlugin {
 
     fn format_table_reference(&self, database: &str, schema: Option<&str>, table: &str) -> String {
         let capabilities = self.driver.effective_capabilities();
-        if matches!(
+        let prefers_schema = matches!(
             self.driver.dialect.table_reference_schema_mode,
             TableReferenceSchemaMode::PreferSchema
-        ) || (capabilities.supports_schema && !capabilities.uses_schema_as_database)
-        {
+        );
+        let uses_true_schema =
+            capabilities.supports_schema && !capabilities.uses_schema_as_database;
+        if prefers_schema || uses_true_schema {
             if let Some(schema) = schema.filter(|schema| !schema.trim().is_empty()) {
                 return format!(
                     "{}.{}",
                     self.quote_identifier(schema),
                     self.quote_identifier(table)
                 );
+            }
+            // True-schema databases are database-bound via the connection, so the database
+            // name is never a valid table qualifier. In Informix/GBase 8s in particular,
+            // `db.table` is parsed as `owner.table`, so fall back to the bare table name
+            // when no schema is available instead of emitting an invalid `database.table`.
+            if uses_true_schema {
+                return self.quote_identifier(table);
             }
         }
 
@@ -1707,6 +1716,35 @@ impl DatabasePlugin for ExternalDatabasePlugin {
         }
     }
 
+    async fn build_create_table_sql_with_schema_async(
+        &self,
+        connection: &dyn DbConnection,
+        schema: Option<&str>,
+        design: &TableDesign,
+    ) -> Result<String> {
+        let params = wire_ddl::BuildCreateTableParams {
+            conn_id: None,
+            spec: table_spec_from_design_with_schema(design, schema),
+            options: wire_ddl::CreateTableOptions::default(),
+        };
+        let value = serde_json::to_value(params)?;
+        match self
+            .metadata::<wire_ddl::BuildCreateTableResult>(
+                connection,
+                wire_method::DDL_BUILD_CREATE_TABLE,
+                value,
+            )
+            .await
+        {
+            Ok(result) => Ok(join_ddl_statements(result.statements, Some(result.sql))),
+            Err(error) if is_not_supported(&error) => Ok(self
+                .compatible_plugin()
+                .map(|plugin| plugin.build_create_table_sql(design))
+                .unwrap_or_else(|| self.build_create_table_sql(design))),
+            Err(error) => Err(error),
+        }
+    }
+
     fn build_alter_table_sql(&self, original: &TableDesign, new: &TableDesign) -> String {
         let table = self.quote_identifier(&new.table_name);
         let original_cols: HashMap<&str, &ColumnDefinition> = original
@@ -1823,6 +1861,52 @@ impl DatabasePlugin for ExternalDatabasePlugin {
         }
     }
 
+    async fn build_alter_table_sql_with_schema_async(
+        &self,
+        connection: &dyn DbConnection,
+        schema: Option<&str>,
+        original: &TableDesign,
+        new: &TableDesign,
+        column_renames: &[(String, String)],
+    ) -> Result<String> {
+        let params = wire_ddl::BuildAlterTableParams {
+            conn_id: None,
+            from_spec: table_spec_from_design_with_schema(original, schema),
+            to_spec: table_spec_from_design_with_schema(new, schema),
+            column_renames: column_renames
+                .iter()
+                .map(|(old_name, new_name)| wire_ddl::ColumnRenameSpec {
+                    old_name: old_name.clone(),
+                    new_name: new_name.clone(),
+                })
+                .collect(),
+            options: wire_ddl::AlterTableOptions {
+                allow_destructive: true,
+                with_rollback: false,
+            },
+        };
+        let value = serde_json::to_value(params)?;
+        match self
+            .metadata::<wire_ddl::BuildAlterTableResult>(
+                connection,
+                wire_method::DDL_BUILD_ALTER_TABLE,
+                value,
+            )
+            .await
+        {
+            Ok(result) => Ok(join_ddl_statements(result.statements, None)),
+            Err(error) if is_not_supported(&error) => Ok(self
+                .compatible_plugin()
+                .map(|plugin| {
+                    plugin.build_alter_table_sql_with_renames(original, new, column_renames)
+                })
+                .unwrap_or_else(|| {
+                    self.build_alter_table_sql_with_renames(original, new, column_renames)
+                })),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn import_data_with_progress(
         &self,
         connection: &dyn DbConnection,
@@ -1850,6 +1934,84 @@ impl DatabasePlugin for ExternalDatabasePlugin {
     ) -> Result<ExportResult> {
         crate::ipc::export::export_data_with_progress(self, connection, config, progress_tx).await
     }
+
+    /// Prefer the driver's `schema/dump_ddl` result for structure export, falling
+    /// back to the generic column-based builder whenever the driver does not
+    /// implement the method, returns nothing, or the underlying DDL provider is
+    /// unavailable on the server (e.g. the GBase 8s `get_ddl` SPL recipe).
+    async fn export_table_create_sql(
+        &self,
+        connection: &dyn DbConnection,
+        database: &str,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        if self
+            .driver
+            .methods
+            .iter()
+            .any(|method| method == wire_method::SCHEMA_DUMP_DDL)
+        {
+            let mut params = serde_json::to_value(wire_schema::DumpDdlParams {
+                conn_id: 0,
+                objects: vec![wire_schema::ObjectRef {
+                    kind: wire_schema::ObjectKind::Table,
+                    name: table.to_string(),
+                    schema: schema.map(ToOwned::to_owned),
+                    database: Some(database.to_string()),
+                }],
+                options: wire_schema::DumpDdlOptions::default(),
+            })?;
+            // The per-connection driver_request_value auto-injects the real
+            // conn_id for schema-namespace methods; omit it here.
+            if let Some(obj) = params.as_object_mut() {
+                obj.remove("conn_id");
+            }
+            let dump = self
+                .metadata::<wire_schema::DumpDdlResult>(
+                    connection,
+                    wire_method::SCHEMA_DUMP_DDL,
+                    params,
+                )
+                .await;
+            if let Ok(result) = dump {
+                // Only trust statements that actually carry DDL. Some drivers
+                // (e.g. openGauss) reply to `schema/dump_ddl` for tables with a
+                // placeholder comment when they have no server-side provider;
+                // treating that as real output would replace the exported
+                // structure with a useless comment, so drop comment-only
+                // statements and fall back to the generic builder.
+                let real: Vec<String> = result
+                    .statements
+                    .into_iter()
+                    .filter(|statement| dump_statement_has_ddl(statement))
+                    .collect();
+                let joined = real.join("\n");
+                // The exporter appends `;` after the returned string, so strip
+                // trailing terminators/whitespace to avoid a double semicolon.
+                let joined = joined.trim_end().trim_end_matches(';').trim_end();
+                if !joined.is_empty() {
+                    return Ok(joined.to_string());
+                }
+            }
+        }
+        // Call the shared generic builder directly: a `DatabasePlugin::method`
+        // dispatch from inside an override would resolve back to this override
+        // and recurse, so opt into the default body via the free function.
+        crate::plugin::default_export_table_create_sql(self, connection, database, schema, table)
+            .await
+    }
+}
+
+/// Returns true when `statement` contains at least one line of real DDL, i.e.
+/// it is not blank and not a `--` SQL comment. Drivers that cannot provide a
+/// table definition sometimes emit a placeholder comment through
+/// `schema/dump_ddl`; such output must not be treated as an exported structure.
+fn dump_statement_has_ddl(statement: &str) -> bool {
+    statement.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with("--")
+    })
 }
 
 fn names_to_databases(names: Vec<String>) -> Vec<DatabaseInfo> {
@@ -1867,10 +2029,27 @@ fn names_to_databases(names: Vec<String>) -> Vec<DatabaseInfo> {
 }
 
 fn table_spec_from_design(design: &TableDesign) -> wire_ddl::TableSpec {
+    table_spec_from_design_with_schema(design, None)
+}
+
+// Build a TableSpec from a TableDesign, optionally qualifying the table with an
+// explicit schema. When a non-empty schema is provided the connection database
+// name is dropped: Oracle/PostgreSQL-compatible drivers (DM, Kingbase) treat
+// the `database` qualifier as the schema/owner and would otherwise emit
+// `"库名"."表名"` which neither database resolves.
+fn table_spec_from_design_with_schema(
+    design: &TableDesign,
+    schema: Option<&str>,
+) -> wire_ddl::TableSpec {
+    let schema = schema.filter(|schema| !schema.trim().is_empty());
+    let database = match schema {
+        Some(_) => None,
+        None => Some(design.database_name.clone()).filter(|database| !database.is_empty()),
+    };
     wire_ddl::TableSpec {
         name: design.table_name.clone(),
-        schema: None,
-        database: Some(design.database_name.clone()).filter(|database| !database.is_empty()),
+        schema: schema.map(str::to_string),
+        database,
         columns: design
             .columns
             .iter()
@@ -2011,7 +2190,7 @@ fn table_info_from_wire(object: wire_schema::ObjectInfo) -> TableInfo {
             }
             _ => TableObjectType::Table,
         },
-        schema: None,
+        schema: empty_to_none(object.schema),
         comment: empty_to_none(object.comment),
         engine: None,
         create_time: object.created_at,
@@ -2277,6 +2456,7 @@ mod tests {
         config: DbConnectionConfig,
         supports_alter_table_builder: bool,
         object_view: Option<serde_json::Value>,
+        last_alter_schema: std::sync::Mutex<Option<String>>,
     }
 
     struct RecordingQueryConnection {
@@ -2331,6 +2511,7 @@ mod tests {
                 },
                 supports_alter_table_builder: true,
                 object_view: None,
+                last_alter_schema: std::sync::Mutex::new(None),
             }
         }
 
@@ -2346,6 +2527,13 @@ mod tests {
                 supports_alter_table_builder: false,
                 ..Self::new()
             }
+        }
+
+        fn last_alter_schema(&self) -> Option<String> {
+            self.last_alter_schema
+                .lock()
+                .expect("last_alter_schema mutex poisoned")
+                .clone()
         }
     }
 
@@ -2420,6 +2608,12 @@ mod tests {
                     .clone()
                     .ok_or_else(|| DbError::NotSupported(method.to_string())),
                 wire_method::DDL_BUILD_ALTER_TABLE if self.supports_alter_table_builder => {
+                    if let Some(schema) = params["from_spec"]["schema"].as_str() {
+                        *self
+                            .last_alter_schema
+                            .lock()
+                            .expect("last_alter_schema mutex poisoned") = Some(schema.to_string());
+                    }
                     Ok(serde_json::json!({
                         "statements": ["DRIVER RENAME SQL"],
                         "rollback_statements": [],
@@ -2505,6 +2699,289 @@ mod tests {
                 binary_cells: vec![],
                 elapsed_ms: 0,
             }))
+        }
+
+        async fn current_database(&self) -> Result<Option<String>, DbError> {
+            Ok(None)
+        }
+
+        async fn switch_database(&self, _database: &str) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn execute_streaming(
+            &self,
+            _plugin: &dyn DatabasePlugin,
+            _source: SqlSource,
+            _options: ExecOptions,
+            _sender: mpsc::Sender<StreamingProgress>,
+        ) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    struct ExportDdlConnection {
+        config: DbConnectionConfig,
+    }
+
+    impl ExportDdlConnection {
+        fn new() -> Self {
+            Self {
+                config: DriverRequestOnlyConnection::new().config,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DbConnection for ExportDdlConnection {
+        fn config(&self) -> &DbConnectionConfig {
+            &self.config
+        }
+
+        fn set_config_database(&mut self, database: Option<String>) {
+            self.config.database = database;
+        }
+
+        async fn connect(&mut self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            _plugin: &dyn DatabasePlugin,
+            _script: &str,
+            _options: ExecOptions,
+        ) -> Result<Vec<SqlResult>, DbError> {
+            Err(DbError::query("execute should not be used by metadata"))
+        }
+
+        async fn query(&self, _query: &str) -> Result<SqlResult, DbError> {
+            Err(DbError::query("query should not be used by metadata"))
+        }
+
+        async fn driver_request_value(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, DbError> {
+            match method {
+                wire_method::SCHEMA_COLUMNS => Ok(serde_json::json!([
+                    {
+                        "ordinal": 1,
+                        "name": "id",
+                        "type": "INTEGER",
+                        "raw_type": "INTEGER",
+                        "nullable": false,
+                        "default": null,
+                        "is_primary": true,
+                        "is_unique": false,
+                        "is_partition_key": false,
+                        "is_clustering_key": false,
+                        "max_length": null,
+                        "precision": null,
+                        "scale": null,
+                        "comment": "event id",
+                        "extra": null
+                    },
+                    {
+                        "ordinal": 2,
+                        "name": "name",
+                        "type": "VARCHAR(64)",
+                        "raw_type": "VARCHAR(64)",
+                        "nullable": true,
+                        "default": null,
+                        "is_primary": false,
+                        "is_unique": false,
+                        "is_partition_key": false,
+                        "is_clustering_key": false,
+                        "max_length": 64,
+                        "precision": null,
+                        "scale": null,
+                        "comment": "customer name",
+                        "extra": null
+                    }
+                ])),
+                wire_method::SCHEMA_OBJECTS if params["kinds"][0] == "table" => {
+                    Ok(serde_json::json!([
+                        {
+                            "name": "events",
+                            "kind": "table",
+                            "schema": "",
+                            "comment": "event stream",
+                            "extra": null
+                        }
+                    ]))
+                }
+                other => Err(DbError::NotSupported(other.to_string())),
+            }
+        }
+
+        async fn current_database(&self) -> Result<Option<String>, DbError> {
+            Ok(None)
+        }
+
+        async fn switch_database(&self, _database: &str) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn execute_streaming(
+            &self,
+            _plugin: &dyn DatabasePlugin,
+            _source: SqlSource,
+            _options: ExecOptions,
+            _sender: mpsc::Sender<StreamingProgress>,
+        ) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    struct DumpDdlConnection {
+        config: DbConnectionConfig,
+        empty_dump: bool,
+        comment_only: bool,
+        dump_params: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    impl DumpDdlConnection {
+        fn new() -> Self {
+            Self::with_empty_dump(false)
+        }
+
+        fn with_comment_only_dump(comment_only: bool) -> Self {
+            Self {
+                config: DriverRequestOnlyConnection::new().config,
+                empty_dump: false,
+                comment_only,
+                dump_params: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn with_empty_dump(empty_dump: bool) -> Self {
+            Self {
+                config: DriverRequestOnlyConnection::new().config,
+                empty_dump,
+                comment_only: false,
+                dump_params: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn dump_params(&self) -> serde_json::Value {
+            self.dump_params
+                .lock()
+                .expect("dump_params mutex poisoned")
+                .clone()
+                .unwrap_or(serde_json::Value::Null)
+        }
+    }
+
+    #[async_trait]
+    impl DbConnection for DumpDdlConnection {
+        fn config(&self) -> &DbConnectionConfig {
+            &self.config
+        }
+
+        fn set_config_database(&mut self, database: Option<String>) {
+            self.config.database = database;
+        }
+
+        async fn connect(&mut self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            _plugin: &dyn DatabasePlugin,
+            _script: &str,
+            _options: ExecOptions,
+        ) -> Result<Vec<SqlResult>, DbError> {
+            Err(DbError::query("execute should not be used by metadata"))
+        }
+
+        async fn query(&self, _query: &str) -> Result<SqlResult, DbError> {
+            Err(DbError::query("query should not be used by metadata"))
+        }
+
+        async fn driver_request_value(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, DbError> {
+            match method {
+                wire_method::SCHEMA_DUMP_DDL => {
+                    *self.dump_params.lock().expect("dump_params mutex poisoned") = Some(params);
+                    if self.empty_dump {
+                        Ok(serde_json::json!({ "statements": [] }))
+                    } else if self.comment_only {
+                        Ok(serde_json::json!({
+                            "statements": [
+                                "-- DDL dump for table events requires server-side pg_get_tabledef support"
+                            ]
+                        }))
+                    } else {
+                        Ok(serde_json::json!({
+                            "statements": [
+                                "CREATE TABLE events (\n    id INTEGER NOT NULL\n)\nALTER TABLE events ADD CONSTRAINT PRIMARY KEY (id);\nCOMMENT ON TABLE events IS 'event stream';"
+                            ]
+                        }))
+                    }
+                }
+                wire_method::SCHEMA_COLUMNS => Ok(serde_json::json!([
+                    {
+                        "ordinal": 1,
+                        "name": "id",
+                        "type": "INTEGER",
+                        "raw_type": "INTEGER",
+                        "nullable": false,
+                        "default": null,
+                        "is_primary": true,
+                        "is_unique": false,
+                        "is_partition_key": false,
+                        "is_clustering_key": false,
+                        "max_length": null,
+                        "precision": null,
+                        "scale": null,
+                        "comment": "event id",
+                        "extra": null
+                    },
+                    {
+                        "ordinal": 2,
+                        "name": "name",
+                        "type": "VARCHAR(64)",
+                        "raw_type": "VARCHAR(64)",
+                        "nullable": true,
+                        "default": null,
+                        "is_primary": false,
+                        "is_unique": false,
+                        "is_partition_key": false,
+                        "is_clustering_key": false,
+                        "max_length": 64,
+                        "precision": null,
+                        "scale": null,
+                        "comment": "customer name",
+                        "extra": null
+                    }
+                ])),
+                wire_method::SCHEMA_OBJECTS if params["kinds"][0] == "table" => {
+                    Ok(serde_json::json!([
+                        {
+                            "name": "events",
+                            "kind": "table",
+                            "schema": "",
+                            "comment": "event stream",
+                            "extra": null
+                        }
+                    ]))
+                }
+                other => Err(DbError::NotSupported(other.to_string())),
+            }
         }
 
         async fn current_database(&self) -> Result<Option<String>, DbError> {
@@ -2745,6 +3222,25 @@ mod tests {
         assert_eq!(
             "\"APP\".\"EVENTS\"",
             plugin.format_table_reference("", Some("APP"), "EVENTS")
+        );
+    }
+
+    #[test]
+    fn external_table_reference_without_schema_omits_database_for_true_schema() {
+        // GBase 8s / Informix-style driver: schema is a real owner namespace, the connection
+        // is database-bound, and `db.table` is parsed as `owner.table` (so `db` is invalid).
+        let mut driver = driver_manifest("gbase8s", true, "gbase8s.connection");
+        driver.dialect.identifier_quote_left = String::new();
+        driver.dialect.identifier_quote_right = None;
+        let plugin = ExternalDatabasePlugin::for_driver(driver);
+
+        assert_eq!(
+            "informix.demo_parent",
+            plugin.format_table_reference("onetcli_demo1", Some("informix"), "demo_parent")
+        );
+        assert_eq!(
+            "demo_parent",
+            plugin.format_table_reference("onetcli_demo1", None, "demo_parent")
         );
     }
 
@@ -3168,6 +3664,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_export_table_create_sql_includes_primary_key_and_comments() {
+        let plugin = ExternalDatabasePlugin::new();
+        let connection = ExportDdlConnection::new();
+
+        let ddl = plugin
+            .export_table_create_sql(&connection, "main", None, "events")
+            .await
+            .expect("default export_table_create_sql should succeed");
+
+        assert_eq!(
+            "CREATE TABLE \"events\" (\n    \"id\" INTEGER NOT NULL,\n    \"name\" VARCHAR(64),\n    PRIMARY KEY (\"id\")\n)\nCOMMENT ON TABLE \"events\" IS 'event stream';\nCOMMENT ON COLUMN \"events\".\"id\" IS 'event id';\nCOMMENT ON COLUMN \"events\".\"name\" IS 'customer name'",
+            ddl
+        );
+    }
+
+    #[tokio::test]
+    async fn export_table_create_sql_uses_driver_dump_ddl_when_declared() {
+        let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
+        driver.methods = vec![wire_method::SCHEMA_DUMP_DDL.to_string()];
+        let plugin = ExternalDatabasePlugin::for_driver(driver);
+        let connection = DumpDdlConnection::new();
+
+        let ddl = plugin
+            .export_table_create_sql(&connection, "main", Some("public"), "events")
+            .await
+            .expect("driver schema/dump_ddl should succeed");
+
+        let params = connection.dump_params();
+        assert_eq!("table", params["objects"][0]["kind"].as_str().unwrap());
+        assert_eq!("events", params["objects"][0]["name"].as_str().unwrap());
+        assert_eq!("public", params["objects"][0]["schema"].as_str().unwrap());
+        assert_eq!("main", params["objects"][0]["database"].as_str().unwrap());
+        assert_eq!(Some(false), params["options"]["if_not_exists"].as_bool());
+        assert!(
+            params.get("conn_id").is_none(),
+            "conn_id should be auto-injected by the host"
+        );
+
+        // The driver statement ends with `;`; the host strips the trailing
+        // terminator because the SQL exporter appends one after the string.
+        assert_eq!(
+            "CREATE TABLE events (\n    id INTEGER NOT NULL\n)\nALTER TABLE events ADD CONSTRAINT PRIMARY KEY (id);\nCOMMENT ON TABLE events IS 'event stream'",
+            ddl
+        );
+    }
+
+    #[tokio::test]
+    async fn export_table_create_sql_falls_back_when_dump_ddl_returns_nothing() {
+        let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
+        driver.methods = vec![wire_method::SCHEMA_DUMP_DDL.to_string()];
+        let plugin = ExternalDatabasePlugin::for_driver(driver);
+        let connection = DumpDdlConnection::with_empty_dump(true);
+
+        let ddl = plugin
+            .export_table_create_sql(&connection, "main", None, "events")
+            .await
+            .expect("empty dump_ddl should fall back to the default builder");
+
+        assert_eq!(
+            "CREATE TABLE \"events\" (\n    \"id\" INTEGER NOT NULL,\n    \"name\" VARCHAR(64),\n    PRIMARY KEY (\"id\")\n)\nCOMMENT ON TABLE \"events\" IS 'event stream';\nCOMMENT ON COLUMN \"events\".\"id\" IS 'event id';\nCOMMENT ON COLUMN \"events\".\"name\" IS 'customer name'",
+            ddl
+        );
+    }
+
+    #[tokio::test]
+    async fn export_table_create_sql_falls_back_when_dump_ddl_is_comment_only() {
+        let mut driver = driver_manifest("ddl-driver", true, "ddl-driver.connection");
+        driver.methods = vec![wire_method::SCHEMA_DUMP_DDL.to_string()];
+        let plugin = ExternalDatabasePlugin::for_driver(driver);
+        let connection = DumpDdlConnection::with_comment_only_dump(true);
+
+        let ddl = plugin
+            .export_table_create_sql(&connection, "main", None, "events")
+            .await
+            .expect("comment-only dump_ddl should fall back to the default builder");
+
+        assert!(
+            ddl.starts_with("CREATE TABLE \"events\""),
+            "comment-only dump_ddl must not replace the exported structure with a comment"
+        );
+        assert!(ddl.contains("PRIMARY KEY (\"id\")"));
+    }
+
+    #[tokio::test]
     async fn object_view_uses_driver_columns_widths_and_rows() {
         let plugin = ExternalDatabasePlugin::new();
         let connection = DriverRequestOnlyConnection::with_object_view(serde_json::json!({
@@ -3362,6 +3942,49 @@ mod tests {
             .unwrap();
 
         assert_eq!("DRIVER RENAME SQL;", sql);
+    }
+
+    #[tokio::test]
+    async fn async_alter_with_schema_forwards_schema_to_driver() {
+        let plugin = ExternalDatabasePlugin::new();
+        let connection = DriverRequestOnlyConnection::new();
+        let mut original = TableDesign::new("comi_ai_manager", "AI_SCHEDULED_TASK");
+        original.add_column(ColumnDefinition::new("payload").data_type("VARCHAR"));
+        let mut current = TableDesign::new("comi_ai_manager", "AI_SCHEDULED_TASK");
+        current.add_column(ColumnDefinition::new("body").data_type("VARCHAR"));
+
+        let sql = plugin
+            .build_alter_table_sql_with_schema_async(
+                &connection,
+                Some("comi_ai_manager"),
+                &original,
+                &current,
+                &[("payload".to_string(), "body".to_string())],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!("DRIVER RENAME SQL;", sql);
+        assert_eq!(
+            Some("comi_ai_manager".to_string()),
+            connection.last_alter_schema()
+        );
+    }
+
+    #[test]
+    fn table_spec_with_schema_sets_schema_and_drops_database() {
+        let mut design = TableDesign::new("comi_ai_manager", "AI_SCHEDULED_TASK");
+        design.add_column(ColumnDefinition::new("id").data_type("INTEGER"));
+
+        // Explicit schema: qualify with schema and drop the connection database.
+        let spec = table_spec_from_design_with_schema(&design, Some("comi_ai_manager"));
+        assert_eq!(Some("comi_ai_manager".to_string()), spec.schema);
+        assert_eq!(None, spec.database);
+
+        // No schema: fall back to the connection database name.
+        let spec = table_spec_from_design_with_schema(&design, None);
+        assert_eq!(None, spec.schema);
+        assert_eq!(Some("comi_ai_manager".to_string()), spec.database);
     }
 
     #[tokio::test]
