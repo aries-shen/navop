@@ -180,6 +180,8 @@ fn to_ssh_connection(
         t!("Home.ConnectionImport.field_connection_name").as_ref(),
     )?;
     let params = SshParams {
+        sftp_default_directory: None,
+        disabled_jump_server: None,
         sftp_account: None,
         host: required_text(&draft.host, t!("Home.ConnectionImport.field_host").as_ref())?,
         port: required_port(&draft.port)?,

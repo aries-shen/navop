@@ -1417,6 +1417,8 @@ pub struct SftpView {
     connection_state: ConnectionState,
     close_state: CloseState,
     sftp_config: SshConnectConfig,
+    /// 连接成功后进入的 SFTP 初始目录（配置的 `sftp_default_directory`）；`None` 时回退到服务器登录目录。
+    sftp_initial_directory: Option<String>,
     credential_inputs: Option<SftpCredentialInputs>,
     sftp_client: Option<Arc<Mutex<RusshSftpClient>>>,
     /// 当前主 SFTP 连接尝试的代次；迟到的异步结果不能覆盖更新的连接。
@@ -1496,6 +1498,7 @@ impl SftpView {
             .expect("StoredConnection should contain valid SSH params");
         let config = resolved.config;
         let credential_prompt_policy = resolved.credential_prompt_policy;
+        let sftp_initial_directory = resolved.sftp_initial_directory;
 
         let focus_handle = cx.focus_handle();
         let local_current_path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
@@ -1697,6 +1700,7 @@ impl SftpView {
             },
             close_state: CloseState::Open,
             sftp_config: config,
+            sftp_initial_directory,
             credential_inputs,
             sftp_client: None,
             connection_generation: ConnectionGeneration::default(),
@@ -1784,6 +1788,7 @@ impl SftpView {
         self.set_connection_state(ConnectionState::Connecting, cx);
         let config = self.sftp_config.clone();
         let window_handle = self.window_handle.clone();
+        let initial_directory = self.sftp_initial_directory.clone();
 
         tracing::info!(
             "Connecting to SFTP server: {}@{}",
@@ -1793,8 +1798,19 @@ impl SftpView {
 
         let task = Tokio::spawn(cx, async move {
             let mut client = RusshSftpClient::connect(config).await?;
-            // 连接成功后立即获取当前工作目录的真实路径
-            let real_path = client.realpath(".").await.ok();
+            // 连接成功后确定远端工作目录：优先使用配置的初始目录，否则使用服务器登录目录
+            let real_path = match initial_directory {
+                Some(dir) => match client.realpath(&dir).await.ok() {
+                    Some(path) => Some(path),
+                    None => {
+                        tracing::warn!(
+                            "Configured SFTP initial directory could not be resolved: {dir}"
+                        );
+                        client.realpath(".").await.ok()
+                    }
+                },
+                None => client.realpath(".").await.ok(),
+            };
             Ok::<_, anyhow::Error>((client, real_path))
         });
 
@@ -4127,11 +4143,8 @@ impl SftpView {
     }
 
     fn background_task_group(&self) -> SharedString {
-        if let Some(index) = self.tab_index {
-            format!("SFTP · {}({index})", self.connection_name).into()
-        } else {
-            format!("SFTP · {}", self.connection_name).into()
-        }
+        // 分组标题只保留「连接名称 - IP」，同一连接的多个面板合并到同一分组。
+        format!("{} - {}", self.connection_name, self.sftp_config.host).into()
     }
 
     fn register_local_background_task(
@@ -7585,6 +7598,8 @@ mod tests {
         StoredConnection::new_ssh(
             "SFTP entity test".to_string(),
             SshParams {
+                sftp_default_directory: None,
+                disabled_jump_server: None,
                 sftp_account: None,
                 host: "sftp-entity-test.internal".to_string(),
                 port: 2222,

@@ -304,6 +304,8 @@ mod tests {
 
     fn ssh_params() -> SshParams {
         SshParams {
+            sftp_default_directory: None,
+            disabled_jump_server: None,
             sftp_account: None,
             host: "example.com".to_string(),
             port: 22,

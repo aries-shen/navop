@@ -24,6 +24,8 @@ fn password_reference(id: i64) -> CredentialReference {
 
 fn ssh_params(reference: Option<CredentialReference>) -> SshParams {
     SshParams {
+        sftp_default_directory: None,
+        disabled_jump_server: None,
         sftp_account: None,
         host: "ssh.example.com".to_string(),
         port: 22,

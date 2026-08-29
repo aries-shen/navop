@@ -240,6 +240,7 @@ pub struct SshFormWindow {
     // 初始化
     init_script_input: Entity<InputState>,
     default_directory_input: Entity<InputState>,
+    sftp_default_directory_input: Entity<InputState>,
 
     // 其他设置
     remark_input: Entity<InputState>,
@@ -390,11 +391,16 @@ async fn detect_remote_os_id(client: &mut RusshClient) -> Option<String> {
     .await
     .ok()??;
 
-    parse_os_release_id(&output).or_else(|| match output.trim() {
-        // 无 os-release 的系统回退到 uname（如 macOS）
+    parse_os_release_id(&output).or_else(|| parse_uname_os_id(&output))
+}
+
+/// 无 os-release 时按 `uname -s` 输出识别操作系统 ID（如 macOS、FreeBSD）。
+fn parse_uname_os_id(output: &str) -> Option<String> {
+    match output.trim() {
         "Darwin" => Some("macos".to_string()),
+        "FreeBSD" => Some("freebsd".to_string()),
         _ => None,
-    })
+    }
 }
 
 /// 从 /etc/os-release 内容中解析 ID 字段（统一小写）。
@@ -461,6 +467,65 @@ fn save_block_message(reason: &str) -> String {
             t!("SSH.save_while_uninstalling_shell_integration").to_string()
         }
         _ => t!("SSH.validation_error").to_string(),
+    }
+}
+
+/// 将跳板机配置回填到表单输入框；`enabled` 输出该配置是否处于启用状态。
+#[allow(clippy::too_many_arguments)]
+fn load_jump_server_into_form(
+    jump: &JumpServerConfig,
+    jump_auth_method: &mut AuthMethodSelection,
+    jump_credential_reference: &mut Option<one_core::storage::CredentialReference>,
+    enabled: &mut bool,
+    jump_host_input: &Entity<InputState>,
+    jump_port_input: &Entity<InputState>,
+    jump_username_input: &Entity<InputState>,
+    jump_password_input: &Entity<InputState>,
+    jump_key_path_input: &Entity<InputState>,
+    jump_private_key_content_input: &Entity<InputState>,
+    jump_passphrase_input: &Entity<InputState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    *jump_credential_reference = jump.credential_reference.clone();
+    *enabled = true;
+    jump_host_input.update(cx, |s, cx| s.set_value(&jump.host, window, cx));
+    jump_port_input.update(cx, |s, cx| s.set_value(&jump.port.to_string(), window, cx));
+    jump_username_input.update(cx, |s, cx| s.set_value(&jump.username, window, cx));
+    match jump.auth_method {
+        SshAuthMethod::Password { ref password } => {
+            *jump_auth_method = AuthMethodSelection::Password;
+            jump_password_input.update(cx, |s, cx| s.set_value(password, window, cx));
+        }
+        SshAuthMethod::PrivateKey {
+            ref key_path,
+            ref passphrase,
+        } => {
+            *jump_auth_method = AuthMethodSelection::PrivateKey;
+            jump_key_path_input.update(cx, |s, cx| s.set_value(key_path, window, cx));
+            if let Some(ref pass) = passphrase {
+                jump_passphrase_input.update(cx, |s, cx| s.set_value(pass, window, cx));
+            }
+        }
+        SshAuthMethod::PrivateKeyContent {
+            ref private_key,
+            ref passphrase,
+        } => {
+            *jump_auth_method = AuthMethodSelection::PrivateKeyContent;
+            jump_private_key_content_input.update(cx, |s, cx| s.set_value(private_key, window, cx));
+            if let Some(ref pass) = passphrase {
+                jump_passphrase_input.update(cx, |s, cx| s.set_value(pass, window, cx));
+            }
+        }
+        SshAuthMethod::Agent => {
+            *jump_auth_method = AuthMethodSelection::Agent;
+        }
+        SshAuthMethod::Pageant => {
+            *jump_auth_method = AuthMethodSelection::Pageant;
+        }
+        SshAuthMethod::AutoPublicKey => {
+            *jump_auth_method = AuthMethodSelection::AutoPublicKey;
+        }
     }
 }
 
@@ -629,6 +694,9 @@ impl SshFormWindow {
         let default_directory_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t!("SSH.default_directory_placeholder"))
         });
+        let sftp_default_directory_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("SSH.sftp_default_directory_placeholder"))
+        });
 
         // 其他设置
         let remark_input = cx.new(|cx| {
@@ -764,6 +832,9 @@ impl SshFormWindow {
                 if let Some(ref dir) = params.default_directory {
                     default_directory_input.update(cx, |s, cx| s.set_value(dir, window, cx));
                 }
+                if let Some(ref dir) = params.sftp_default_directory {
+                    sftp_default_directory_input.update(cx, |s, cx| s.set_value(dir, window, cx));
+                }
                 if let Some(ref script) = params.init_script {
                     init_script_input.update(cx, |s, cx| s.set_value(script, window, cx));
                 }
@@ -776,54 +847,41 @@ impl SshFormWindow {
                     select.set_selected_value(&params.terminal_type, window, cx);
                 });
 
-                // 加载跳板机设置
+                // 加载跳板机设置：启用与停用保留的配置都回填表单，仅启用状态不同
                 if let Some(ref jump) = params.jump_server {
-                    jump_credential_reference = jump.credential_reference.clone();
-                    enable_jump_server = true;
-                    jump_host_input.update(cx, |s, cx| s.set_value(&jump.host, window, cx));
-                    jump_port_input
-                        .update(cx, |s, cx| s.set_value(&jump.port.to_string(), window, cx));
-                    jump_username_input.update(cx, |s, cx| s.set_value(&jump.username, window, cx));
-                    match jump.auth_method {
-                        SshAuthMethod::Password { ref password } => {
-                            jump_auth_method = AuthMethodSelection::Password;
-                            jump_password_input
-                                .update(cx, |s, cx| s.set_value(password, window, cx));
-                        }
-                        SshAuthMethod::PrivateKey {
-                            ref key_path,
-                            ref passphrase,
-                        } => {
-                            jump_auth_method = AuthMethodSelection::PrivateKey;
-                            jump_key_path_input
-                                .update(cx, |s, cx| s.set_value(key_path, window, cx));
-                            if let Some(ref pass) = passphrase {
-                                jump_passphrase_input
-                                    .update(cx, |s, cx| s.set_value(pass, window, cx));
-                            }
-                        }
-                        SshAuthMethod::PrivateKeyContent {
-                            ref private_key,
-                            ref passphrase,
-                        } => {
-                            jump_auth_method = AuthMethodSelection::PrivateKeyContent;
-                            jump_private_key_content_input
-                                .update(cx, |s, cx| s.set_value(private_key, window, cx));
-                            if let Some(ref pass) = passphrase {
-                                jump_passphrase_input
-                                    .update(cx, |s, cx| s.set_value(pass, window, cx));
-                            }
-                        }
-                        SshAuthMethod::Agent => {
-                            jump_auth_method = AuthMethodSelection::Agent;
-                        }
-                        SshAuthMethod::Pageant => {
-                            jump_auth_method = AuthMethodSelection::Pageant;
-                        }
-                        SshAuthMethod::AutoPublicKey => {
-                            jump_auth_method = AuthMethodSelection::AutoPublicKey;
-                        }
-                    }
+                    load_jump_server_into_form(
+                        jump,
+                        &mut jump_auth_method,
+                        &mut jump_credential_reference,
+                        &mut enable_jump_server,
+                        &jump_host_input,
+                        &jump_port_input,
+                        &jump_username_input,
+                        &jump_password_input,
+                        &jump_key_path_input,
+                        &jump_private_key_content_input,
+                        &jump_passphrase_input,
+                        window,
+                        cx,
+                    );
+                }
+                if let Some(ref jump) = params.disabled_jump_server {
+                    let mut enabled = false;
+                    load_jump_server_into_form(
+                        jump,
+                        &mut jump_auth_method,
+                        &mut jump_credential_reference,
+                        &mut enabled,
+                        &jump_host_input,
+                        &jump_port_input,
+                        &jump_username_input,
+                        &jump_password_input,
+                        &jump_key_path_input,
+                        &jump_private_key_content_input,
+                        &jump_passphrase_input,
+                        window,
+                        cx,
+                    );
                 }
 
                 // 加载独立 SFTP 账户设置
@@ -963,6 +1021,7 @@ impl SshFormWindow {
             allow_legacy_algorithms,
             init_script_input,
             default_directory_input,
+            sftp_default_directory_input,
             remark_input,
             last_tested_signature: None,
             detected_os_id,
@@ -1017,6 +1076,47 @@ impl SshFormWindow {
             picker.set_capabilities(credential_capabilities_for_auth(auth_method), window, cx);
         });
         cx.notify();
+    }
+
+    /// 读取跳板机表单当前配置；主机为空或缺少用户名时返回 `None`。
+    ///
+    /// 启用与停用状态共用本方法，保证停用时已填信息仍可完整持久化。
+    fn collect_jump_server_config(&self, cx: &App) -> Option<JumpServerConfig> {
+        let jump_host = self.jump_host_input.read(cx).text().to_string();
+        let jump_username = self.jump_username_input.read(cx).text().to_string();
+        let jump_picker = self.jump_credential_picker.read(cx);
+        let jump_username_referenced = jump_picker.field_referenced(CredentialField::Username);
+        if jump_host.is_empty() || (jump_username.is_empty() && !jump_username_referenced) {
+            return None;
+        }
+        let jump_port: u16 = self
+            .jump_port_input
+            .read(cx)
+            .text()
+            .to_string()
+            .parse()
+            .unwrap_or(22);
+        let jump_password = self.jump_password_input.read(cx).text().to_string();
+        let jump_key_path = self.jump_key_path_input.read(cx).text().to_string();
+        let jump_private_key = self
+            .jump_private_key_content_input
+            .read(cx)
+            .text()
+            .to_string();
+        let jump_passphrase = self.jump_passphrase_input.read(cx).text().to_string();
+        Some(JumpServerConfig {
+            host: jump_host,
+            port: jump_port,
+            username: jump_username,
+            credential_reference: jump_picker.selected_reference(),
+            auth_method: build_jump_auth_method(
+                self.jump_auth_method,
+                jump_password,
+                jump_key_path,
+                jump_private_key,
+                jump_passphrase,
+            ),
+        })
     }
 
     fn build_ssh_params(&self, cx: &App) -> Option<SshParams> {
@@ -1102,46 +1202,20 @@ impl SshFormWindow {
             let s = self.init_script_input.read(cx).text().to_string();
             if s.is_empty() { None } else { Some(s) }
         };
-        // 跳板机配置
-        let jump_server = if self.enable_jump_server {
-            let jump_host = self.jump_host_input.read(cx).text().to_string();
-            let jump_username = self.jump_username_input.read(cx).text().to_string();
-            let jump_picker = self.jump_credential_picker.read(cx);
-            let jump_username_referenced = jump_picker.field_referenced(CredentialField::Username);
-            if !jump_host.is_empty() && (!jump_username.is_empty() || jump_username_referenced) {
-                let jump_port: u16 = self
-                    .jump_port_input
-                    .read(cx)
-                    .text()
-                    .to_string()
-                    .parse()
-                    .unwrap_or(22);
-                let jump_password = self.jump_password_input.read(cx).text().to_string();
-                let jump_key_path = self.jump_key_path_input.read(cx).text().to_string();
-                let jump_private_key = self
-                    .jump_private_key_content_input
-                    .read(cx)
-                    .text()
-                    .to_string();
-                let jump_passphrase = self.jump_passphrase_input.read(cx).text().to_string();
-                Some(JumpServerConfig {
-                    host: jump_host,
-                    port: jump_port,
-                    username: jump_username,
-                    credential_reference: jump_picker.selected_reference(),
-                    auth_method: build_jump_auth_method(
-                        self.jump_auth_method,
-                        jump_password,
-                        jump_key_path,
-                        jump_private_key,
-                        jump_passphrase,
-                    ),
-                })
-            } else {
-                None
-            }
+        let sftp_default_directory = {
+            let s = self
+                .sftp_default_directory_input
+                .read(cx)
+                .text()
+                .to_string();
+            if s.is_empty() { None } else { Some(s) }
+        };
+        // 跳板机配置：启用时读取表单并生效；停用时保留已填信息以便下次恢复
+        let jump_config = self.collect_jump_server_config(cx);
+        let (jump_server, disabled_jump_server) = if self.enable_jump_server {
+            (jump_config, None)
         } else {
-            None
+            (None, jump_config)
         };
 
         // 代理配置
@@ -1231,6 +1305,7 @@ impl SshFormWindow {
             keepalive_max,
             default_directory,
             init_script,
+            sftp_default_directory,
             disable_shell_integration: None,
             x11_forwarding: if self.x11_forwarding {
                 Some(true)
@@ -1243,6 +1318,7 @@ impl SshFormWindow {
                 None
             },
             jump_server,
+            disabled_jump_server,
             proxy,
             os_id: self.detected_os_id.clone(),
             icon: self.manual_icon.clone(),
@@ -2362,6 +2438,13 @@ impl SshFormWindow {
             )
             .child(
                 self.render_form_row(
+                    &t!("SSH.sftp_default_directory"),
+                    self.render_form_input(&self.sftp_default_directory_input),
+                )
+                .debug_selector(|| "ssh-sftp-default-directory-row".to_string()),
+            )
+            .child(
+                self.render_form_row(
                     &t!("SSH.x11_forwarding"),
                     h_flex()
                         .w_full()
@@ -2447,9 +2530,7 @@ impl SshFormWindow {
                                 } else {
                                     t!("SSH.uninstall_shell_integration").to_string()
                                 })
-                                .disabled(
-                                    self.is_testing || self.is_uninstalling_shell_integration,
-                                )
+                                .disabled(self.is_testing || self.is_uninstalling_shell_integration)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.on_uninstall_shell_integration(window, cx);
                                 })),
@@ -3084,16 +3165,16 @@ mod tests {
         AuthMethodSelection, build_connection_test_signature, build_jump_auth_method,
         connection_test_host_key_request, connection_test_needs_xquartz_warning,
         credential_capabilities_for_auth, format_connection_error,
-        format_connection_error_for_platform, parse_os_release_id, validate_save_state,
-        xquartz_installation_warning_required,
+        format_connection_error_for_platform, parse_os_release_id, parse_uname_os_id,
+        validate_save_state, xquartz_installation_warning_required,
     };
     use anyhow::Context as _;
     use connection_form::credential::CredentialCapabilities;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use one_core::settings::AppSettings;
     use one_core::storage::{
-        SftpAccount, SshAuthMethod, SshParams, StoredConnection, StoredTerminalEncoding,
-        StoredTerminalType,
+        JumpServerConfig, SftpAccount, SshAuthMethod, SshParams, StoredConnection,
+        StoredTerminalEncoding, StoredTerminalType,
     };
     use rust_i18n::t;
     use ssh::{HostKeyDetails, HostKeyIdentity, HostKeyRejection, HostKeyRoute};
@@ -3103,6 +3184,8 @@ mod tests {
     fn sample_params() -> SshParams {
         SshParams {
             sftp_account: None,
+            sftp_default_directory: None,
+            disabled_jump_server: None,
             host: "127.0.0.1".to_string(),
             port: 22,
             username: "root".to_string(),
@@ -3384,6 +3467,136 @@ mod tests {
                 password: "sftp-secret".to_string(),
             })
         );
+    }
+
+    #[gpui::test]
+    fn ssh_form_loads_and_builds_sftp_default_directory(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(AppSettings::default());
+            gpui_component::init(cx);
+        });
+        let mut params = sample_params();
+        params.sftp_default_directory = Some("/data/upload".to_string());
+        let initial_connection = StoredConnection::new_ssh("sftp-dir".to_string(), params, None);
+        let (form, cx) = cx.add_window_view(|window, cx| {
+            super::SshFormWindow::new(
+                super::SshFormWindowConfig {
+                    editing_connection: None,
+                    initial_connection: Some(initial_connection),
+                    on_saved: None,
+                    workspaces: Vec::new(),
+                    teams: Vec::new(),
+                },
+                window,
+                cx,
+            )
+        });
+
+        let built = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("预填 SFTP 初始目录的表单应能构建参数");
+        assert_eq!(
+            built.sftp_default_directory,
+            Some("/data/upload".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn ssh_form_preserves_disabled_jump_server_for_restore(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(AppSettings::default());
+            gpui_component::init(cx);
+        });
+        let mut params = sample_params();
+        params.disabled_jump_server = Some(JumpServerConfig {
+            host: "jump.example.com".to_string(),
+            port: 2222,
+            username: "jump-user".to_string(),
+            credential_reference: None,
+            auth_method: SshAuthMethod::Password {
+                password: "jump-secret".to_string(),
+            },
+        });
+        let initial_connection =
+            StoredConnection::new_ssh("disabled-jump".to_string(), params, None);
+        let (form, cx) = cx.add_window_view(|window, cx| {
+            super::SshFormWindow::new(
+                super::SshFormWindowConfig {
+                    editing_connection: None,
+                    initial_connection: Some(initial_connection),
+                    on_saved: None,
+                    workspaces: Vec::new(),
+                    teams: Vec::new(),
+                },
+                window,
+                cx,
+            )
+        });
+
+        form.read_with(cx, |form, _| {
+            assert!(!form.enable_jump_server, "停用的跳板机不应自动启用");
+        });
+        form.read_with(cx, |form, cx| {
+            assert_eq!(form.jump_host_input.read(cx).text(), "jump.example.com");
+            assert_eq!(form.jump_username_input.read(cx).text(), "jump-user");
+            assert_eq!(form.jump_password_input.read(cx).text(), "jump-secret");
+        });
+
+        // 保持停用保存：配置继续保留在 disabled_jump_server，不进入生效的 jump_server
+        let disabled = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("停用跳板机的表单应能构建参数");
+        assert!(disabled.jump_server.is_none());
+        let stash = disabled
+            .disabled_jump_server
+            .expect("停用的跳板机配置应被保留");
+        assert_eq!(stash.host, "jump.example.com");
+        assert!(matches!(
+            stash.auth_method,
+            SshAuthMethod::Password { ref password } if password == "jump-secret"
+        ));
+
+        // 重新启用保存：同一份数据切换到生效的 jump_server
+        form.update(cx, |form, cx| {
+            form.enable_jump_server = true;
+            cx.notify();
+        });
+        let enabled = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("启用跳板机的表单应能构建参数");
+        let active = enabled.jump_server.expect("启用的跳板机配置应生效");
+        assert_eq!(active.host, "jump.example.com");
+        assert_eq!(active.username, "jump-user");
+        assert!(enabled.disabled_jump_server.is_none());
+    }
+
+    #[gpui::test]
+    fn ssh_form_ignores_both_jump_sources_when_jump_fields_absent(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(AppSettings::default());
+            gpui_component::init(cx);
+        });
+        let params = sample_params();
+        let initial_connection = StoredConnection::new_ssh("no-jump".to_string(), params, None);
+        let (form, cx) = cx.add_window_view(|window, cx| {
+            super::SshFormWindow::new(
+                super::SshFormWindowConfig {
+                    editing_connection: None,
+                    initial_connection: Some(initial_connection),
+                    on_saved: None,
+                    workspaces: Vec::new(),
+                    teams: Vec::new(),
+                },
+                window,
+                cx,
+            )
+        });
+
+        let built = form
+            .read_with(cx, |form, cx| form.build_ssh_params(cx))
+            .expect("无跳板机的表单应能构建参数");
+        assert!(built.jump_server.is_none());
+        assert!(built.disabled_jump_server.is_none());
     }
 
     #[gpui::test]
@@ -3739,6 +3952,14 @@ mod tests {
         assert_eq!(None, parse_os_release_id("ID_LIKE=debian\n"));
         assert_eq!(None, parse_os_release_id("ID=\n"));
         assert_eq!(None, parse_os_release_id("Linux\n"));
+    }
+
+    #[test]
+    fn uname_fallback_maps_darwin_and_freebsd_only() {
+        assert_eq!(Some("macos".to_string()), parse_uname_os_id("Darwin\n"));
+        assert_eq!(Some("freebsd".to_string()), parse_uname_os_id("FreeBSD\n"));
+        assert_eq!(None, parse_uname_os_id("Linux\n"));
+        assert_eq!(None, parse_uname_os_id(""));
     }
 
     #[test]
