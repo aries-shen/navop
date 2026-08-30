@@ -125,7 +125,7 @@ impl extension_view::ExtensionViewHost for MainExtensionViewHost {
     ) -> anyhow::Result<Vec<extension_view::ExtensionSummary>> {
         ensure_extension_path_still_installed(summary)?;
         if summary.kind == extension_view::ExtensionKind::Language {
-            gpui_component::highlighter::LanguageRegistry::singleton().unregister(&summary.name);
+            crate::language_extensions::forget_language(&summary.name);
         }
         reload_extension_runtime(summary.kind, cx);
         let installed = self.list_installed()?;

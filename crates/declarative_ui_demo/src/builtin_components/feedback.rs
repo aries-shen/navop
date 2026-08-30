@@ -144,7 +144,7 @@ struct SpinnerComponent;
 
 impl ComponentRenderer for SpinnerComponent {
     fn render(&self, props: ComponentProps, context: &mut RenderContext<'_>) -> ComponentResult {
-        let mut spinner = Spinner::new().animation_id(props.stable_id());
+        let mut spinner = Spinner::new();
         if let Some(size) = parse_size_attribute(&props.element)? {
             spinner = spinner.with_size(size);
         }

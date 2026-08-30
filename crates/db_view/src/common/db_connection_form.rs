@@ -1347,16 +1347,6 @@ impl DbConnectionForm {
                             input_state = input_state.masked(true);
                         }
 
-                        if field.field_type == FormFieldType::TextArea {
-                            if field.name == "remark" {
-                                input_state = input_state.auto_grow(3, 10);
-                            } else if field.rows == 14 {
-                                input_state = input_state.rows(14);
-                            } else {
-                                input_state = input_state.auto_grow(5, 14);
-                            }
-                        }
-
                         input_state.set_value(field.default_value.clone(), window, cx);
                         input_state
                     });
@@ -2291,7 +2281,6 @@ impl DbConnectionForm {
         field()
             .label("钥匙串")
             .items_center()
-            .label_justify_end()
             .child(div().w_full().child(picker))
     }
 
@@ -2382,7 +2371,6 @@ impl DbConnectionForm {
             .required(field_info.required)
             .when(!is_textarea, |field| field.items_center())
             .when(is_textarea, |field| field.items_start())
-            .label_justify_end()
             .child(
                 h_flex()
                     .w_full()
@@ -2511,7 +2499,6 @@ impl DbConnectionForm {
                     .required(field_info.required)
                     .when(!is_textarea, |f| f.items_center())
                     .when(is_textarea, |f| f.items_start())
-                    .label_justify_end()
                     .child(
                         h_flex()
                             .w_full()
@@ -2586,7 +2573,6 @@ impl DbConnectionForm {
                     field()
                         .label(t!("ConnectionForm.workspace").to_string())
                         .items_center()
-                        .label_justify_end()
                         .child(Select::new(&self.workspace_select).w_full()),
                 )
                 .when(
@@ -2596,7 +2582,6 @@ impl DbConnectionForm {
                         field()
                             .label(team_label())
                             .items_center()
-                            .label_justify_end()
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -2619,7 +2604,6 @@ impl DbConnectionForm {
                         field()
                             .label(t!("ConnectionForm.cloud_sync").to_string())
                             .items_center()
-                            .label_justify_end()
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -2650,7 +2634,6 @@ impl DbConnectionForm {
                         field()
                             .label(t!("ConnectionForm.oracle_driver_mode").to_string())
                             .items_center()
-                            .label_justify_end()
                             .child(
                                 h_flex()
                                     .w_full()
@@ -2766,7 +2749,6 @@ impl DbConnectionForm {
                         field()
                             .label(t!("ConnectionForm.oracle_client_status").to_string())
                             .items_center()
-                            .label_justify_end()
                             .child(
                                 h_flex()
                                     .w_full()
@@ -2949,7 +2931,6 @@ impl DbConnectionForm {
                 field()
                     .label(self.field_label("ssh_tunnel_enabled"))
                     .items_center()
-                    .label_justify_end()
                     .child(
                         Checkbox::new("db-ssh-tunnel-enabled")
                             .checked(ssh_enabled)
@@ -2969,7 +2950,6 @@ impl DbConnectionForm {
                     field()
                         .label(t!("ConnectionForm.ssh_connection_id").to_string())
                         .items_center()
-                        .label_justify_end()
                         .child(
                             Select::new(&self.ssh_connection_select)
                                 .placeholder(t!("ConnectionForm.ssh_connection_manual"))
@@ -2986,7 +2966,6 @@ impl DbConnectionForm {
                         field()
                             .label(self.field_label("ssh_auth_type"))
                             .items_center()
-                            .label_justify_end()
                             .child(h_flex().w_full().flex_wrap().gap_4().children(
                                 SshAuthOption::ALL.iter().copied().map(|option| {
                                     Radio::new(format!("db-ssh-auth-{}", option.value()))
@@ -3041,7 +3020,6 @@ impl DbConnectionForm {
                 field()
                     .label(t!("ConnectionForm.require_ssl").to_string())
                     .items_center()
-                    .label_justify_end()
                     .child(
                         Checkbox::new("db-ssl-enabled")
                             .checked(ssl_enabled)

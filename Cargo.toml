@@ -2,9 +2,6 @@
 default-members = [ "main"]
 exclude = ["vendor/llm-connector"]
 members = [
-    "crates/macros",
-    "crates/ui",
-    "crates/assets",
     "crates/ai_chat_view",
     "crates/html-preview",
     "crates/webview",
@@ -44,7 +41,6 @@ members = [
     "crates/api_tools",
     "crates/json_view",
     "crates/declarative_ui_demo",
-    "tools/icon-audit",
     "tools/gpui-rdp-smoke",
     "tools/windows-rdp-probe",
     "main", "crates/ssh", "crates/x11_forwarding", "crates/sftp", "crates/sftp_transfer", "crates/sftp_view", "crates/one_ui", "crates/redis-runtime", "crates/mongodb-runtime", "crates/redis_view", "crates/license_tool", "crates/mongodb_view", "crates/remote_file_editor", "crates/remote_image_preview", "crates/elasticsearch-provider"]
@@ -55,15 +51,15 @@ publish = false
 edition = "2024"
 
 [workspace.dependencies]
-gpui-component = { path = "crates/ui", version = "0.5.2" }
-gpui-component-macros = { path = "crates/macros", version = "0.5.1" }
-gpui-component-assets = { path = "crates/assets", version = "0.5.1" }
+# Local development checkout. Canonical fork: https://github.com/feigeCode/gpui-component
+gpui-component = { package = "gpui_ce_components", git = "https://github.com/feigeCode/gpui-component.git", rev = "0f727461bfd30f9d23e6f334cb52cdeb004f326d", version = "0.2.0" }
+gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/feigeCode/gpui-component.git", rev = "0f727461bfd30f9d23e6f334cb52cdeb004f326d", version = "0.2.0" }
 
-gpui = { package = "gpui", git = "https://github.com/feigeCode/gpui-ce.git", rev = "9086e0b273bddc083fb030a8aadfc27767eda88e", version = "=0.2.2" }
-gpui_tokio = { package = "gpui_tokio", git = "https://github.com/feigeCode/gpui-ce.git", rev = "9086e0b273bddc083fb030a8aadfc27767eda88e" }
-gpui_platform = { package = "gpui_platform", git = "https://github.com/feigeCode/gpui-ce.git", rev = "9086e0b273bddc083fb030a8aadfc27767eda88e", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui_macros = { package = "gpui_macros", git = "https://github.com/feigeCode/gpui-ce.git", rev = "9086e0b273bddc083fb030a8aadfc27767eda88e" }
-util = { package = "gpui_zed_util", git = "https://github.com/feigeCode/gpui-ce.git", rev = "9086e0b273bddc083fb030a8aadfc27767eda88e" }
+gpui = { package = "gpui_ce", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456", version = "=0.2.2" }
+gpui_tokio = { package = "gpui_ce_tokio", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui_macros = { package = "gpui_ce_macros", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
+util = { package = "gpui_ce_zed_util", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
 palette = { version = "0.7.7", features = ["serializing"] }
 
 
@@ -239,7 +235,10 @@ ferrum-flow = { path = "vendor/ferrum-flow" }
 errno = { version = "0.3.14", default-features = false }
 
 [patch.crates-io]
-gpui = { git = "https://github.com/feigeCode/gpui-ce.git", rev = "9086e0b273bddc083fb030a8aadfc27767eda88e", version = "=0.2.2" }
+gpui-ce = { package = "gpui_ce", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456", version = "=0.2.2" }
+gpui_ce_platform = { package = "gpui_ce_platform", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
+gpui_ce_macros = { package = "gpui_ce_macros", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
+gpui_ce_web = { package = "gpui_ce_web", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 llm-connector = { path = "vendor/llm-connector" }
@@ -248,6 +247,11 @@ llm-connector = { path = "vendor/llm-connector" }
 
 # Use stacker's psm version which may have better WASM support
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { package = "gpui_ce", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456", version = "=0.2.2" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
+gpui_macros = { package = "gpui_ce_macros", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }
 
 [workspace.dependencies.windows]
 features = ["Wdk", "Wdk_System", "Wdk_System_SystemServices"]
@@ -302,8 +306,8 @@ rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
 smol = { opt-level = 3 }
-gpui = { opt-level = 3 }
-gpui_macros = { opt-level = 3 }
+gpui_ce = { opt-level = 3 }
+gpui_ce_macros = { opt-level = 3 }
 tree-sitter = { opt-level = 3 }
 zed-sum-tree = { opt-level = 3 }
 ropey = { opt-level = 3 }

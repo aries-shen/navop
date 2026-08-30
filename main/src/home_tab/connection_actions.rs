@@ -193,7 +193,7 @@ impl HomePage {
                             .into_any_element(),
                     )
                     .confirm()
-                    .on_ok(move |_, _, cx| {
+                    .on_ok(move |_, _, cx: &mut App| {
                         let _ = view_clone.update(cx, |this, cx| {
                             this.delete_connection(conn_id, cx);
                         });
@@ -238,7 +238,7 @@ impl HomePage {
                         .ok_text(t!("Connection.copy_full_info_confirm_action").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, window, cx: &mut App| {
                     let _ = view.update(cx, |this, cx| {
                         this.copy_full_connection_info(connection_id, window, cx);
                     });

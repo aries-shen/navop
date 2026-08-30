@@ -14,10 +14,9 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, IconSize, IndexPath, Selectable, Sizable, Size as ComponentSize,
-    button::{Button, ButtonVariants as _, IconButton},
+    button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     clipboard::Clipboard,
-    content_state::ContentState,
     h_flex,
     input::{Input, InputEvent, InputState},
     list::{List, ListDelegate, ListState},
@@ -28,6 +27,7 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex,
 };
+use one_ui::{ContentState, IconButton, IconSize as OneIconSize};
 use rust_i18n::t;
 use tracing::log::{error, info, trace, warn};
 
@@ -519,7 +519,8 @@ pub fn get_icon_for_node_type(node_type: &DbNodeType, _theme: &gpui_component::T
 }
 
 fn object_icon(name: IconName) -> Icon {
-    Icon::new(name).color().with_size(IconSize::Default)
+    // Let the asset metadata choose between theme-tinted and intrinsic-color SVGs.
+    Icon::new(name).with_size(IconSize::Default)
 }
 
 // ============================================================================
@@ -2534,7 +2535,7 @@ impl Render for DbTreeView {
                     )
                     .child(
                         IconButton::new("locate-active-tab", IconName::LocateActiveTab)
-                            .glyph_size(IconSize::Small)
+                            .glyph_size(OneIconSize::Small)
                             .tooltip(t!("DbTreeView.locate_active_tab"))
                             .on_click(move |_, _, cx| {
                                 view_for_locate.update(cx, |_this, cx| {
@@ -2544,7 +2545,7 @@ impl Render for DbTreeView {
                     )
                     .child(
                         IconButton::new("collapse-all", IconName::ChevronsUpDown)
-                            .glyph_size(IconSize::Small)
+                            .glyph_size(OneIconSize::Small)
                             .tooltip(t!("Common.collapse_all"))
                             .on_click(move |_, _, cx| {
                                 view_for_collapse.update(cx, |this, cx| {
@@ -2991,7 +2992,7 @@ impl DbTreeView {
                                         IconName::TriangleAlert,
                                     )
                                     .hit_size(ComponentSize::XSmall)
-                                    .glyph_size(IconSize::Small)
+                                    .glyph_size(OneIconSize::Small)
                                     .tooltip(t!("Common.error_info").to_string())
                                     .text_color(cx.theme().warning),
                                 )

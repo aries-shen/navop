@@ -2054,12 +2054,13 @@ where
     }
 
     fn render_cell(
-        &self,
+        &mut self,
         col_ix: usize,
         row_ix: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let cell_font = self.delegate.cell_font(cx);
         let Some(col_group) = self.col_groups.get(col_ix) else {
             return div().id("empty-cell");
         };
@@ -2140,6 +2141,7 @@ where
             .flex_shrink_0()
             .overflow_hidden()
             .whitespace_nowrap()
+            .when_some(cell_font, |this, font| this.font(font))
             .when(show_column_separator, |this| {
                 this.child(
                     div()
@@ -2514,7 +2516,7 @@ where
             Popover::new(("filter-popover", col_ix))
                 .trigger(
                     Button::new(("filter-btn", col_ix))
-                        .icon(IconName::Filter)
+                        .icon(IconName::Search)
                         .ghost()
                         .with_size(Size::XSmall)
                         .when(is_filtered, |this| this.primary()),
@@ -2630,7 +2632,11 @@ where
 
     fn render_th(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let entity_id = cx.entity_id();
-        let col_group = self.col_groups.get(col_ix).expect("BUG: invalid col index");
+        let col_group = self
+            .col_groups
+            .get(col_ix)
+            .expect("BUG: invalid col index")
+            .clone();
 
         let is_row_number_col = self.delegate.row_number_enabled(cx) && col_ix == 0;
         let movable = self.col_movable && col_group.column.movable && !is_row_number_col;

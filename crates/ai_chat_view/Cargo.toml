@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+one-ui.workspace = true
 one-core.workspace = true
 agent_runtime = { path = "../agent_runtime" }
 html-preview.workspace = true

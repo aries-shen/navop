@@ -16,10 +16,8 @@ use gpui::{
 };
 use gpui_component::calendar::Date;
 use gpui_component::date_picker::{DatePickerEvent, DatePickerState};
-use gpui_component::datetime_picker::{DateTimePickerEvent, DateTimePickerState};
 use gpui_component::input::{InputEvent, InputState, MaskPattern};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::time_picker::{TimePickerEvent, TimePickerState};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     ActiveTheme, IconName, Sizable as _, Size, WindowExt,
@@ -33,6 +31,7 @@ use one_ui::edit_table::{
     CellEditor, Column, ColumnSort, EditTableDelegate, EditTableEvent, EditTableState,
     filter_panel::{FilterValue, FilterValueKey},
 };
+use one_ui::{DateTimePickerEvent, DateTimePickerState, TimePickerEvent, TimePickerState};
 use rust_i18n::t;
 use uuid::Uuid;
 
@@ -1952,6 +1951,10 @@ impl EditTableDelegate for EditorTableDelegate {
         }
     }
 
+    fn cell_font(&mut self, cx: &mut Context<EditTableState<Self>>) -> Option<Font> {
+        Some(self.preview_font(cx))
+    }
+
     fn loading(&self, _cx: &App) -> bool {
         self.loading
     }
@@ -2315,7 +2318,7 @@ impl EditTableDelegate for EditorTableDelegate {
                         FieldType::Integer | FieldType::Decimal => {
                             InputState::new(window, cx).mask_pattern(MaskPattern::number(None))
                         }
-                        _ => InputState::new(window, cx).multi_line(true).rows(1),
+                        _ => InputState::new(window, cx),
                     };
                     state.set_value(edit_value, window, cx);
                     state.focus(window, cx);

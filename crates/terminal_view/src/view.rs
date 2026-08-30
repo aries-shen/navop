@@ -7,14 +7,14 @@ use alacritty_terminal::vi_mode::ViMotion;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dialog::DialogButtonProps;
+use gpui_component::dialog::{DialogButtonProps, DialogFooter};
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::{
-    ActiveTheme, BlinkCursor, Disableable, ElementExt, Icon, IconName, IconSize, Selectable,
-    Sizable, WindowExt, h_flex, kbd::Kbd, v_flex,
+    ActiveTheme, Disableable, ElementExt, Icon, IconName, IconSize, Selectable, Sizable, WindowExt,
+    h_flex, kbd::Kbd, v_flex,
 };
 use one_core::gpui_tokio::Tokio;
 use one_core::keybindings::{
@@ -32,12 +32,14 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod blink_cursor;
 pub(crate) mod block_selection;
 mod history_prompt_rules;
 mod mouse_input;
 mod paste_safety;
 mod workspace_support;
 
+use blink_cursor::BlinkCursor;
 use workspace_support::TerminalRenderMode;
 pub(crate) use workspace_support::{TerminalPaneEvent, TerminalWorkspaceSidebarSnapshot};
 
@@ -299,7 +301,6 @@ pub struct TerminalView {
     /// 已桥接到全局后台任务面板、尚未收到终态的 ZMODEM 传输任务。
     zmodem_background_tasks: HashMap<terminal::zmodem::ZmodemTransferId, BackgroundTaskId>,
     focus_terminal_after_connect: bool,
-    reconnect_success_pending: bool,
 
     current_theme: TerminalTheme,
 

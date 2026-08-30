@@ -1,4 +1,4 @@
-use gpui::{App, IntoElement, ParentElement, Rems, Window, div, px};
+use gpui::{App, IntoElement, ParentElement, Rems, Styled, Window, div, px};
 use gpui_component::{
     Disableable, Sizable,
     checkbox::Checkbox,
@@ -140,9 +140,9 @@ fn build_field(
     }
     if let Some(justify) = props.element.attr("label-justify") {
         field = match justify.trim().to_ascii_lowercase().as_str() {
-            "start" => field.label_justify_start(),
-            "center" => field.label_justify_center(),
-            "end" => field.label_justify_end(),
+            "start" => field.justify_start(),
+            "center" => field.justify_center(),
+            "end" => field.justify_end(),
             _ => {
                 return Err(ComponentError::new(format!(
                     "attribute `label-justify` on <field> must be start, center, or end, got \

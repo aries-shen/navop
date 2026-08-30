@@ -122,7 +122,7 @@ fn label(key: &str, icon: IconName) -> (String, IconName) {
 #[cfg(test)]
 mod tests {
     use gpui::{AppContext as _, ClickEvent, EmptyView, TestAppContext, VisualTestContext};
-    use gpui_component::{Root, Theme, WindowExt as _};
+    use gpui_component::{Root, Theme};
     use one_core::storage::{SshAuthMethod, SshParams};
 
     use super::*;

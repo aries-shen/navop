@@ -7,6 +7,7 @@ use gpui::{
     ParentElement, Render, SharedString, Styled, Subscription, Task, Window,
 };
 use gpui_component::button::Button;
+use gpui_component::dialog::DialogFooter;
 use gpui_component::{Icon, IconName, WindowExt, button::ButtonVariants, v_flex};
 use one_core::tab_container::{TabContent, TabContentEvent};
 use rust_i18n::t;
@@ -154,51 +155,43 @@ impl TabContent for TableDataTabContent {
             let tx_cancel = tx.clone();
             let data_grid = data_grid.clone();
 
+            let footer = DialogFooter::new().children(vec![
+                Button::new("cancel")
+                    .label(t!("Common.cancel"))
+                    .on_click(move |_, window: &mut Window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(tx) = tx_cancel.lock().ok().and_then(|mut g| g.take()) {
+                            let _ = tx.send(false);
+                        }
+                    })
+                    .into_any_element(),
+                Button::new("discard")
+                    .label(t!("Common.discard"))
+                    .on_click(move |_, window: &mut Window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(tx) = tx_discard.lock().ok().and_then(|mut g| g.take()) {
+                            let _ = tx.send(true);
+                        }
+                    })
+                    .into_any_element(),
+                Button::new("save")
+                    .label(t!("Common.save"))
+                    .primary()
+                    .on_click(move |_, window: &mut Window, cx| {
+                        window.close_dialog(cx);
+                        data_grid.update(cx, |grid, cx| grid.save_changes(window, cx));
+                        if let Some(tx) = tx_save.lock().ok().and_then(|mut g| g.take()) {
+                            let _ = tx.send(true);
+                        }
+                    })
+                    .into_any_element(),
+            ]);
+
             dialog
                 .title(format!("{} {}", t!("Common.close"), table_name))
                 .overlay_closable(false)
                 .close_button(false)
-                .footer(move |_ok, _cancel, _window, _cx| {
-                    let data_grid = data_grid.clone();
-                    let tx_save = tx_save.clone();
-                    let tx_discard = tx_discard.clone();
-                    let tx_cancel = tx_cancel.clone();
-
-                    vec![
-                        Button::new("cancel")
-                            .label(t!("Common.cancel"))
-                            .on_click(move |_, window: &mut Window, cx| {
-                                window.close_dialog(cx);
-                                if let Some(tx) = tx_cancel.lock().ok().and_then(|mut g| g.take()) {
-                                    let _ = tx.send(false);
-                                }
-                            })
-                            .into_any_element(),
-                        Button::new("discard")
-                            .label(t!("Common.discard"))
-                            .on_click(move |_, window: &mut Window, cx| {
-                                window.close_dialog(cx);
-                                if let Some(tx) = tx_discard.lock().ok().and_then(|mut g| g.take())
-                                {
-                                    let _ = tx.send(true);
-                                }
-                            })
-                            .into_any_element(),
-                        Button::new("save")
-                            .label(t!("Common.save"))
-                            .primary()
-                            .on_click(move |_, window: &mut Window, cx| {
-                                window.close_dialog(cx);
-                                data_grid.update(cx, |grid, cx| {
-                                    grid.save_changes(window, cx);
-                                });
-                                if let Some(tx) = tx_save.lock().ok().and_then(|mut g| g.take()) {
-                                    let _ = tx.send(true);
-                                }
-                            })
-                            .into_any_element(),
-                    ]
-                })
+                .footer(footer)
                 .child(t!("Table.unsaved_changes_prompt").to_string())
         });
 

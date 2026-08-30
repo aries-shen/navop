@@ -1046,21 +1046,24 @@ TerminalView:
     zh-CN: "cell_width 变化: %{old} -> %{new}, font=%{font}, size=%{size}"
     zh-HK: "cell_width 變化: %{old} -> %{new}, font=%{font}, size=%{size}"
   ask_ai_selection_template:
-    en: "Here is the text I selected in the terminal. Please analyze:
+    en: |-
+      Here is the text I selected in the terminal. Please analyze:
 
-```
-%{content}
-```"
-    zh-CN: "以下是我在终端中选中的内容，请帮我分析：
+      ```
+      %{content}
+      ```
+    zh-CN: |-
+      以下是我在终端中选中的内容，请帮我分析：
 
-```
-%{content}
-```"
-    zh-HK: "以下是我在終端中選中的內容，請幫我分析：
+      ```
+      %{content}
+      ```
+    zh-HK: |-
+      以下是我在終端中選中的內容，請幫我分析：
 
-```
-%{content}
-```"
+      ```
+      %{content}
+      ```
   vi_mode_enabled:
     en: "Vi mode enabled. Press %{shortcut} again or Esc to exit."
     zh-CN: "已进入 Vi 模式。再次按 %{shortcut} 或按 Esc 退出。"
@@ -1115,6 +1118,38 @@ TerminalSidebar:
     en: "Paste to terminal"
     zh-CN: "粘贴到终端"
     zh-HK: "貼上到終端"
+  file_explorer:
+    en: File Explorer
+    zh-CN: 文件浏览器
+    zh-HK: 檔案瀏覽器
+  settings:
+    en: Settings
+    zh-CN: 设置
+    zh-HK: 設定
+  quick_commands:
+    en: Quick Commands
+    zh-CN: 快捷命令
+    zh-HK: 快捷命令
+  history_commands:
+    en: History Commands
+    zh-CN: 历史命令
+    zh-HK: 歷史命令
+  ai_chat:
+    en: AI Chat
+    zh-CN: AI 对话
+    zh-HK: AI 對話
+  broadcast_input:
+    en: Broadcast Input
+    zh-CN: 广播输入
+    zh-HK: 廣播輸入
+  file_manager:
+    en: File Manager
+    zh-CN: 文件管理器
+    zh-HK: 檔案管理器
+  server_monitor:
+    en: Server Monitor
+    zh-CN: 服务器监控
+    zh-HK: 伺服器監控
 
 LocalTerminalClose:
   title:
@@ -1156,13 +1191,17 @@ ServerMonitor:
     zh-CN: 开始监控
     zh-HK: 開始監控
   start_hint:
-    en: Start monitoring for the current SSH connection. This will deploy a helper script under ~/.onetcli-monitor on the remote host after your confirmation.
-    zh-CN: 为当前 SSH 连接启动监控。确认后会在远端主目录下部署 ~/.onetcli-monitor 监控脚本，并开始定时采集。
-    zh-HK: 為目前 SSH 連線啟動監控。確認後會在遠端主目錄下部署 ~/.onetcli-monitor 監控腳本，並開始定時採集。
+    en: Start monitoring for the current SSH connection. The collector runs only within this SSH session and nothing is written to the remote host.
+    zh-CN: 为当前 SSH 连接启动监控。采集脚本仅通过当前 SSH 会话推送执行，不会在远端主机写入任何文件。
+    zh-HK: 為目前 SSH 連線啟動監控。採集腳本僅透過目前 SSH 連線推送執行，不會在遠端主機寫入任何檔案。
+  monitoring:
+    en: Monitoring
+    zh-CN: 监控
+    zh-HK: 監控
   preparing:
-    en: Preparing remote monitor helper...
-    zh-CN: 正在准备远端监控脚本...
-    zh-HK: 正在準備遠端監控腳本...
+    en: Collecting first sample...
+    zh-CN: 正在采集第一份数据...
+    zh-HK: 正在採集第一份數據...
   refresh:
     en: Refresh
     zh-CN: 刷新
@@ -1530,40 +1569,6 @@ TerminalCommandBar:
     zh-CN: 串口终端
     zh-HK: 串口終端
 
-TerminalSidebar:
-  file_explorer:
-    en: File Explorer
-    zh-CN: 文件浏览器
-    zh-HK: 檔案瀏覽器
-  settings:
-    en: Settings
-    zh-CN: 设置
-    zh-HK: 設定
-  quick_commands:
-    en: Quick Commands
-    zh-CN: 快捷命令
-    zh-HK: 快捷命令
-  history_commands:
-    en: History Commands
-    zh-CN: 历史命令
-    zh-HK: 歷史命令
-  ai_chat:
-    en: AI Chat
-    zh-CN: AI 对话
-    zh-HK: AI 對話
-  broadcast_input:
-    en: Broadcast Input
-    zh-CN: 广播输入
-    zh-HK: 廣播輸入
-  file_manager:
-    en: File Manager
-    zh-CN: 文件管理器
-    zh-HK: 檔案管理器
-  server_monitor:
-    en: Server Monitor
-    zh-CN: 服务器监控
-    zh-HK: 伺服器監控
-
 Sidebar:
   panel_options:
     en: Panel options
@@ -1876,10 +1881,6 @@ SshSession:
     en: Password
     zh-CN: 密码
     zh-HK: 密碼
-  reconnected_new_shell:
-    en: Reconnected. A new remote shell was opened below the preserved terminal output.
-    zh-CN: 已重新连接并打开新的远端 Shell，之前的终端内容已保留。
-    zh-HK: 已重新連線並開啟新的遠端 Shell，之前的終端內容已保留。
   reconnect:
     en: Reconnect
     zh-CN: 重新连接

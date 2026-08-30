@@ -111,12 +111,14 @@ fn is_timeout_failure(err: &anyhow::Error) -> bool {
 fn add_connect_error_context(err: anyhow::Error) -> anyhow::Error {
     if is_channel_open_failure(&err) {
         return err.context(
-            "服务器拒绝打开 SSH 会话 channel；请检查账号的交互式 CLI/EXEC 权限、设备 SSH service-type，以及 VTY/并发会话上限",
+            "the server refused to open an SSH session channel; check the account's \
+             interactive CLI/EXEC permission, the device SSH service-type, and the VTY \
+             / concurrent session limit",
         );
     }
 
     if is_timeout_failure(&err) {
-        return err.context("连接超时，检查网络/代理/跳板机可达性");
+        return err.context("connection timed out; check network/proxy/jump-host reachability");
     }
 
     err
@@ -141,7 +143,6 @@ impl SshSessionAccess for SshSessionManager {
     async fn invalidate_client(&self, client: &Arc<tokio::sync::Mutex<Self::Client>>) -> bool {
         SshSessionManager::invalidate_client(self, client).await
     }
-
 }
 
 fn build_shell_integration_uninstall_script(success_marker: &str, home_marker: &str) -> String {
@@ -763,8 +764,7 @@ impl SshBackend {
             let mut osc_parser = OscStreamParser::default();
             let mut zmodem_detector = ZmodemDetector::default();
             let mut zmodem_probe_flush = None;
-            let mut shell_integration =
-                RuntimeShellIntegration::new(shell_integration_requested);
+            let mut shell_integration = RuntimeShellIntegration::new(shell_integration_requested);
             let mut shell_integration_timeout = None;
             let mut output_decoder = TerminalOutputDecoder::new(terminal_encoding);
             let mut exec_results = HashMap::new();
@@ -1203,12 +1203,10 @@ impl SshBackend {
                     login_expect.is_complete(),
                     expect_responded,
                 ) {
-                    if let Err(error) = send_terminal_data(
-                        &mut channel,
-                        shell_integration.injection_command(),
-                    )
-                    .await
-                    .context("failed to inject runtime shell integration")
+                    if let Err(error) =
+                        send_terminal_data(&mut channel, shell_integration.injection_command())
+                            .await
+                            .context("failed to inject runtime shell integration")
                     {
                         disconnect_error = Some(error);
                         break 'actor;
@@ -1523,9 +1521,7 @@ impl SshBackend {
 
     /// 只读探测登录 shell：bash/zsh 才支持运行时注入，其余（ash/fish/受限 CLI）直接跳过。
     /// 完整排空探测 channel（包括对端 Close），避免急切关闭与后续交互 channel 竞争复用。
-    async fn run_shell_integration_probe(
-        channel: &mut dyn SshChannel,
-    ) -> anyhow::Result<bool> {
+    async fn run_shell_integration_probe(channel: &mut dyn SshChannel) -> anyhow::Result<bool> {
         const SUPPORTED_MARKER: &str = "__ONETCLI_SHELL_SUPPORTED__=1";
         let cmd = "case \"${SHELL:-}\" in *bash*|*zsh*) printf '%s\\n' '__ONETCLI_SHELL_SUPPORTED__=1';; esac";
         channel.exec(cmd).await?;
@@ -2264,8 +2260,10 @@ mod tests {
 
     #[tokio::test]
     async fn establish_channel_skips_runtime_injection_when_probe_reports_unsupported_shell() {
-        let (probe_channel, probe_state) =
-            MockChannel::new([ChannelEvent::Data(b"\n".to_vec()), ChannelEvent::Close], false);
+        let (probe_channel, probe_state) = MockChannel::new(
+            [ChannelEvent::Data(b"\n".to_vec()), ChannelEvent::Close],
+            false,
+        );
         let (interactive_channel, interactive_state) = MockChannel::new([], false);
         let manager =
             MockSessionManager::new([MockClient::new([probe_channel, interactive_channel])]);
@@ -2319,7 +2317,7 @@ mod tests {
         let message = add_connect_error_context(err).to_string();
 
         assert!(
-            message.contains("服务器拒绝打开 SSH 会话 channel"),
+            message.contains("the server refused to open an SSH session channel"),
             "channel open 错误应补充设备权限和会话限制提示，实际: {message}"
         );
     }
@@ -2340,18 +2338,10 @@ mod tests {
         let message = add_connect_error_context(err).to_string();
 
         assert!(
-            message.contains("连接超时"),
+            message.contains("connection timed out"),
             "timeout 错误应补充网络/代理排查提示，实际: {message}"
         );
     }
-
-
-
-
-
-
-
-
 
     #[test]
     fn parse_osc_payload_decodes_recorded_command() {

@@ -1,13 +1,8 @@
-use gpui::{
-    AnyElement, Div, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder, px, rgb,
-};
-use gpui_component::{
-    BrandIcon, FunctionalIcon, IconKind, IconName, IconSize, ObjectIcon, Sizable,
-};
+use gpui::{Div, ParentElement, Styled, div, prelude::FluentBuilder, px, rgb};
+use gpui_component::{Icon, IconName, IconNamed as _, IconSize, Sizable};
 
 use super::{
     CARD_BACKGROUND_RGB, CARD_BORDER_RGB, ICON_SIZE_MATRIX, MUTED_TEXT_RGB, PRIMARY_TEXT_RGB,
-    kind_label,
 };
 
 const CARD_WIDTH: f32 = 260.;
@@ -21,10 +16,7 @@ const ICON_MATRIX_LABEL_LINE_HEIGHT: f32 = 16.;
 #[cfg(test)]
 const ICON_MATRIX_CELL_BORDER_WIDTH: f32 = 1.;
 const ICON_SURFACE_RGB: u32 = 0x27_27_2a;
-const UNKNOWN_AUDIT_VALUE: &str = "Unknown — audit pending";
-
 pub(super) fn render_icon_card(icon: IconName, selected_size: IconSize) -> Div {
-    let metadata = icon.metadata();
     div()
         .flex()
         .flex_col()
@@ -37,21 +29,14 @@ pub(super) fn render_icon_card(icon: IconName, selected_size: IconSize) -> Div {
         .border_1()
         .border_color(rgb(CARD_BORDER_RGB))
         .bg(rgb(CARD_BACKGROUND_RGB))
-        .child(render_icon_matrix(icon, metadata.kind, selected_size))
+        .child(render_icon_matrix(icon, selected_size))
         .child(metadata_line(format!("{icon:?}"), true))
-        .child(metadata_line(kind_label(metadata.kind), false))
-        .child(metadata_line(metadata.canonical_path, true))
-        .child(metadata_line(
-            format!("Source: {}", audit_value(metadata.source)),
-            false,
-        ))
-        .child(metadata_line(
-            format!("License: {}", audit_value(metadata.license)),
-            false,
-        ))
+        .child(metadata_line("Functional Outline", false))
+        .child(metadata_line(icon.path(), true))
+        .child(metadata_line("Source: gpui-component-assets", false))
 }
 
-fn render_icon_matrix(icon: IconName, kind: IconKind, selected_size: IconSize) -> Div {
+fn render_icon_matrix(icon: IconName, selected_size: IconSize) -> Div {
     div()
         .flex()
         .flex_wrap()
@@ -65,17 +50,11 @@ fn render_icon_matrix(icon: IconName, kind: IconKind, selected_size: IconSize) -
         .children(
             ICON_SIZE_MATRIX
                 .into_iter()
-                .map(|(size, label)| render_matrix_cell(icon, kind, size, label, selected_size)),
+                .map(|(size, label)| render_matrix_cell(icon, size, label, selected_size)),
         )
 }
 
-fn render_matrix_cell(
-    icon: IconName,
-    kind: IconKind,
-    size: IconSize,
-    label: u8,
-    selected_size: IconSize,
-) -> Div {
+fn render_matrix_cell(icon: IconName, size: IconSize, label: u8, selected_size: IconSize) -> Div {
     let selected = size == selected_size;
     div()
         .flex()
@@ -99,7 +78,7 @@ fn render_matrix_cell(
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .child(typed_icon(icon, kind, size)),
+                .child(Icon::new(icon).with_size(size)),
         )
         .child(
             div()
@@ -114,16 +93,6 @@ fn render_matrix_cell(
         )
 }
 
-fn typed_icon(icon: IconName, kind: IconKind, size: IconSize) -> AnyElement {
-    match kind {
-        IconKind::FunctionalOutline | IconKind::FunctionalFilled => {
-            FunctionalIcon::new(icon).with_size(size).into_any_element()
-        }
-        IconKind::BrandColor => BrandIcon::new(icon).with_size(size).into_any_element(),
-        IconKind::ObjectGlyph => ObjectIcon::new(icon).with_size(size).into_any_element(),
-    }
-}
-
 fn metadata_line(content: impl Into<gpui::SharedString>, monospace: bool) -> Div {
     div()
         .min_w_0()
@@ -132,10 +101,6 @@ fn metadata_line(content: impl Into<gpui::SharedString>, monospace: bool) -> Div
         .text_xs()
         .text_color(rgb(MUTED_TEXT_RGB))
         .child(content.into())
-}
-
-fn audit_value(value: Option<&'static str>) -> &'static str {
-    value.unwrap_or(UNKNOWN_AUDIT_VALUE)
 }
 
 #[cfg(test)]

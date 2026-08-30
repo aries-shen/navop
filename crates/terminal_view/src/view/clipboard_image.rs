@@ -161,7 +161,6 @@ impl TerminalView {
 
             dialog
                 .title(title.clone())
-                .confirm()
                 .child(
                     div()
                         .flex()
@@ -180,6 +179,7 @@ impl TerminalView {
                 )
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("Common.ok"))
                         .cancel_text(t!("Common.cancel")),
                 )

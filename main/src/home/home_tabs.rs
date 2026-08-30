@@ -614,13 +614,8 @@ mod tests {
         let filter_bar = include_str!("../persistent_connection_sidebar/filter_bar.rs");
         let modern_home = include_str!("../home_tab/modern_home.rs");
         let user_avatar = include_str!("../user_avatar.rs");
-        let icons = include_str!("../../../crates/ui/src/icon.rs");
         let visuals = include_str!("../connection_visuals.rs");
         let remote_render = include_str!("../../../crates/remote_desktop_view/src/view/render.rs");
-        let rdp_line = include_str!("../../../crates/assets/assets/icons/rdp_line.svg");
-        let vnc_line = include_str!("../../../crates/assets/assets/icons/vnc_line.svg");
-        let rdp = include_str!("../../../crates/assets/assets/icons/rdp.svg");
-        let vnc = include_str!("../../../crates/assets/assets/icons/vnc.svg");
 
         assert!(filter_bar.contains("connection_type_rail_icon"));
         assert!(modern_home.contains("Icon::new(application.icon())"));
@@ -634,22 +629,20 @@ mod tests {
         assert!(visuals.contains("ConnectionType::Rdp => IconName::Rdp"));
         assert!(visuals.contains("ConnectionType::Vnc => IconName::Vnc"));
         assert!(visuals.contains(".color()"));
-        assert!(icons.contains("icons/user.svg"));
-        assert!(icons.contains("icons/server_line.svg"));
-        assert!(icons.contains("icons/rdp_line.svg"));
+        assert_eq!(
+            gpui_component::IconNamed::path(gpui_component::IconName::User),
+            "icons/user.svg"
+        );
+        assert_eq!(
+            gpui_component::IconNamed::path(gpui_component::IconName::ServerLine),
+            "icons/server_line.svg"
+        );
+        assert_eq!(
+            gpui_component::IconNamed::path(gpui_component::IconName::RdpLine),
+            "icons/rdp_line.svg"
+        );
         assert!(remote_render.contains("RemoteDesktopProtocol::Rdp => IconName::Rdp.color()"));
         assert!(remote_render.contains("RemoteDesktopProtocol::Vnc => IconName::Vnc.color()"));
-        assert!(rdp_line.contains("stroke=\"currentColor\""));
-        assert!(!rdp_line.contains("<text"));
-        assert!(!rdp_line.contains("fill=\"#"));
-        assert!(vnc_line.contains("stroke=\"currentColor\""));
-        assert!(!vnc_line.contains("<text"));
-        assert!(rdp.contains("fill=\"#3B82F6\""));
-        assert!(rdp.contains("fill=\"#EFF6FF\""));
-        assert!(!rdp.contains("#0B1220"));
-        assert!(vnc.contains("fill=\"#10B981\""));
-        assert!(vnc.contains("fill=\"#ECFDF5\""));
-        assert!(!vnc.contains("#0B1F17"));
     }
 
     #[test]

@@ -25,6 +25,7 @@ dirs.workspace = true
 notify.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+one-ui.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 zeroize.workspace = true

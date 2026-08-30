@@ -580,9 +580,8 @@ mod embedded_cli_removal_tests {
     #[test]
     fn main_window_dialog_state_obscures_active_native_presentation() {
         let source = include_str!("main.rs").replace("\r\n", "\n");
-        let root_export = include_str!("../../crates/ui/src/lib.rs");
 
-        assert!(root_export.contains("DialogStateChanged"));
+        let _ = std::any::TypeId::of::<gpui_component::DialogStateChanged>();
         assert!(source.contains("use gpui_component::{DialogStateChanged, Root};"));
         assert!(source.contains("let root = cx.new(|cx| Root::new(view, window, cx));"));
         assert!(source.contains("cx.subscribe(&root,"));

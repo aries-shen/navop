@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{App, Entity, IntoElement, ParentElement, Styled, Window, div};
+use gpui::{App, ClickEvent, Entity, IntoElement, ParentElement, Styled, Window, div};
 use gpui_component::{
     ActiveTheme, WindowExt, dialog::DialogButtonProps, notification::Notification, v_flex,
 };
@@ -62,13 +62,13 @@ impl ExtensionManagerView {
                 .title(t!("Extension.confirm_install", name = entry_name.clone()).to_string())
                 .width(gpui::px(520.0))
                 .child(permission_review_body(&downloaded.review, cx))
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(t!("Extension.allow_and_install").to_string())
-                        .cancel_text(t!("Common.cancel").to_string()),
+                        .cancel_text(t!("Common.cancel").to_string())
+                        .show_cancel(true),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     entity_for_ok.update(cx, |view: &mut ExtensionManagerView, cx| {
                         view.install_confirmed_staging(ok_staging.clone(), window, cx);
                     });

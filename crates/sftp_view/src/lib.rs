@@ -31,8 +31,8 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, IconSize, Sizable, Size, WindowExt,
     breadcrumb::{Breadcrumb, BreadcrumbItem},
-    button::{Button, ButtonVariants, IconButton, IconButtonRole},
-    dialog::DialogButtonProps,
+    button::{Button, ButtonVariants},
+    dialog::{DialogButtonProps, DialogFooter},
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
@@ -56,6 +56,7 @@ use one_core::storage::{
     sftp_favorite_connection_key,
 };
 use one_core::tab_container::{TabContent, TabContentEvent};
+use one_ui::{IconButton, IconButtonRole};
 use remote_file_editor::{
     ExternalEditorOpenRequest, RemoteMutationCallback, open_remote_file_editor,
     open_remote_file_external_editor,
@@ -1671,7 +1672,13 @@ impl SftpView {
                     input,
                     window,
                     |this, _, event: &InputEvent, window, cx| {
-                        if matches!(event, InputEvent::PressEnter { secondary: false }) {
+                        if matches!(
+                            event,
+                            InputEvent::PressEnter {
+                                secondary: false,
+                                ..
+                            }
+                        ) {
                             this.submit_credentials(window, cx);
                         }
                     },
@@ -3032,7 +3039,6 @@ impl SftpView {
                     dialog
                         .title(t!("Dialog.error").to_string())
                         .child(error_msg.clone())
-                        .alert()
                 });
             }
         }
@@ -3381,7 +3387,7 @@ impl SftpView {
                         )
                         .child(t!("Conflict.choose_action").to_string()),
                 )
-                .footer(move |_, _, _window, _cx| {
+                .footer({
                     let mut buttons: Vec<gpui::AnyElement> = vec![
                         Button::new("skip")
                             .label(t!("Conflict.skip").to_string())
@@ -3502,7 +3508,7 @@ impl SftpView {
                             .into_any_element(),
                     );
 
-                    buttons
+                    DialogFooter::new().children(buttons)
                 })
                 .overlay_closable(false)
                 .close_button(true)
@@ -4519,13 +4525,13 @@ impl SftpView {
                             .child(file_list.clone()),
                     ),
                 )
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("Common.delete").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, window, cx: &mut App| {
                     window.close_dialog(cx);
 
                     let _ = view_confirm.update(cx, |this, cx| {
@@ -4679,13 +4685,13 @@ impl SftpView {
                             .child(file_list.clone()),
                     ),
                 )
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("Common.delete").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, window, cx: &mut App| {
                     window.close_dialog(cx);
 
                     let _ = view_confirm.update(cx, |this, cx| {
@@ -4766,13 +4772,13 @@ impl SftpView {
                 .title(t!("File.new_folder").to_string())
                 .w(px(360.))
                 .child(Input::new(&input))
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("Common.create").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, window, cx: &mut App| {
                     let folder_name = input_for_callback.read(cx).text().to_string();
                     if folder_name.is_empty() {
                         return false;
@@ -5415,7 +5421,7 @@ impl SftpView {
                 .title(t!("Dialog.file_conflict").to_string())
                 .w(px(450.))
                 .child(content)
-                .footer(move |_, _, _window, _cx| {
+                .footer({
                     let view_overwrite = view_overwrite.clone();
                     let view_skip = view_skip.clone();
                     let view_keep = view_keep.clone();
@@ -5538,7 +5544,7 @@ impl SftpView {
                                 .into_any_element(),
                         );
                     }
-                    buttons
+                    DialogFooter::new().children(buttons)
                 })
                 .overlay_closable(false)
                 .close_button(true)
@@ -7085,53 +7091,51 @@ fn open_close_strategy_dialog(
                 send_close_choice(&keyboard_cancel_sender, CloseChoice::Abort);
                 true
             })
-            .on_ok(move |_, _, _| {
+            .on_ok(move |_, _, _cx: &mut App| {
                 send_close_choice(
                     &keyboard_wait_sender,
                     CloseChoice::Close(CloseTransferStrategy::Wait),
                 );
                 true
             })
-            .footer(move |_, _, _window, _cx| {
-                vec![
-                    close_choice_button(
-                        CloseButtonSpec {
-                            id: "sftp-close-cancel",
-                            label: t!("Common.cancel").to_string(),
-                            choice: CloseChoice::Abort,
-                            style: CloseButtonStyle::Ghost,
-                        },
-                        footer_cancel_sender.clone(),
-                    ),
-                    close_choice_button(
-                        CloseButtonSpec {
-                            id: "sftp-close-wait",
-                            label: t!("Transfer.wait_and_close").to_string(),
-                            choice: CloseChoice::Close(CloseTransferStrategy::Wait),
-                            style: CloseButtonStyle::Primary,
-                        },
-                        footer_wait_sender.clone(),
-                    ),
-                    close_choice_button(
-                        CloseButtonSpec {
-                            id: "sftp-close-background",
-                            label: t!("Transfer.continue_in_background").to_string(),
-                            choice: CloseChoice::Close(CloseTransferStrategy::Background),
-                            style: CloseButtonStyle::Ghost,
-                        },
-                        background_sender.clone(),
-                    ),
-                    close_choice_button(
-                        CloseButtonSpec {
-                            id: "sftp-close-cancel-transfers",
-                            label: t!("Transfer.cancel_and_close").to_string(),
-                            choice: CloseChoice::Close(CloseTransferStrategy::CancelTransfers),
-                            style: CloseButtonStyle::Danger,
-                        },
-                        cancel_transfers_sender.clone(),
-                    ),
-                ]
-            })
+            .footer(DialogFooter::new().children(vec![
+                close_choice_button(
+                    CloseButtonSpec {
+                        id: "sftp-close-cancel",
+                        label: t!("Common.cancel").to_string(),
+                        choice: CloseChoice::Abort,
+                        style: CloseButtonStyle::Ghost,
+                    },
+                    footer_cancel_sender.clone(),
+                ),
+                close_choice_button(
+                    CloseButtonSpec {
+                        id: "sftp-close-wait",
+                        label: t!("Transfer.wait_and_close").to_string(),
+                        choice: CloseChoice::Close(CloseTransferStrategy::Wait),
+                        style: CloseButtonStyle::Primary,
+                    },
+                    footer_wait_sender.clone(),
+                ),
+                close_choice_button(
+                    CloseButtonSpec {
+                        id: "sftp-close-background",
+                        label: t!("Transfer.continue_in_background").to_string(),
+                        choice: CloseChoice::Close(CloseTransferStrategy::Background),
+                        style: CloseButtonStyle::Ghost,
+                    },
+                    background_sender.clone(),
+                ),
+                close_choice_button(
+                    CloseButtonSpec {
+                        id: "sftp-close-cancel-transfers",
+                        label: t!("Transfer.cancel_and_close").to_string(),
+                        choice: CloseChoice::Close(CloseTransferStrategy::CancelTransfers),
+                        style: CloseButtonStyle::Danger,
+                    },
+                    cancel_transfers_sender.clone(),
+                ),
+            ]))
             .overlay_closable(false)
             .close_button(false)
     });

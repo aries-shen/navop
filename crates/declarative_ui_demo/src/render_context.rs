@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnyElement, AnyView, App, Entity, IntoElement, ParentElement, ScrollHandle, Styled, Window, div,
 };
-use gpui_component::input::InputState;
+use gpui_component::input::EditorState;
 use gpui_component::slider::SliderState;
 
 use crate::{
@@ -135,7 +135,7 @@ impl<'a> RenderContext<'a> {
         &mut self,
         props: &ComponentProps,
         multiline: bool,
-    ) -> Entity<InputState> {
+    ) -> crate::input_cache::StatefulInputState {
         let request = InputRequest::new(props, multiline, self.runtime.clone());
         let environment = InputEnvironment {
             window: self.window,
@@ -147,7 +147,7 @@ impl<'a> RenderContext<'a> {
     pub(crate) fn code_editor_state(
         &mut self,
         props: &ComponentProps,
-    ) -> Result<Entity<InputState>, crate::ComponentError> {
+    ) -> Result<Entity<EditorState>, crate::ComponentError> {
         let environment = CodeEditorEnvironment {
             window: self.window,
             cx: self.cx,

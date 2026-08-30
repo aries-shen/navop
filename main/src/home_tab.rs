@@ -13,9 +13,8 @@ use gpui::{
     Subscription, UniformListScrollHandle, WeakEntity, Window, actions, div, px, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, FunctionalIcon, Icon, IconName, IconSize, InteractiveElementExt,
-    ObjectIcon, Sizable, Size, WindowExt,
-    button::{Button, ButtonVariants as _, DropdownButton, IconButton, IconButtonRole},
+    ActiveTheme, Disableable, Icon, IconName, InteractiveElementExt, Sizable, Size, WindowExt,
+    button::{Button, ButtonVariants as _, DropdownButton},
     checkbox::Checkbox,
     dialog::DialogButtonProps,
     h_flex,
@@ -50,6 +49,7 @@ use one_core::storage::{
     StoredConnection, TeamMembershipState, TelnetLoginStep, Workspace, WorkspaceRepository,
 };
 use one_core::tab_container::{TabContainer, TabContent, TabContentEvent, TabItem, TabOpenMode};
+use one_ui::{IconButton, IconButtonRole};
 use port_forwarding::PortForwardingRuntime;
 use port_forwarding_view::{
     PortForwardingFormWindow, PortForwardingFormWindowConfig, PortForwardingTab,

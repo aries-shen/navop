@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gpui::{App, AppContext, Entity, Subscription, Window};
 use gpui_component::highlighter::LanguageRegistry;
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{EditorState, InputEvent};
 
 use crate::{
     ComponentError, ComponentProps, NodePath, Runtime, VElement, VNode,
@@ -27,7 +27,8 @@ impl CodeEditorSpec {
             .filter(|language| !language.is_empty())
             .ok_or_else(|| ComponentError::new("<code-editor> requires `language`"))?;
         let language = LanguageRegistry::singleton()
-            .resolve_language_name(raw_language)
+            .language(raw_language)
+            .map(|language| language.name.to_string())
             .ok_or_else(|| {
                 ComponentError::new(format!(
                     "attribute `language` on <code-editor> is not a registered language, \
@@ -61,7 +62,7 @@ pub(crate) struct CodeEditorEnvironment<'a> {
 }
 
 struct CodeEditorEntry {
-    state: Entity<InputState>,
+    state: Entity<EditorState>,
     spec: CodeEditorSpec,
     _subscription: Option<Subscription>,
 }
@@ -77,7 +78,7 @@ impl CodeEditorCache {
         props: &ComponentProps,
         runtime: Entity<Runtime>,
         environment: CodeEditorEnvironment<'_>,
-    ) -> Result<Entity<InputState>, ComponentError> {
+    ) -> Result<Entity<EditorState>, ComponentError> {
         let spec = CodeEditorSpec::from_element(&props.element)?;
         let id = props.stable_id();
         if let Some(entry) = self.entries.get_mut(&id)
@@ -111,8 +112,8 @@ impl CodeEditorEntry {
         let folding = spec.folding;
         let language = spec.language.clone();
         let state = environment.cx.new(|cx| {
-            let mut editor = InputState::new(environment.window, cx)
-                .code_editor(language)
+            let mut editor = EditorState::new(environment.window, cx)
+                .language(language)
                 .line_number(line_numbers)
                 .folding(folding);
             if let Some(text) = placeholder {
@@ -146,7 +147,7 @@ impl CodeEditorEntry {
 }
 
 fn subscribe_binding(
-    state: &Entity<InputState>,
+    state: &Entity<EditorState>,
     runtime: Entity<Runtime>,
     key: String,
     cx: &mut App,

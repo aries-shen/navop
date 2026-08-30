@@ -9,8 +9,8 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, Window, div, linear_color_stop, linear_gradient, px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, FunctionalIcon, IconName, Sizable, StyledExt,
-    button::{Button, IconButton, IconButtonRole},
+    ActiveTheme, Disableable, IconName, Sizable, StyledExt,
+    button::Button,
     chart::{AreaChart, LineChart, PieChart},
     h_flex,
     progress::Progress,
@@ -20,6 +20,7 @@ use gpui_component::{
 };
 use one_core::gpui_tokio::Tokio;
 use one_core::storage::get_config_dir;
+use one_ui::{IconButton, IconButtonRole};
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use ssh::{ChannelEvent, SshChannel, SshSessionManager};
@@ -733,16 +734,13 @@ impl ServerMonitorPanel {
             }))
             .child(
                 h_flex().gap_1().child(
-                    IconButton::new(
-                        "server-monitor-refresh",
-                        FunctionalIcon::new(IconName::Refresh),
-                    )
-                    .role(IconButtonRole::Compact)
-                    .disabled(!self.monitor_enabled || self.preparing)
-                    .tooltip(t!("ServerMonitor.refresh"))
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.refresh_now(cx);
-                    })),
+                    IconButton::new("server-monitor-refresh", IconName::Refresh)
+                        .role(IconButtonRole::Compact)
+                        .disabled(!self.monitor_enabled || self.preparing)
+                        .tooltip(t!("ServerMonitor.refresh"))
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.refresh_now(cx);
+                        })),
                 ),
             )
     }

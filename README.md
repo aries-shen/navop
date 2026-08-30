@@ -46,7 +46,7 @@
     <a href="CONTRIBUTING.md">Contributing</a>
   </p>
 
-  <p><img src="app1.png" alt="Navop overview" width="820" /></p>
+  <p><img src="app.png" alt="Navop overview" width="820" /></p>
 </div>
 
 ## Features
@@ -93,6 +93,10 @@ The separate [`@navop/mcp`](https://github.com/feigeCode/navop-mcp) package is o
 
 ## Screenshots
 
+| Workspace |
+|:-:|
+| [![Workspace](app1.png)](app1.png) |
+
 | Database | SSH |
 |:-:|:-:|
 | [![Database](database.png)](database.png) | [![SSH](ssh.png)](ssh.png) |
@@ -101,9 +105,9 @@ The separate [`@navop/mcp`](https://github.com/feigeCode/navop-mcp) package is o
 |:-:|:-:|
 | [![SFTP](sftp.png)](sftp.png) | [![Redis](redis.png)](redis.png) |
 
-| MongoDB | AI Chat |
-|:-:|:-:|
-| [![MongoDB](mongodb.png)](mongodb.png) | [![AI Chat](chatdb.png)](chatdb.png) |
+| MongoDB |                AI Chat                |
+|:-:|:-------------------------------------:|
+| [![MongoDB](mongodb.png)](mongodb.png) | [![AI Chat](ai_chat.png)](ai_chat.png) |
 
 | Agent Hub | Extensions |
 |:-:|:-:|

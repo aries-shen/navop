@@ -12,13 +12,12 @@ use gpui::{
     MouseDownEvent, ParentElement, PathPromptOptions, Render, SharedString, Styled,
     UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
 };
-use gpui_component::menu::LocalMenuStyle;
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, IconSize, InteractiveElementExt, ObjectIcon, Sizable,
-    Size, WindowExt,
+    ActiveTheme, Disableable, Icon, IconName, IconSize, InteractiveElementExt, Sizable, Size,
+    WindowExt,
     breadcrumb::{Breadcrumb, BreadcrumbItem},
     button::{Button, ButtonVariants},
-    dialog::DialogButtonProps,
+    dialog::{DialogButtonProps, DialogFooter},
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
@@ -1546,17 +1545,6 @@ impl FileManagerPanel {
         }
     }
 
-    pub fn menu_style(&self) -> LocalMenuStyle {
-        LocalMenuStyle {
-            background: self.colors.background,
-            foreground: self.colors.foreground,
-            muted_foreground: self.colors.muted_foreground,
-            border: self.colors.border,
-            accent: self.colors.muted,
-            accent_foreground: self.colors.foreground,
-            radius: px(8.0),
-        }
-    }
     pub fn set_colors(&mut self, colors: TerminalColors, cx: &mut Context<Self>) {
         self.colors = colors;
         cx.notify();
@@ -2022,9 +2010,7 @@ impl FileManagerPanel {
     }
 
     fn render_path_breadcrumb(&self, cx: &mut Context<Self>) -> Breadcrumb {
-        let foreground = self.colors.foreground;
-        let muted_foreground = self.colors.muted_foreground;
-        let mut breadcrumb = Breadcrumb::new().colors(foreground, muted_foreground);
+        let mut breadcrumb = Breadcrumb::new();
         const MAX_VISIBLE: usize = 4;
 
         if self.current_path == "." {
@@ -3045,9 +3031,10 @@ impl FileManagerPanel {
                         )
                         .child(t!("Conflict.choose_action").to_string()),
                 )
-                .footer(move |_, _, _window, _cx| {
-                    upload_conflict_buttons(footer_actions.clone(), has_dir_conflict)
-                })
+                .footer(
+                    DialogFooter::new()
+                        .children(upload_conflict_buttons(footer_actions, has_dir_conflict)),
+                )
                 .overlay_closable(false)
                 .close_button(true)
         });
@@ -3265,9 +3252,9 @@ impl FileManagerPanel {
                 .title(t!("FileManager.new_folder").to_string())
                 .w(px(360.))
                 .child(Input::new(&input))
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("Common.create").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
@@ -3355,9 +3342,9 @@ impl FileManagerPanel {
                 .title(t!("FileManager.new_file").to_string())
                 .w(px(360.))
                 .child(Input::new(&input))
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("Common.create").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
@@ -3446,9 +3433,9 @@ impl FileManagerPanel {
                 .title(t!("FileManager.rename").to_string())
                 .w(px(360.))
                 .child(Input::new(&input))
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("FileManager.rename").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
@@ -3803,9 +3790,9 @@ impl FileManagerPanel {
                             .child(target_list.clone()),
                     ),
                 )
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
+                        .show_cancel(true)
                         .ok_text(t!("FileManager.delete").to_string())
                         .cancel_text(t!("Common.cancel").to_string()),
                 )
@@ -3977,7 +3964,6 @@ impl FileManagerPanel {
     /// 渲染工具栏
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_go_back = self.history_index > 0;
-        let breadcrumb = self.render_path_breadcrumb(cx);
         let upload_panel = cx.entity();
         let has_selection = !self.selected_indices.is_empty();
         let is_connected = self.connection_state == ConnectionState::Connected;
@@ -3991,8 +3977,9 @@ impl FileManagerPanel {
         let field_bg = self.colors.background;
         let foreground = self.colors.foreground;
         let muted_foreground = self.colors.muted_foreground;
-        let accent = self.colors.accent;
-        let menu_color = self.menu_style();
+        let breadcrumb = self
+            .render_path_breadcrumb(cx)
+            .colors(foreground, muted_foreground);
         v_flex()
             .border_b_1()
             .border_color(border)
@@ -4083,6 +4070,7 @@ impl FileManagerPanel {
                             .small()
                             .compact()
                             .icon(IconName::Ellipsis)
+                            .text_color(muted_foreground)
                             .tooltip(t!("File.actions"))
                             .dropdown_menu_with_anchor(
                                 Anchor::TopRight,
@@ -4095,86 +4083,85 @@ impl FileManagerPanel {
                                     let new_folder_panel = upload_panel.clone();
                                     let download_panel = upload_panel.clone();
                                     let delete_panel = upload_panel.clone();
-                                    menu.local_style(menu_color)
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.paste"))
-                                                .icon(IconName::Paste)
-                                                .disabled(!can_paste)
-                                                .on_click(window.listener_for(
-                                                    &paste_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.paste_remote_file_clipboard(
-                                                            paste_target_dir.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        )
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.upload_file"))
-                                                .icon(IconName::Upload)
-                                                .on_click(window.listener_for(
-                                                    &upload_files_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.select_and_upload_files(window, cx);
-                                                    },
-                                                )),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.upload_folder"))
-                                                .icon(IconName::Upload)
-                                                .on_click(window.listener_for(
-                                                    &upload_folder_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.select_and_upload_folder(window, cx);
-                                                    },
-                                                )),
-                                        )
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.new_file"))
-                                                .icon(IconName::File)
-                                                .on_click(window.listener_for(
-                                                    &new_file_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.show_new_file_dialog(window, cx);
-                                                    },
-                                                )),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.new_folder"))
-                                                .icon(IconName::NewFolder)
-                                                .on_click(window.listener_for(
-                                                    &new_folder_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.show_new_folder_dialog(window, cx);
-                                                    },
-                                                )),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.download"))
-                                                .icon(IconName::ArrowDown)
-                                                .disabled(!has_selection)
-                                                .on_click(window.listener_for(
-                                                    &download_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.download_selected(window, cx);
-                                                    },
-                                                )),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new(t!("FileManager.delete"))
-                                                .icon(IconName::Remove)
-                                                .disabled(!has_selection)
-                                                .on_click(window.listener_for(
-                                                    &delete_panel,
-                                                    move |this, _, window, cx| {
-                                                        this.delete_selected(window, cx);
-                                                    },
-                                                )),
-                                        )
+                                    menu.item(
+                                        PopupMenuItem::new(t!("FileManager.paste"))
+                                            .icon(IconName::Paste)
+                                            .disabled(!can_paste)
+                                            .on_click(window.listener_for(
+                                                &paste_panel,
+                                                move |this, _, window, cx| {
+                                                    this.paste_remote_file_clipboard(
+                                                        paste_target_dir.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            )),
+                                    )
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new(t!("FileManager.upload_file"))
+                                            .icon(IconName::Upload)
+                                            .on_click(window.listener_for(
+                                                &upload_files_panel,
+                                                move |this, _, window, cx| {
+                                                    this.select_and_upload_files(window, cx);
+                                                },
+                                            )),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new(t!("FileManager.upload_folder"))
+                                            .icon(IconName::Upload)
+                                            .on_click(window.listener_for(
+                                                &upload_folder_panel,
+                                                move |this, _, window, cx| {
+                                                    this.select_and_upload_folder(window, cx);
+                                                },
+                                            )),
+                                    )
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new(t!("FileManager.new_file"))
+                                            .icon(IconName::File)
+                                            .on_click(window.listener_for(
+                                                &new_file_panel,
+                                                move |this, _, window, cx| {
+                                                    this.show_new_file_dialog(window, cx);
+                                                },
+                                            )),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new(t!("FileManager.new_folder"))
+                                            .icon(IconName::NewFolder)
+                                            .on_click(window.listener_for(
+                                                &new_folder_panel,
+                                                move |this, _, window, cx| {
+                                                    this.show_new_folder_dialog(window, cx);
+                                                },
+                                            )),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new(t!("FileManager.download"))
+                                            .icon(IconName::ArrowDown)
+                                            .disabled(!has_selection)
+                                            .on_click(window.listener_for(
+                                                &download_panel,
+                                                move |this, _, window, cx| {
+                                                    this.download_selected(window, cx);
+                                                },
+                                            )),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new(t!("FileManager.delete"))
+                                            .icon(IconName::Remove)
+                                            .disabled(!has_selection)
+                                            .on_click(window.listener_for(
+                                                &delete_panel,
+                                                move |this, _, window, cx| {
+                                                    this.delete_selected(window, cx);
+                                                },
+                                            )),
+                                    )
                                 },
                             ),
                     )
@@ -4326,7 +4313,6 @@ impl FileManagerPanel {
                                     .appearance(false)
                                     .cleanable(false)
                                     .text_color(foreground)
-                                    .caret_color(accent)
                                     .w_full(),
                             )
                             .into_any_element()
@@ -4362,6 +4348,7 @@ impl FileManagerPanel {
                             } else {
                                 IconName::Star
                             })
+                            .text_color(muted_foreground)
                             .tooltip(if is_favorite {
                                 t!("FileManager.favorite_remove_current").to_string()
                             } else {
@@ -4383,6 +4370,7 @@ impl FileManagerPanel {
             .ghost()
             .small()
             .icon(IconName::Ellipsis)
+            .text_color(self.colors.muted_foreground)
             .tooltip(t!("FileManager.panel_options").to_string())
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                 build_frame_options_menu(menu, panel.clone(), placement, window, cx)
@@ -4421,6 +4409,7 @@ impl FileManagerPanel {
                     .ghost()
                     .small()
                     .icon(IconName::FolderOpen)
+                    .text_color(self.colors.muted_foreground)
                     .tooltip(t!("FileManager.favorite_open").to_string())
                     .disabled(!is_connected || !has_favorites),
             )
@@ -4592,7 +4581,6 @@ impl FileManagerPanel {
         let background = self.colors.background;
         let foreground = self.colors.foreground;
         let muted_foreground = self.colors.muted_foreground;
-        let accent = self.colors.accent;
 
         h_flex()
             .h_8()
@@ -4613,7 +4601,6 @@ impl FileManagerPanel {
                         .xsmall()
                         .appearance(false)
                         .text_color(foreground)
-                        .caret_color(accent)
                         .cleanable(has_query),
                 ),
             )
@@ -4733,7 +4720,7 @@ impl FileManagerPanel {
                     .items_center()
                     .overflow_hidden()
                     .child(
-                        ObjectIcon::new(if is_dir {
+                        Icon::new(if is_dir {
                             IconName::Folder1
                         } else {
                             IconName::File
@@ -4809,7 +4796,7 @@ impl FileManagerPanel {
                     .flex_1()
                     .gap_1()
                     .items_center()
-                    .child(ObjectIcon::new(IconName::Folder1).with_size(IconSize::Small))
+                    .child(Icon::new(IconName::Folder1).with_size(IconSize::Small))
                     .child(div().text_sm().child("..")),
             )
             .child(div().w(SIZE_COLUMN_WIDTH))
@@ -5463,7 +5450,6 @@ impl FileManagerPanel {
                                         let current_path = state.current_path.clone();
                                         let has_parent = !state.is_at_root();
                                         let view = cx.entity();
-                                        let menu_style = state.menu_style();
                                         range
                                             .map(|list_ix| {
                                                 // 上级目录行
@@ -5551,7 +5537,7 @@ impl FileManagerPanel {
                                                                 &ctx_view,
                                                                 window,
                                                                 cx,
-                                                            ).local_style(menu_style)
+                                                            )
                                                         },
                                                     )
                                                     .child(state.render_file_row(
@@ -6417,6 +6403,8 @@ mod tests {
         assert!(toolbar.contains(r#".id("fm-open-sftp")"#));
         assert!(toolbar.contains("FileManagerPanelEvent::OpenSftp("));
         assert!(toolbar.contains(r#"t!("FileManager.open_sftp")"#));
+        assert!(toolbar.contains(".colors(foreground, muted_foreground)"));
+        assert!(toolbar.contains(".text_color(muted_foreground)"));
     }
 
     #[test]

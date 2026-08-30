@@ -1,7 +1,8 @@
 use crate::sidebar::execution_history_panel::ExecutionHistoryPanel;
 use crate::sql_editor::{
-    ForeignSchema, SqlColumnDetail, SqlEditor, SqlObjectType, SqlSchema, SqlTableDetail,
-    pending_foreign_qualifiers,
+    ForeignSchema, RunCursorStatementSql, RunSelectedSql, SQL_GUTTER_CANCELLED, SQL_GUTTER_FAILED,
+    SQL_GUTTER_IDLE, SQL_GUTTER_RUNNING, SQL_GUTTER_SUCCEEDED, SqlColumnDetail, SqlEditor,
+    SqlObjectType, SqlSchema, SqlTableDetail, pending_foreign_qualifiers,
 };
 use crate::sql_result_tab::{
     ExecutionState, SessionSchemaInvalidation, SessionSqlRun, SqlResultTabContainer,
@@ -17,7 +18,7 @@ use db::sql_editor::insert_hints::{SqlInsertValueHint, insert_value_hints};
 use db::sql_editor::sql_tokenizer::{SqlKeyword, SqlTokenKind, SqlTokenizer};
 use db::sql_editor::statement_ranges::{
     SqlDialect, SqlStatementRange, SqlStatementSnapshot, SqlTextRange, StatementIndex,
-    WindowedStatementScan, line_scans_neutral, statement_starting_on_line,
+    WindowedStatementScan, line_scans_neutral,
 };
 use db::types::TableObjectType;
 use db::{DbManager, GlobalDbState, SqlFormatOptions, format_sql_with_options};
@@ -31,9 +32,10 @@ use gpui::{
     Styled, Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{
-    Input, InputContextMenuItem, InputEvent, InputGutterMarker, InputGutterMarkerState,
-    InputInlineWidget, InputRangeDecoration, InputRangeDecorationStyle, InputState,
+    GutterMarker, InlineWidget, Input, InputEvent, InputState, RangeDecoration,
+    RangeDecorationStyle,
 };
 use gpui_component::notification::Notification;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
@@ -75,6 +77,25 @@ const TOGGLE_LINE_COMMENT_KEY_BINDINGS: [&str; 2] = ["cmd-/", "ctrl-/"];
 /// a full per-table catalog scan or saturating the backend with an unbounded
 /// burst of queries.
 const SCHEMA_COLUMN_FETCH_CONCURRENCY: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqlGutterMarkerState {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl SqlGutterMarkerState {
+    fn icon_token(self) -> &'static str {
+        match self {
+            Self::Running => SQL_GUTTER_RUNNING,
+            Self::Succeeded => SQL_GUTTER_SUCCEEDED,
+            Self::Failed => SQL_GUTTER_FAILED,
+            Self::Cancelled => SQL_GUTTER_CANCELLED,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum QueryFileNameError {
@@ -270,13 +291,24 @@ fn statement_marker_id(revision: u64, statement: &SqlStatementRange) -> String {
     )
 }
 
+fn statement_for_gutter_marker<'a>(
+    statements: &'a [SqlStatementRange],
+    revision: u64,
+    marker_id: &str,
+    logical_row: usize,
+) -> Option<&'a SqlStatementRange> {
+    statements.iter().find(|statement| {
+        statement.start_line == logical_row && statement_marker_id(revision, statement) == marker_id
+    })
+}
+
 /// Compute the current-statement frame decorations for one snapshot/cursor.
 ///
 /// The frame covers the executable statement the cursor sits in, extended
 /// through its trailing delimiter so it visually matches the gutter range.
 /// A non-empty selection suppresses the frame (run-selection mode), and an
 /// empty statement produces no decoration. When a values-region highlight is
-/// available (INSERT value hints), it is appended as a Highlight decoration.
+/// available (INSERT value hints), it is appended as a Fill decoration.
 fn current_statement_frame_decorations(
     index: &dyn StatementIndex,
     revision: u64,
@@ -284,18 +316,18 @@ fn current_statement_frame_decorations(
     selection: &Range<usize>,
     doc_len: usize,
     values_highlight: Option<Range<usize>>,
-) -> Vec<InputRangeDecoration> {
+) -> Vec<RangeDecoration> {
     let mut decorations = Vec::new();
     if let Some(highlight) = values_highlight {
         let start = highlight.start.min(doc_len);
         let end = highlight.end.min(doc_len).max(start);
         if start < end {
             decorations.push(
-                InputRangeDecoration::new(
+                RangeDecoration::new(
                     format!("insert-values:{revision}:{start}:{end}"),
                     start..end,
                 )
-                .style(InputRangeDecorationStyle::Highlight),
+                .with_style(RangeDecorationStyle::Fill),
             );
         }
     }
@@ -314,7 +346,7 @@ fn current_statement_frame_decorations(
     if start >= end {
         return decorations;
     }
-    decorations.push(InputRangeDecoration::new(
+    decorations.push(RangeDecoration::new(
         format!("sql-frame:{revision}:{start}:{end}"),
         start..end,
     ));
@@ -342,6 +374,41 @@ fn insert_target_table(statement: &str) -> Option<String> {
         }
     }
     name.map(|name| unquote_sql_identifier(&name))
+}
+
+fn insert_values_range(statement: &str) -> Option<Range<usize>> {
+    let tokens = SqlTokenizer::new(statement).tokenize();
+    let values = tokens
+        .iter()
+        .position(|token| matches!(token.kind, SqlTokenKind::Keyword(SqlKeyword::Values)))?;
+    let mut start = None;
+    let mut end = None;
+    let mut depth = 0usize;
+    for token in &tokens[values + 1..] {
+        if depth == 0 {
+            match token.kind {
+                SqlTokenKind::LParen => {
+                    start.get_or_insert(token.start);
+                    depth = 1;
+                }
+                SqlTokenKind::Whitespace | SqlTokenKind::Comma => {}
+                _ if start.is_some() => break,
+                _ => {}
+            }
+            continue;
+        }
+        match token.kind {
+            SqlTokenKind::LParen => depth += 1,
+            SqlTokenKind::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(token.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    start.zip(end).map(|(start, end)| start..end)
 }
 
 /// Look up a table's columns (case-insensitively) for INSERT ordinal hints.
@@ -413,11 +480,73 @@ fn is_current_diagnostic_identity(
     expected == current
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForeignQualifierKind {
+    Databases,
+    Schemas,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForeignQualifierScope {
+    kind: ForeignQualifierKind,
+    database: String,
+    current_name: Option<String>,
+}
+
+fn foreign_qualifier_scope(
+    scope: &SqlMetadataScope,
+    uses_schema_as_database: bool,
+    supports_schema: bool,
+) -> ForeignQualifierScope {
+    if uses_schema_as_database {
+        ForeignQualifierScope {
+            kind: ForeignQualifierKind::Schemas,
+            database: String::new(),
+            current_name: scope.schema.clone(),
+        }
+    } else if supports_schema {
+        ForeignQualifierScope {
+            kind: ForeignQualifierKind::Schemas,
+            database: scope.database.clone().unwrap_or_default(),
+            current_name: scope.schema.clone(),
+        }
+    } else {
+        ForeignQualifierScope {
+            kind: ForeignQualifierKind::Databases,
+            database: String::new(),
+            current_name: scope.database.clone(),
+        }
+    }
+}
+
+fn foreign_qualifier_fetch_scope(
+    scope: &SqlMetadataScope,
+    qualifier: &str,
+    uses_schema_as_database: bool,
+    supports_schema: bool,
+) -> Option<(String, Option<String>)> {
+    let qualifier_scope = foreign_qualifier_scope(scope, uses_schema_as_database, supports_schema);
+    match qualifier_scope.kind {
+        ForeignQualifierKind::Databases => Some((qualifier.to_string(), None)),
+        ForeignQualifierKind::Schemas if uses_schema_as_database => {
+            Some((String::new(), Some(qualifier.to_string())))
+        }
+        ForeignQualifierKind::Schemas if qualifier_scope.database.is_empty() => None,
+        ForeignQualifierKind::Schemas => {
+            Some((qualifier_scope.database, Some(qualifier.to_string())))
+        }
+    }
+}
+
+fn foreign_prefetch_key(scope: &SqlMetadataScope, qualifier: &str) -> (SqlMetadataScope, String) {
+    (scope.clone(), qualifier.to_lowercase())
+}
+
 /// 加载其他 database/schema（qualifier）名称列表，用于跨库限定名补全。
 ///
-/// MySQL/ClickHouse 等 uses_schema_as_database 方言取其他数据库；
-/// PG/MSSQL/Oracle 等取当前库的其他 schema。排除当前 database/schema，
-/// 只取名字，完整元数据按需懒加载（见 `schedule_foreign_schema_prefetch`）。
+/// 数据库型 qualifier（MySQL/ClickHouse）取其他数据库；schema 型 qualifier
+/// （PG/MSSQL/Oracle）取其他 schema。排除当前 qualifier，只取名字，
+/// 完整元数据按需懒加载（见 `schedule_foreign_schema_prefetch`）。
 async fn load_foreign_qualifier_names(
     global_state: &GlobalDbState,
     cx: &mut AsyncApp,
@@ -425,43 +554,32 @@ async fn load_foreign_qualifier_names(
     scope: &SqlMetadataScope,
     uses_schema_as_database: bool,
     supports_schema: bool,
-) -> Vec<(String, String)> {
-    if !uses_schema_as_database && !supports_schema {
-        return Vec::new();
-    }
-    let kind_label = if uses_schema_as_database {
-        t!("SqlEditor.database_object").to_string()
-    } else {
-        t!("SqlEditor.schema_object").to_string()
+) -> anyhow::Result<Vec<(String, String)>> {
+    let qualifier_scope = foreign_qualifier_scope(scope, uses_schema_as_database, supports_schema);
+    let kind_label = match qualifier_scope.kind {
+        ForeignQualifierKind::Databases => t!("SqlEditor.database_object").to_string(),
+        ForeignQualifierKind::Schemas => t!("SqlEditor.schema_object").to_string(),
     };
-    let names = if uses_schema_as_database {
-        global_state
-            .list_databases(cx, connection_id)
-            .await
-            .unwrap_or_default()
-    } else {
-        let database = scope.database.clone().unwrap_or_default();
-        global_state
-            .list_schemas(cx, connection_id, database)
-            .await
-            .unwrap_or_default()
+    let names = match qualifier_scope.kind {
+        ForeignQualifierKind::Databases => global_state.list_databases(cx, connection_id).await?,
+        ForeignQualifierKind::Schemas => {
+            global_state
+                .list_schemas(cx, connection_id, qualifier_scope.database.clone())
+                .await?
+        }
     };
     let excluded = |name: &str| {
-        scope
-            .database
+        qualifier_scope
+            .current_name
             .as_deref()
             .is_some_and(|current| current.eq_ignore_ascii_case(name))
-            || scope
-                .schema
-                .as_deref()
-                .is_some_and(|current| current.eq_ignore_ascii_case(name))
     };
     let mut seen = HashSet::new();
-    names
+    Ok(names
         .into_iter()
         .filter(|name| !name.is_empty() && !excluded(name) && seen.insert(name.to_lowercase()))
         .map(|name| (name, kind_label.clone()))
-        .collect()
+        .collect())
 }
 
 /// 在 Tokio runtime 内拉取一个外部 qualifier 的表/列元数据（懒加载）。
@@ -1271,7 +1389,6 @@ pub struct SqlEditorTab {
     execution_request_id: Arc<AtomicU64>,
     _connection_subscription: Option<Subscription>,
     statement_snapshot: SqlStatementSnapshot,
-    statement_revision: u64,
     /// Windowed statement scan covering the viewport (plus margins), used for
     /// display-only consumers (gutter markers, current-statement frame) on
     /// large documents. `None` whenever the full `statement_snapshot` is
@@ -1279,13 +1396,11 @@ pub struct SqlEditorTab {
     viewport_statements: Option<ViewportStatements>,
     /// Execution state per gutter marker, keyed by `statement_marker_id`.
     /// Editing invalidates states because the revision is part of the id.
-    statement_marker_states: HashMap<String, InputGutterMarkerState>,
+    statement_marker_states: HashMap<String, SqlGutterMarkerState>,
     /// Marker id currently bound to the in-flight execution, if any.
     active_statement_marker: Option<String>,
-    /// Last cursor used to drive the current-statement frame refresh.
-    last_frame_cursor: Option<usize>,
-    /// Last selection used to drive the current-statement frame refresh.
-    last_frame_selection: Option<Range<usize>>,
+    /// Last editor state used to drive the current-statement decorations.
+    last_frame_key: Option<(u64, usize, Range<usize>, Option<Range<usize>>)>,
     _execution_state_subscription: Option<Subscription>,
     _editor_input_subscription: Option<Subscription>,
     /// 诊断分析运行序号，用于防抖并丢弃过期任务。
@@ -1300,18 +1415,23 @@ pub struct SqlEditorTab {
     schema_snapshot: Arc<RwLock<SqlSchema>>,
     /// 最近一次加载的数据库特定补全信息（合并外部 qualifier 元数据时复用）。
     db_completion_info: Arc<RwLock<Option<SqlCompletionInfo>>>,
-    /// 在途的外部 qualifier 元数据懒加载任务（key 为 qualifier 小写名）。
-    foreign_prefetch_inflight: Arc<Mutex<HashSet<String>>>,
+    /// 在途的外部 qualifier 元数据懒加载任务（按 metadata scope + qualifier 隔离）。
+    foreign_prefetch_inflight: Arc<Mutex<HashSet<(SqlMetadataScope, String)>>>,
     /// 当前语句的 INSERT 值槽提示（相对语句文本的字节偏移），用于安装内联控件。
     insert_hints: Vec<SqlInsertValueHint>,
     /// `insert_hints` 所基于的语句在文档中的起始字节偏移。
     insert_hints_statement_start: usize,
-    /// 值提示区域在文档中的字节范围，用于预览 (Highlight) 装饰。
+    /// 值提示区域在文档中的字节范围，用于 Fill 装饰。
     insert_values_highlight: Option<Range<usize>>,
     /// 最近一次计算插入提示的 (光标, 版本)，避免游标在语句内移动时重复计算。
     last_insert_hints_key: Option<(usize, u64)>,
-    /// 最近一次触发签名帮助刷新的光标，避免每次 notify 都重新请求。
-    last_signature_cursor: Option<usize>,
+}
+
+struct SqlSchemaUpdateRequest {
+    database: String,
+    generation: u64,
+    window_handle: AnyWindowHandle,
+    entity: WeakEntity<SqlEditorTab>,
 }
 
 impl SqlEditorTab {
@@ -1424,11 +1544,9 @@ impl SqlEditorTab {
             _connection_subscription: None,
             statement_snapshot: SqlStatementSnapshot::new(String::new(), initial_dialect),
             viewport_statements: None,
-            statement_revision: 0,
             statement_marker_states: HashMap::new(),
             active_statement_marker: None,
-            last_frame_cursor: None,
-            last_frame_selection: None,
+            last_frame_key: None,
             _execution_state_subscription: None,
             _editor_input_subscription: None,
             diagnostic_run_id: diagnostic_run_id.clone(),
@@ -1442,14 +1560,12 @@ impl SqlEditorTab {
             insert_hints_statement_start: 0,
             insert_values_highlight: None,
             last_insert_hints_key: None,
-            last_signature_cursor: None,
         };
 
-        instance.configure_editor_context_menu(cx);
+        instance.bind_gutter_marker_event(window, cx);
         instance.bind_select_event(window, cx);
         instance.bind_transaction_mode_select_event(window, cx);
         instance.bind_auto_save(auto_save_seq, is_dirty, requires_name, window, cx);
-        instance.bind_gutter_marker_event(window, cx);
         instance.bind_execution_marker_event(cx);
         instance.bind_editor_input_observe(window, cx);
         instance.bind_connection_data_event(window, cx);
@@ -1466,35 +1582,6 @@ impl SqlEditorTab {
         );
 
         instance
-    }
-
-    fn configure_editor_context_menu(&self, cx: &mut Context<Self>) {
-        let view = cx.entity().clone();
-        self.editor.update(cx, |editor, cx| {
-            editor.set_mouse_context_menu_items(
-                vec![
-                    InputContextMenuItem::on_click(t!("Query.run_selected").to_string(), {
-                        let view = view.clone();
-                        move |_, window, cx| {
-                            let _ = view.update(cx, |this, cx| {
-                                this.handle_run_selected_query(window, cx);
-                            });
-                        }
-                    })
-                    .icon(IconName::ArrowRight),
-                    InputContextMenuItem::on_click(t!("Query.run_cursor_statement").to_string(), {
-                        let view = view.clone();
-                        move |_, window, cx| {
-                            let _ = view.update(cx, |this, cx| {
-                                this.handle_run_cursor_statement_query(window, cx);
-                            });
-                        }
-                    })
-                    .icon(IconName::ArrowRight),
-                ],
-                cx,
-            );
-        });
     }
 
     fn generate_new_file_path(
@@ -1564,7 +1651,7 @@ impl SqlEditorTab {
                     }
                     let db = db_name.clone();
                     let instance = this.clone();
-                    cx.spawn(async move |_handle, cx| {
+                    cx.spawn(async move |handle, cx| {
                         if instance.supports_schema && !instance.uses_schema_as_database {
                             instance
                                 .load_schemas_for_db(
@@ -1578,7 +1665,16 @@ impl SqlEditorTab {
                                 .await;
                         }
                         instance
-                            .update_schema_for_db(global_state, &db, generation, cx)
+                            .update_schema_for_db(
+                                global_state,
+                                SqlSchemaUpdateRequest {
+                                    database: db,
+                                    generation,
+                                    window_handle,
+                                    entity: handle,
+                                },
+                                cx,
+                            )
                             .await;
                     })
                     .detach();
@@ -1590,10 +1686,11 @@ impl SqlEditorTab {
         cx.subscribe_in(
             &self.schema_select,
             window,
-            |this, _select, event: &SelectEvent<SearchableVec<String>>, _window, cx| {
+            |this, _select, event: &SelectEvent<SearchableVec<String>>, window, cx| {
                 let global_state = cx.global::<GlobalDbState>().clone();
                 if let SelectEvent::Confirm(Some(schema_name)) = event {
                     let generation = this.next_context_generation(cx);
+                    let window_handle = window.window_handle();
                     let database_or_schema = if this.uses_schema_as_database {
                         Some(schema_name.clone())
                     } else {
@@ -1601,9 +1698,18 @@ impl SqlEditorTab {
                     };
                     if let Some(db) = database_or_schema {
                         let instance = this.clone();
-                        cx.spawn(async move |_handle, cx| {
+                        cx.spawn(async move |handle, cx| {
                             instance
-                                .update_schema_for_db(global_state, &db, generation, cx)
+                                .update_schema_for_db(
+                                    global_state,
+                                    SqlSchemaUpdateRequest {
+                                        database: db,
+                                        generation,
+                                        window_handle,
+                                        entity: handle,
+                                    },
+                                    cx,
+                                )
                                 .await;
                         })
                         .detach();
@@ -1627,6 +1733,8 @@ impl SqlEditorTab {
 
     fn next_context_generation(&self, cx: &mut Context<Self>) -> u64 {
         let generation = self.context_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.schema_snapshot.write() = SqlSchema::default();
+        self.foreign_prefetch_inflight.lock().clear();
         self.editor.update(cx, |editor, cx| {
             editor.invalidate_metadata_context(cx);
         });
@@ -1642,33 +1750,34 @@ impl SqlEditorTab {
     fn refresh_statement_snapshot(&mut self, cx: &mut Context<Self>) {
         let snapshot =
             SqlStatementSnapshot::new(self.get_sql_text(cx), SqlDialect::from(&self.database_type));
-        let revision = self.editor.read(cx).input().read(cx).document_revision();
+        let revision = self.editor.read(cx).document_revision(cx);
 
         // The full snapshot is authoritative again: drop any windowed scan so
         // display consumers fall back to it until the debounced window
         // refresh rebuilds one.
         self.viewport_statements = None;
-        if revision != self.statement_revision {
-            // 文档已变更：旧 marker 状态与 frame 都锚定在旧 revision 上，
-            // 直接清退，避免编辑后旧状态错位。
-            self.statement_marker_states.clear();
-            self.active_statement_marker = None;
-            // Frame 缓存键只有光标/选区；快照换了必须强制重算，
-            // 否则防抖路径下边框会一直停留在旧范围（例如补全插入后）。
-            self.last_frame_cursor = None;
-            self.last_frame_selection = None;
-        }
+        self.retain_current_revision_markers(revision);
         self.statement_snapshot = snapshot;
-        self.statement_revision = revision;
         self.set_statement_gutter_markers(cx);
         self.refresh_current_statement_frame(cx);
         self.refresh_insert_value_hints(cx);
     }
 
+    fn retain_current_revision_markers(&mut self, revision: u64) {
+        let prefix = format!("sql-statement:{revision}:");
+        self.statement_marker_states
+            .retain(|id, _| id.starts_with(&prefix));
+        if self
+            .active_statement_marker
+            .as_ref()
+            .is_some_and(|id| !id.starts_with(&prefix))
+        {
+            self.active_statement_marker = None;
+        }
+    }
+
     fn set_statement_gutter_markers(&self, cx: &mut Context<Self>) {
-        // Prefer the windowed scan (large documents) and fall back to the
-        // full snapshot; marker ids are keyed by document coordinates, so the
-        // sources are interchangeable for statements inside the window.
+        let revision = self.editor.read(cx).document_revision(cx);
         let ranges: &[SqlStatementRange] = match &self.viewport_statements {
             Some(viewport) => viewport.scan.statement_ranges(),
             None => self.statement_snapshot.statement_ranges(),
@@ -1676,22 +1785,34 @@ impl SqlEditorTab {
         let markers = ranges
             .iter()
             .map(|statement| {
-                let id = statement_marker_id(self.statement_revision, statement);
-                let state = self
+                let id = statement_marker_id(revision, statement);
+                let icon = self
                     .statement_marker_states
                     .get(&id)
                     .copied()
-                    .unwrap_or(InputGutterMarkerState::Idle);
-                InputGutterMarker::new(id, statement.start_line, IconName::Play)
-                    .tooltip(t!("Query.run_cursor_statement").to_string())
-                    .state(state)
+                    .map(SqlGutterMarkerState::icon_token)
+                    .unwrap_or(SQL_GUTTER_IDLE);
+                GutterMarker::new(id, statement.start_line, icon)
+                    .with_tooltip(t!("Query.run_cursor_statement").to_string())
             })
             .collect();
-
         self.editor
             .read(cx)
             .input()
-            .update(cx, |input, cx| input.set_gutter_markers(markers, cx));
+            .update(cx, |state, cx| state.set_gutter_markers(markers, cx));
+    }
+
+    fn statement_index_for_document(
+        &self,
+        revision: u64,
+        document: &str,
+    ) -> Option<&dyn StatementIndex> {
+        match &self.viewport_statements {
+            Some(viewport) if viewport.revision == revision => Some(&viewport.scan),
+            Some(_) => None,
+            None if self.statement_snapshot.text() == document => Some(&self.statement_snapshot),
+            None => None,
+        }
     }
 
     /// Keep the current-statement frame decoration in sync with the cursor.
@@ -1700,38 +1821,54 @@ impl SqlEditorTab {
     /// on the editor input (cursor/selection movement). Caches the last
     /// cursor/selection so notifying observers never loop.
     fn refresh_current_statement_frame(&mut self, cx: &mut Context<Self>) {
-        let cursor = self.editor.read(cx).cursor_offset(cx);
-        let selection = self.editor.read(cx).selected_range(cx);
-
-        if self.last_frame_cursor == Some(cursor)
-            && self.last_frame_selection.as_ref() == Some(&selection)
-        {
+        let sql_editor = self.editor.read(cx);
+        let revision = sql_editor.document_revision(cx);
+        let cursor = sql_editor.cursor_offset(cx);
+        let selection = sql_editor.selected_range(cx);
+        let frame_key = (
+            revision,
+            cursor,
+            selection.clone(),
+            self.insert_values_highlight.clone(),
+        );
+        if self.last_frame_key.as_ref() == Some(&frame_key) {
             return;
         }
 
-        let doc_len = self.editor.read(cx).input().read(cx).text().len();
+        let document = self.get_sql_text(cx);
+        let Some(index) = self.statement_index_for_document(revision, &document) else {
+            self.editor
+                .read(cx)
+                .input()
+                .update(cx, |state, cx| state.clear_range_decorations(cx));
+            self.last_frame_key = None;
+            return;
+        };
         let decorations = current_statement_frame_decorations(
-            match &self.viewport_statements {
-                Some(viewport) => &viewport.scan as &dyn StatementIndex,
-                None => &self.statement_snapshot,
-            },
-            self.statement_revision,
+            index,
+            revision,
             cursor,
             &selection,
-            doc_len,
+            document.len(),
             self.insert_values_highlight.clone(),
-        );
+        )
+        .into_iter()
+        .map(|decoration| match decoration.style() {
+            RangeDecorationStyle::Fill => {
+                decoration.with_color(cx.theme().primary.opacity(0.07))
+            }
+            RangeDecorationStyle::Frame => decoration.with_color(cx.theme().primary),
+        })
+        .collect();
         self.editor
             .read(cx)
             .input()
-            .update(cx, |input, cx| input.set_range_decorations(decorations, cx));
-
-        self.last_frame_cursor = Some(cursor);
-        self.last_frame_selection = Some(selection);
+            .update(cx, |state, cx| state.set_range_decorations(decorations, cx));
+        self.last_frame_key = Some(frame_key);
     }
 
     /// Compute INSERT value hints for the statement under the cursor and
-    /// install them as inline widgets, plus a Highlight decoration over the
+    /// install them as inline widgets, plus a Fill decoration over the
     /// values region (spec §14).
     ///
     /// Only the cursor's current statement is analyzed, so large documents stay
@@ -1740,33 +1877,39 @@ impl SqlEditorTab {
     fn refresh_insert_value_hints(&mut self, cx: &mut Context<Self>) {
         let (cursor, revision) = {
             let sql_editor = self.editor.read(cx);
-            let input = sql_editor.input().read(cx);
-            (sql_editor.cursor_offset(cx), input.document_revision())
+            (
+                sql_editor.cursor_offset(cx),
+                sql_editor.document_revision(cx),
+            )
         };
 
-        let index = match &self.viewport_statements {
-            Some(viewport) => &viewport.scan as &dyn StatementIndex,
-            None => &self.statement_snapshot,
-        };
         let doc = self.get_sql_text(cx);
-        let statement_start = index
-            .statement_at_cursor(cursor, doc.len())
-            .map(|statement| statement.sql_range.start_byte.min(doc.len()))
-            .unwrap_or(0);
-
+        let Some((statement_start, statement_text)) = self
+            .statement_index_for_document(revision, &doc)
+            .map(|index| {
+                index
+                    .statement_at_cursor(cursor, doc.len())
+                    .map(|statement| {
+                        let start = statement.sql_range.start_byte.min(doc.len());
+                        let end = statement.sql_range.end_byte.min(doc.len()).max(start);
+                        (start, doc[start..end].to_string())
+                    })
+                    .unwrap_or((0, String::new()))
+            })
+        else {
+            self.insert_hints.clear();
+            self.insert_values_highlight = None;
+            self.last_insert_hints_key = None;
+            self.editor
+                .read(cx)
+                .input()
+                .update(cx, |state, cx| state.clear_inline_widgets(cx));
+            return;
+        };
         if self.last_insert_hints_key == Some((statement_start, revision)) {
             return;
         }
         self.last_insert_hints_key = Some((statement_start, revision));
-
-        let statement_text = index
-            .statement_at_cursor(cursor, doc.len())
-            .map(|statement| {
-                let start = statement.sql_range.start_byte.min(doc.len());
-                let end = statement.sql_range.end_byte.min(doc.len()).max(start);
-                doc[start..end].to_string()
-            })
-            .unwrap_or_default();
 
         let schema = self.schema_snapshot.read().clone();
         let ordinal_columns = insert_target_table(&statement_text)
@@ -1777,17 +1920,17 @@ impl SqlEditorTab {
         let widgets = hints
             .iter()
             .map(|hint| {
-                InputInlineWidget::new(
+                InlineWidget::new(
                     format!("insert-hint:{revision}:{statement_start}:{}", hint.offset),
                     statement_start + hint.offset,
                     hint.column.clone(),
                 )
             })
-            .collect::<Vec<_>>();
-        let values_highlight = hints
-            .first()
-            .zip(hints.last())
-            .map(|(first, last)| statement_start + first.offset..statement_start + last.offset + 1);
+            .collect();
+        let values_highlight = (!hints.is_empty())
+            .then(|| insert_values_range(&statement_text))
+            .flatten()
+            .map(|range| statement_start + range.start..statement_start + range.end);
 
         self.insert_hints = hints;
         self.insert_hints_statement_start = statement_start;
@@ -1796,23 +1939,8 @@ impl SqlEditorTab {
         self.editor
             .read(cx)
             .input()
-            .update(cx, |input, cx| input.set_inline_widgets(widgets, cx));
+            .update(cx, |state, cx| state.set_inline_widgets(widgets, cx));
         self.refresh_current_statement_frame(cx);
-    }
-
-    /// Refresh signature help when the cursor moves into a function call.
-    ///
-    /// Coalesced to actual cursor changes: the editor observer fires on every
-    /// notify, so this avoids re-requesting on unrelated repaints (spec §19.2).
-    fn refresh_signature_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.editor.read(cx).cursor_offset(cx);
-        if self.last_signature_cursor == Some(cursor) {
-            return;
-        }
-        self.last_signature_cursor = Some(cursor);
-        self.editor.read(cx).input().update(cx, |state, cx| {
-            state.refresh_signature_help(window, cx);
-        });
     }
 
     /// Schedule a statement-snapshot refresh after the document settles.
@@ -1846,7 +1974,7 @@ impl SqlEditorTab {
                 .read_with(cx, |this, cx| {
                     let input_entity = this.editor.read(cx).input();
                     let input = input_entity.read(cx);
-                    let revision = input.document_revision();
+                    let revision = this.editor.read(cx).document_revision(cx);
                     let dialect = SqlDialect::from(&this.database_type);
                     let scan_input =
                         viewport_statement_scan_input(input.text(), input.visible_row_range());
@@ -1880,21 +2008,13 @@ impl SqlEditorTab {
                 return;
             }
             let _ = this.update(cx, |this, cx| {
-                let current_revision = this.editor.read(cx).input().read(cx).document_revision();
+                let current_revision = this.editor.read(cx).document_revision(cx);
                 if current_revision != revision
                     || !this.is_context_generation_current(context_generation)
                 {
                     return;
                 }
-                if revision != this.statement_revision {
-                    // 文档已变更：旧 marker 状态与 frame 都锚定在旧 revision 上，
-                    // 直接清退，避免编辑后旧状态错位。
-                    this.statement_marker_states.clear();
-                    this.active_statement_marker = None;
-                    // 同上：快照更换后强制 frame 重算，避免补全后边框残留旧范围。
-                    this.last_frame_cursor = None;
-                    this.last_frame_selection = None;
-                }
+                this.retain_current_revision_markers(revision);
                 match result {
                     StatementScanResult::Full(snapshot) => {
                         this.statement_snapshot = snapshot;
@@ -1911,9 +2031,9 @@ impl SqlEditorTab {
                         });
                     }
                 }
-                this.statement_revision = revision;
                 this.set_statement_gutter_markers(cx);
                 this.refresh_current_statement_frame(cx);
+                this.refresh_insert_value_hints(cx);
             });
         });
         self._statement_task = Some(task);
@@ -1928,13 +2048,12 @@ impl SqlEditorTab {
         let editor_input = self.editor.read(cx).input();
         self._editor_input_subscription =
             Some(
-                cx.observe_in(&editor_input, window, |this, _editor_input, window, cx| {
+                cx.observe_in(&editor_input, window, |this, _editor_input, _window, cx| {
                     if this.viewport_statement_scan_is_stale(cx) {
                         this.schedule_statement_snapshot_refresh(cx);
                     }
                     this.refresh_current_statement_frame(cx);
                     this.refresh_insert_value_hints(cx);
-                    this.refresh_signature_help(window, cx);
                 }),
             );
     }
@@ -1945,7 +2064,7 @@ impl SqlEditorTab {
         };
         let input_entity = self.editor.read(cx).input();
         let input = input_entity.read(cx);
-        if viewport.revision != input.document_revision() {
+        if viewport.revision != self.editor.read(cx).document_revision(cx) {
             return true;
         }
         input.visible_row_range().is_some_and(|visible| {
@@ -1980,7 +2099,7 @@ impl SqlEditorTab {
                 // (e.g. toolbar run); harmless when already Running.
                 if let Some(id) = self.active_statement_marker.clone() {
                     self.statement_marker_states
-                        .insert(id, InputGutterMarkerState::Running);
+                        .insert(id, SqlGutterMarkerState::Running);
                     self.set_statement_gutter_markers(cx);
                 }
             }
@@ -1993,24 +2112,24 @@ impl SqlEditorTab {
                     .iter()
                     .any(|result| result.is_error());
                 let state = if failed {
-                    InputGutterMarkerState::Failed
+                    SqlGutterMarkerState::Failed
                 } else {
-                    InputGutterMarkerState::Succeeded
+                    SqlGutterMarkerState::Succeeded
                 };
                 self.finalize_execution_marker(state, cx);
             }
             ExecutionState::Cancelled => {
-                self.finalize_execution_marker(InputGutterMarkerState::Cancelled, cx);
+                self.finalize_execution_marker(SqlGutterMarkerState::Cancelled, cx);
             }
             ExecutionState::Idle => {
                 // Transport-layer failures reset the state to Idle without
                 // producing a result; an active marker means the run failed.
-                self.finalize_execution_marker(InputGutterMarkerState::Failed, cx);
+                self.finalize_execution_marker(SqlGutterMarkerState::Failed, cx);
             }
         }
     }
 
-    fn finalize_execution_marker(&mut self, state: InputGutterMarkerState, cx: &mut Context<Self>) {
+    fn finalize_execution_marker(&mut self, state: SqlGutterMarkerState, cx: &mut Context<Self>) {
         if let Some(id) = self.active_statement_marker.take() {
             self.statement_marker_states.insert(id, state);
             self.set_statement_gutter_markers(cx);
@@ -2028,7 +2147,7 @@ impl SqlEditorTab {
         let cursor = self.editor.read(cx).cursor_offset(cx);
         let marker_id = match_sql_to_statement_marker(
             &self.statement_snapshot,
-            self.statement_revision,
+            self.editor.read(cx).document_revision(cx),
             cursor,
             sql,
         );
@@ -2036,7 +2155,7 @@ impl SqlEditorTab {
         match marker_id {
             Some(id) => {
                 self.statement_marker_states
-                    .insert(id.clone(), InputGutterMarkerState::Running);
+                    .insert(id.clone(), SqlGutterMarkerState::Running);
                 self.active_statement_marker = Some(id);
                 self.set_statement_gutter_markers(cx);
             }
@@ -2335,16 +2454,15 @@ impl SqlEditorTab {
     }
 
     fn run_diagnostics_with_id(&self, run_id: u64, cx: &App) {
-        let editor = self.editor.clone();
         let dialect = SqlDialect::from(&self.database_type);
-        let document_revision = editor.read(cx).input().read(cx).document_revision();
+        let document_revision = self.editor.read(cx).document_revision(cx);
         let identity = SqlDiagnosticIdentity {
             run_id,
             document_revision,
             context_generation: self.context_generation.load(Ordering::SeqCst),
         };
         Self::refresh_diagnostics_async(
-            &editor,
+            &self.editor,
             dialect,
             identity,
             self.diagnostic_run_id.clone(),
@@ -2372,7 +2490,7 @@ impl SqlEditorTab {
             let snapshot = heavy.await;
             let _ = weak.update(cx, |e, cx| {
                 let input = e.input();
-                let current_revision = input.read(cx).document_revision();
+                let current_revision = e.document_revision(cx);
                 let current_identity = SqlDiagnosticIdentity {
                     run_id: diagnostic_run_id.load(Ordering::SeqCst),
                     document_revision: current_revision,
@@ -2397,15 +2515,10 @@ impl SqlEditorTab {
 
     fn bind_gutter_marker_event(&self, window: &mut Window, cx: &mut Context<Self>) {
         let editor_input = self.editor.read(cx).input();
-
         cx.subscribe_in(
             &editor_input,
             window,
-            |this,
-             _input,
-             event: &InputEvent,
-             window: &mut Window,
-             cx: &mut Context<SqlEditorTab>| {
+            |this, _, event: &InputEvent, window, cx| {
                 let InputEvent::GutterMarkerMouseDown {
                     marker_id,
                     logical_row,
@@ -2413,20 +2526,16 @@ impl SqlEditorTab {
                 else {
                     return;
                 };
-
                 this.refresh_statement_snapshot(cx);
-                let revision = this.statement_revision;
-                let Some(statement) = statement_starting_on_line(
+                let revision = this.editor.read(cx).document_revision(cx);
+                let Some(statement) = statement_for_gutter_marker(
                     this.statement_snapshot.statement_ranges(),
+                    revision,
+                    marker_id,
                     *logical_row,
                 ) else {
                     return;
                 };
-                let expected_marker_id = statement_marker_id(revision, statement);
-                if *marker_id != expected_marker_id {
-                    return;
-                }
-
                 let sql = this
                     .statement_snapshot
                     .statement_text(statement)
@@ -2446,8 +2555,8 @@ impl SqlEditorTab {
         self._connection_subscription = Some(cx.subscribe_in(
             &notifier.0,
             window,
-            |this, _notifier, event: &ConnectionDataEvent, _window, cx| {
-                this.handle_connection_data_event(event, cx);
+            |this, _notifier, event: &ConnectionDataEvent, window, cx| {
+                this.handle_connection_data_event(event, window, cx);
             },
         ));
     }
@@ -2455,6 +2564,7 @@ impl SqlEditorTab {
     fn handle_connection_data_event(
         &mut self,
         event: &ConnectionDataEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let ConnectionDataEvent::SchemaChanged {
@@ -2492,10 +2602,20 @@ impl SqlEditorTab {
 
         let global_state = cx.global::<GlobalDbState>().clone();
         let generation = self.next_context_generation(cx);
+        let window_handle = window.window_handle();
         let instance = self.clone();
-        cx.spawn(async move |_handle, cx| {
+        cx.spawn(async move |handle, cx| {
             instance
-                .update_schema_for_db(global_state, &target_database, generation, cx)
+                .update_schema_for_db(
+                    global_state,
+                    SqlSchemaUpdateRequest {
+                        database: target_database,
+                        generation,
+                        window_handle,
+                        entity: handle,
+                    },
+                    cx,
+                )
                 .await;
         })
         .detach();
@@ -2600,7 +2720,7 @@ impl SqlEditorTab {
         let context_generation = self.context_generation.clone();
         let uses_schema_as_database = self.uses_schema_as_database;
 
-        cx.spawn(async move |_handle, cx: &mut AsyncApp| {
+        cx.spawn(async move |handle, cx: &mut AsyncApp| {
             if !instance.is_context_generation_current(generation) {
                 return;
             }
@@ -2717,7 +2837,16 @@ impl SqlEditorTab {
                 }
                 if instance.is_context_generation_current(generation) {
                     instance
-                        .update_schema_for_db(global_state, db, generation, cx)
+                        .update_schema_for_db(
+                            global_state,
+                            SqlSchemaUpdateRequest {
+                                database: db.clone(),
+                                generation,
+                                window_handle,
+                                entity: handle,
+                            },
+                            cx,
+                        )
                         .await;
                 }
             }
@@ -2726,16 +2855,20 @@ impl SqlEditorTab {
     }
 
     /// Update SQL editor schema with tables and columns from current database
-    pub async fn update_schema_for_db(
+    async fn update_schema_for_db(
         &self,
         global_state: GlobalDbState,
-        database: &str,
-        generation: u64,
+        request: SqlSchemaUpdateRequest,
         cx: &mut AsyncApp,
     ) {
+        let SqlSchemaUpdateRequest {
+            database,
+            generation,
+            window_handle,
+            entity,
+        } = request;
         let connection_id = self.connection_id.clone();
-        let editor = self.editor.clone();
-        let Some(scope) = self.current_metadata_scope(generation, Some(database), cx) else {
+        let Some(scope) = self.current_metadata_scope(generation, Some(&database), cx) else {
             return;
         };
         let (db, selected_schema) = (
@@ -2776,8 +2909,6 @@ impl SqlEditorTab {
 
         let mut schema = SqlSchema::default();
         schema = schema.with_scope(scope.database.clone(), scope.schema.clone());
-        // 保留已缓存的外部 qualifier 元数据（跨库/跨 schema 补全懒加载缓存）
-        schema.foreign_schemas = self.schema_snapshot.read().foreign_schemas.clone();
 
         // Add tables to schema
         let table_items: Vec<(String, String)> = tables
@@ -2892,7 +3023,7 @@ impl SqlEditorTab {
 
         // Load other database/schema qualifier names (cross-qualified completion)
         // Names only — full metadata is lazily fetched on demand (see prefetch).
-        let qualifier_items = load_foreign_qualifier_names(
+        let qualifier_items = match load_foreign_qualifier_names(
             &global_state,
             cx,
             connection_id.clone(),
@@ -2900,24 +3031,43 @@ impl SqlEditorTab {
             self.uses_schema_as_database,
             self.supports_schema,
         )
-        .await;
+        .await
+        {
+            Ok(items) => items,
+            Err(error) => {
+                error!("Failed to load SQL completion qualifiers: {error}");
+                Vec::new()
+            }
+        };
         if !self.is_metadata_scope_current(&scope, cx) {
             return;
         }
         schema = schema.with_qualifiers(qualifier_items);
 
-        // Update editor with schema and database-specific completion info
-        if !self.is_metadata_scope_current(&scope, cx) {
-            return;
-        }
-        *self.schema_snapshot.write() = schema.clone();
-        *self.db_completion_info.write() = Some(db_completion_info.clone());
-        _ = editor.update(cx, |e, cx| {
-            e.set_db_completion_info(db_completion_info, schema, cx);
+        // Publish metadata and refresh the popup atomically against the current
+        // tab scope so a late database/schema load cannot overwrite a newer one.
+        let _ = cx.update_window(window_handle, move |_view, window, cx| {
+            let handle = window.window_handle();
+            let _ = entity.update(cx, |this, cx| {
+                if this
+                    .current_metadata_scope(generation, Some(&db), cx)
+                    .as_ref()
+                    != Some(&scope)
+                {
+                    return;
+                }
+                *this.schema_snapshot.write() = schema.clone();
+                *this.db_completion_info.write() = Some(db_completion_info.clone());
+                this.editor.update(cx, |editor, cx| {
+                    editor.set_db_completion_info(db_completion_info, schema, cx);
+                    editor
+                        .input()
+                        .update(cx, |state, cx| state.refresh_completion_popup(window, cx));
+                });
+                this.schedule_foreign_schema_prefetch(handle, cx);
+                this.run_diagnostics(cx);
+            });
         });
-        // Metadata changed: re-run diagnostics immediately so squiggles track
-        // the refreshed schema (unknown tables/columns may appear or clear).
-        let _ = cx.update(|cx| self.run_diagnostics(cx));
     }
 
     /// 文本变化时检测外部 qualifier 引用（`q.` 模式）并触发元数据懒加载。
@@ -2943,17 +3093,21 @@ impl SqlEditorTab {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .foreign_prefetch_inflight
-            .lock()
-            .insert(qualifier.to_lowercase())
-        {
+        let generation = self.context_generation.load(Ordering::SeqCst);
+        let Some(scope) = self.current_metadata_scope(generation, None, cx) else {
+            return;
+        };
+        let key = foreign_prefetch_key(&scope, &qualifier);
+        if !self.foreign_prefetch_inflight.lock().insert(key.clone()) {
             return;
         }
-        let Some((database, schema_name)) = self.foreign_fetch_scope(&qualifier, cx) else {
-            self.foreign_prefetch_inflight
-                .lock()
-                .remove(&qualifier.to_lowercase());
+        let Some((database, schema_name)) = foreign_qualifier_fetch_scope(
+            &scope,
+            &qualifier,
+            self.uses_schema_as_database,
+            self.supports_schema,
+        ) else {
+            self.foreign_prefetch_inflight.lock().remove(&key);
             return;
         };
 
@@ -2978,16 +3132,28 @@ impl SqlEditorTab {
         let inflight = self.foreign_prefetch_inflight.clone();
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            inflight.lock().remove(&qualifier.to_lowercase());
+            inflight.lock().remove(&key);
             match result {
                 Ok(foreign) => {
-                    let _ = this.update(cx, |this, cx| this.merge_foreign_schema(foreign, cx));
-                    // 元数据异步就绪后主动重新触发补全查询，弹窗无需再等下一次击键
-                    let _ = cx.update_window(window_handle, move |_view, window, cx| {
-                        editor.update(cx, |editor, cx| {
-                            let input = editor.input();
-                            input
-                                .update(cx, |state, cx| state.refresh_completion_popup(window, cx));
+                    let merged = this
+                        .update(cx, |this, cx| {
+                            if this
+                                .current_metadata_scope(scope.generation, None, cx)
+                                .as_ref()
+                                != Some(&scope)
+                            {
+                                return false;
+                            }
+                            this.merge_foreign_schema(foreign, cx);
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !merged {
+                        return;
+                    }
+                    let _ = cx.update_window(window_handle, move |_, window, cx| {
+                        editor.read(cx).input().update(cx, |state, cx| {
+                            state.refresh_completion_popup(window, cx);
                         });
                     });
                 }
@@ -2997,18 +3163,6 @@ impl SqlEditorTab {
             }
         })
         .detach();
-    }
-
-    /// 计算外部 qualifier 对应的 list_tables 参数：(database, schema)。
-    fn foreign_fetch_scope(&self, qualifier: &str, cx: &App) -> Option<(String, Option<String>)> {
-        if self.uses_schema_as_database {
-            Some((qualifier.to_string(), None))
-        } else if self.supports_schema {
-            let database = self.database_select.read(cx).selected_value().cloned()?;
-            Some((database, Some(qualifier.to_string())))
-        } else {
-            None
-        }
     }
 
     /// 将懒加载完成的外部 qualifier 元数据合并进快照并刷新补全。
@@ -3087,7 +3241,7 @@ impl SqlEditorTab {
         scope: &SqlExecutionScope,
         cx: &App,
     ) -> SqlExecutionRequest {
-        let revision = self.editor.read(cx).input().read(cx).document_revision();
+        let revision = self.editor.read(cx).document_revision(cx);
         let selection = self.editor.read(cx).selected_range(cx);
         let selected_text = self.editor.read(cx).get_selected_text(cx);
         let (target, statement_index) =
@@ -3288,7 +3442,7 @@ impl SqlEditorTab {
                                 return false;
                             }
                             this.manual_transaction_starting = false;
-                            this.finalize_execution_marker(InputGutterMarkerState::Failed, cx);
+                            this.finalize_execution_marker(SqlGutterMarkerState::Failed, cx);
                             cx.notify();
                             true
                         })
@@ -3314,7 +3468,7 @@ impl SqlEditorTab {
                         this.manual_transaction_starting,
                     ) {
                         this.manual_transaction_starting = false;
-                        this.finalize_execution_marker(InputGutterMarkerState::Cancelled, cx);
+                        this.finalize_execution_marker(SqlGutterMarkerState::Cancelled, cx);
                         cx.notify();
                     }
                 });
@@ -3351,7 +3505,7 @@ impl SqlEditorTab {
                             return false;
                         }
                         this.manual_transaction_starting = false;
-                        this.finalize_execution_marker(InputGutterMarkerState::Failed, cx);
+                        this.finalize_execution_marker(SqlGutterMarkerState::Failed, cx);
                         cx.notify();
                         true
                     })
@@ -3405,7 +3559,7 @@ impl SqlEditorTab {
                         this.manual_transaction_starting,
                     ) {
                         this.manual_transaction_starting = false;
-                        this.finalize_execution_marker(InputGutterMarkerState::Cancelled, cx);
+                        this.finalize_execution_marker(SqlGutterMarkerState::Cancelled, cx);
                         cx.notify();
                     }
                 });
@@ -3635,7 +3789,7 @@ impl SqlEditorTab {
                     .fetch_add(1, Ordering::SeqCst);
                 self.manual_transaction_starting = false;
                 self.manual_transaction_finishing = false;
-                self.finalize_execution_marker(InputGutterMarkerState::Cancelled, cx);
+                self.finalize_execution_marker(SqlGutterMarkerState::Cancelled, cx);
                 cx.notify();
             }
             ManualTransactionStopAction::CloseInstalledSession => {
@@ -3745,6 +3899,15 @@ impl SqlEditorTab {
         self.execute_sql_text(selected_text, window, cx);
     }
 
+    fn handle_run_selected_sql_action(
+        &mut self,
+        _: &RunSelectedSql,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_run_selected_query(window, cx);
+    }
+
     fn handle_run_cursor_statement_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cursor_offset = self.editor.read(cx).cursor_offset(cx);
         self.refresh_statement_snapshot(cx);
@@ -3764,13 +3927,22 @@ impl SqlEditorTab {
         self.execute_sql_text(sql, window, cx);
     }
 
+    fn handle_run_cursor_statement_sql_action(
+        &mut self,
+        _: &RunCursorStatementSql,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_run_cursor_statement_query(window, cx);
+    }
+
     fn handle_format_query(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.get_sql_text(cx);
         if text.trim().is_empty() {
             window.push_notification(t!("Query.no_sql_to_format").to_string(), cx);
             return;
         }
-        let format_revision = self.editor.read(cx).input().read(cx).document_revision();
+        let format_revision = self.editor.read(cx).document_revision(cx);
         let format_context_generation = self.context_generation.load(Ordering::SeqCst);
         let window_option = cx.active_window();
         let format_options = SqlFormatOptions::from_settings(&AppSettings::global(cx).sql_format);
@@ -3781,8 +3953,7 @@ impl SqlEditorTab {
             let formatted = heavy.await;
             entity
                 .update(cx, |this, cx| {
-                    let current_revision =
-                        this.editor.read(cx).input().read(cx).document_revision();
+                    let current_revision = this.editor.read(cx).document_revision(cx);
                     if current_revision != format_revision
                         || !this.is_context_generation_current(format_context_generation)
                     {
@@ -3877,55 +4048,48 @@ impl SqlEditorTab {
             let tx_discard = tx.clone();
             let tx_save = tx.clone();
 
+            let footer = DialogFooter::new().children(vec![
+                Button::new("cancel-close-query")
+                    .label(t!("Common.cancel").to_string())
+                    .on_click(move |_, window: &mut Window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(tx) = tx_cancel.lock().take() {
+                            let _ = tx.send(false);
+                        }
+                    })
+                    .into_any_element(),
+                Button::new("discard-close-query")
+                    .label(t!("Query.dont_save").to_string())
+                    .on_click(move |_, window: &mut Window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(tx) = tx_discard.lock().take() {
+                            let _ = tx.send(true);
+                        }
+                    })
+                    .into_any_element(),
+                Button::new("save-close-query")
+                    .label(t!("Common.save").to_string())
+                    .primary()
+                    .on_click(move |_, window: &mut Window, cx| {
+                        let name = input_for_save.read(cx).value().trim().to_owned();
+                        let saved = view_for_save
+                            .update(cx, |view, cx| view.save_named_query(&name, window, cx));
+                        if saved {
+                            window.close_dialog(cx);
+                            if let Some(tx) = tx_save.lock().take() {
+                                let _ = tx.send(true);
+                            }
+                        }
+                    })
+                    .into_any_element(),
+            ]);
+
             dialog
                 .title(t!("Query.save_query_title").to_string())
                 .w(px(380.0))
                 .overlay_closable(false)
                 .close_button(false)
-                .footer(move |_ok, _cancel, _window, _cx| {
-                    let input_for_save = input_for_save.clone();
-                    let view_for_save = view_for_save.clone();
-                    let tx_cancel = tx_cancel.clone();
-                    let tx_discard = tx_discard.clone();
-                    let tx_save = tx_save.clone();
-
-                    vec![
-                        Button::new("cancel-close-query")
-                            .label(t!("Common.cancel").to_string())
-                            .on_click(move |_, window: &mut Window, cx| {
-                                window.close_dialog(cx);
-                                if let Some(tx) = tx_cancel.lock().take() {
-                                    let _ = tx.send(false);
-                                }
-                            })
-                            .into_any_element(),
-                        Button::new("discard-close-query")
-                            .label(t!("Query.dont_save").to_string())
-                            .on_click(move |_, window: &mut Window, cx| {
-                                window.close_dialog(cx);
-                                if let Some(tx) = tx_discard.lock().take() {
-                                    let _ = tx.send(true);
-                                }
-                            })
-                            .into_any_element(),
-                        Button::new("save-close-query")
-                            .label(t!("Common.save").to_string())
-                            .primary()
-                            .on_click(move |_, window: &mut Window, cx| {
-                                let name = input_for_save.read(cx).value().trim().to_owned();
-                                let saved = view_for_save.update(cx, |view, cx| {
-                                    view.save_named_query(&name, window, cx)
-                                });
-                                if saved {
-                                    window.close_dialog(cx);
-                                    if let Some(tx) = tx_save.lock().take() {
-                                        let _ = tx.send(true);
-                                    }
-                                }
-                            })
-                            .into_any_element(),
-                    ]
-                })
+                .footer(footer)
                 .child(
                     v_flex()
                         .gap_3()
@@ -4504,6 +4668,8 @@ impl Render for SqlEditorTab {
             .size_full()
             .on_action(cx.listener(Self::handle_run_current_query_action))
             .on_action(cx.listener(Self::handle_run_all_query_action))
+            .on_action(cx.listener(Self::handle_run_selected_sql_action))
+            .on_action(cx.listener(Self::handle_run_cursor_statement_sql_action))
             .on_action(cx.listener(Self::handle_toggle_line_comment_action));
         if has_results && results_visible {
             div = div
@@ -4550,11 +4716,9 @@ impl Clone for SqlEditorTab {
             _connection_subscription: None,
             statement_snapshot: self.statement_snapshot.clone(),
             viewport_statements: self.viewport_statements.clone(),
-            statement_revision: self.statement_revision,
             statement_marker_states: self.statement_marker_states.clone(),
             active_statement_marker: self.active_statement_marker.clone(),
-            last_frame_cursor: self.last_frame_cursor,
-            last_frame_selection: self.last_frame_selection.clone(),
+            last_frame_key: self.last_frame_key.clone(),
             _execution_state_subscription: None,
             _editor_input_subscription: None,
             diagnostic_run_id: self.diagnostic_run_id.clone(),
@@ -4568,7 +4732,6 @@ impl Clone for SqlEditorTab {
             insert_hints_statement_start: self.insert_hints_statement_start,
             insert_values_highlight: self.insert_values_highlight.clone(),
             last_insert_hints_key: self.last_insert_hints_key,
-            last_signature_cursor: self.last_signature_cursor,
         }
     }
 }
@@ -4731,29 +4894,32 @@ impl Element for ResizeEventHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManualSqlExecutionAction, ManualTransactionAction, ManualTransactionInvalidationMode,
-        ManualTransactionSession, ManualTransactionStopAction, QueryFileNameError,
-        QueryToolbarAction, RUN_ALL_QUERY_KEY_BINDINGS, RUN_CURRENT_QUERY_KEY_BINDINGS,
-        RunCurrentQuery, SCHEMA_COLUMN_FETCH_CONCURRENCY, SQL_EDITOR_CONTEXT,
-        SQL_EDITOR_INPUT_CONTEXT, SqlDiagnosticIdentity, SqlMetadataScope, StatementScanInput,
-        ToggleLineComment, can_start_query_execution, can_switch_query_connection, collect_bounded,
-        current_statement_frame_decorations, initial_database_select_value, insert_target_table,
-        is_current_diagnostic_identity, is_current_manual_transaction_owner,
-        is_current_manual_transaction_start, is_current_query_context_generation,
-        lookup_table_columns, manual_sql_execution_action, manual_transaction_control_sql,
-        manual_transaction_invalidation_mode, manual_transaction_stop_action,
-        match_sql_to_statement_marker, metadata_scope_selection, preferred_default_database,
-        query_connection_context_label, query_connection_ids, query_file_path_for_name,
-        query_toolbar_action, schema_changed_event_matches_scope, should_render_schema_select,
-        sql_text_for_run_all, sql_text_for_toolbar_run, statement_marker_id,
-        supports_manual_transactions, toggle_sql_line_comments, unquote_sql_identifier,
-        viewport_statement_scan_input, write_new_sql_file, write_sql_file,
+        ForeignQualifierKind, ManualSqlExecutionAction, ManualTransactionAction,
+        ManualTransactionInvalidationMode, ManualTransactionSession, ManualTransactionStopAction,
+        QueryFileNameError, QueryToolbarAction, RUN_ALL_QUERY_KEY_BINDINGS,
+        RUN_CURRENT_QUERY_KEY_BINDINGS, RunCurrentQuery, SCHEMA_COLUMN_FETCH_CONCURRENCY,
+        SQL_EDITOR_CONTEXT, SQL_EDITOR_INPUT_CONTEXT, SqlDiagnosticIdentity, SqlMetadataScope,
+        StatementScanInput, ToggleLineComment, can_start_query_execution,
+        can_switch_query_connection, collect_bounded, current_statement_frame_decorations,
+        foreign_prefetch_key, foreign_qualifier_fetch_scope, foreign_qualifier_scope,
+        initial_database_select_value, insert_target_table, insert_values_range,
+        is_current_diagnostic_identity,
+        is_current_manual_transaction_owner, is_current_manual_transaction_start,
+        is_current_query_context_generation, lookup_table_columns, manual_sql_execution_action,
+        manual_transaction_control_sql, manual_transaction_invalidation_mode,
+        manual_transaction_stop_action, match_sql_to_statement_marker, metadata_scope_selection,
+        preferred_default_database, query_connection_context_label, query_connection_ids,
+        query_file_path_for_name, query_toolbar_action, schema_changed_event_matches_scope,
+        should_render_schema_select, sql_text_for_run_all, sql_text_for_toolbar_run,
+        statement_for_gutter_marker, statement_marker_id, supports_manual_transactions,
+        toggle_sql_line_comments,
+        unquote_sql_identifier, viewport_statement_scan_input, write_new_sql_file, write_sql_file,
     };
     use db::DbManager;
     use db::sql_editor::statement_ranges::{SqlDialect, SqlStatementSnapshot};
     use gpui::{KeyBinding, KeyContext, Keymap, Keystroke};
     use gpui_component::input;
-    use gpui_component::input::InputRangeDecorationStyle;
+    use gpui_component::input::RangeDecorationStyle;
     use one_core::storage::DatabaseType;
     use ropey::Rope;
     use std::path::PathBuf;
@@ -4762,6 +4928,58 @@ mod tests {
     use std::time::Duration;
 
     const WIRE_PREFIX: &str = "/*onetcli-ipc-wire*/ ";
+
+    #[test]
+    fn foreign_prefetch_keys_are_isolated_by_metadata_scope() {
+        let first = SqlMetadataScope::new("connection", DatabaseType::MySQL, 1)
+            .with_database(Some("app".into()));
+        let next_generation = SqlMetadataScope::new("connection", DatabaseType::MySQL, 2)
+            .with_database(Some("app".into()));
+        let other_database = SqlMetadataScope::new("connection", DatabaseType::MySQL, 1)
+            .with_database(Some("other".into()));
+
+        let first_key = foreign_prefetch_key(&first, "Analytics");
+        assert_eq!(first_key.1, "analytics");
+        assert_ne!(
+            first_key,
+            foreign_prefetch_key(&next_generation, "analytics")
+        );
+        assert_ne!(
+            first_key,
+            foreign_prefetch_key(&other_database, "analytics")
+        );
+    }
+
+    #[test]
+    fn foreign_qualifier_scopes_match_database_capabilities() {
+        let pg_scope = SqlMetadataScope::new("connection", DatabaseType::PostgreSQL, 1)
+            .with_database(Some("app".into()))
+            .with_schema(Some("public".into()));
+        let pg = foreign_qualifier_scope(&pg_scope, false, true);
+        assert_eq!(pg.kind, ForeignQualifierKind::Schemas);
+        assert_eq!(pg.current_name.as_deref(), Some("public"));
+        assert_eq!(
+            foreign_qualifier_fetch_scope(&pg_scope, "analytics", false, true),
+            Some(("app".into(), Some("analytics".into())))
+        );
+
+        let mysql = foreign_qualifier_scope(&pg_scope, false, false);
+        assert_eq!(mysql.kind, ForeignQualifierKind::Databases);
+        assert_eq!(mysql.current_name.as_deref(), Some("app"));
+        assert_eq!(
+            foreign_qualifier_fetch_scope(&pg_scope, "other_db", false, false),
+            Some(("other_db".into(), None))
+        );
+
+        let oracle_scope = SqlMetadataScope::new("connection", DatabaseType::Oracle, 1)
+            .with_schema(Some("APP".into()));
+        let oracle = foreign_qualifier_scope(&oracle_scope, true, false);
+        assert_eq!(oracle.kind, ForeignQualifierKind::Schemas);
+        assert_eq!(
+            foreign_qualifier_fetch_scope(&oracle_scope, "OTHER", true, false),
+            Some((String::new(), Some("OTHER".into())))
+        );
+    }
 
     #[test]
     fn large_documents_capture_only_a_viewport_statement_window() {
@@ -5420,6 +5638,26 @@ mod tests {
     }
 
     #[test]
+    fn gutter_marker_resolves_the_exact_same_line_statement() {
+        let sql = "select 1; select 2;";
+        let snapshot = SqlStatementSnapshot::new(sql, SqlDialect::from(&DatabaseType::MySQL));
+        let statements = snapshot.statement_ranges();
+        assert_eq!(2, statements.len());
+        assert_eq!(statements[0].start_line, statements[1].start_line);
+
+        let second_id = statement_marker_id(7, &statements[1]);
+        let statement =
+            statement_for_gutter_marker(statements, 7, &second_id, statements[1].start_line)
+                .expect("second marker should resolve independently on the same line");
+
+        assert_eq!("select 2", snapshot.statement_text(statement));
+        assert!(
+            statement_for_gutter_marker(statements, 8, &second_id, statements[1].start_line)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn frame_decorations_cover_statement_through_delimiter() {
         let sql = "select 1;\n  select * from 用户表;  \nselect 3;";
         let snapshot = SqlStatementSnapshot::new(sql, SqlDialect::from(&DatabaseType::MySQL));
@@ -5436,15 +5674,19 @@ mod tests {
             .map(|delimiter| delimiter.end_byte)
             .unwrap();
         // Frame runs from the first SQL token through the trailing `;`.
-        assert_eq!(decoration.range, statement.sql_range.start_byte..delim_end);
         assert_eq!(
-            decoration.id.to_string(),
+            decoration.range(),
+            &(statement.sql_range.start_byte..delim_end)
+        );
+        assert_eq!(
+            decoration.id().to_string(),
             format!(
                 "sql-frame:5:{}:{}",
-                decoration.range.start, decoration.range.end
+                decoration.range().start,
+                decoration.range().end
             )
         );
-        assert_eq!(&sql[decoration.range.clone()], "select * from 用户表;");
+        assert_eq!(&sql[decoration.range().clone()], "select * from 用户表;");
     }
 
     #[test]
@@ -5560,7 +5802,10 @@ mod tests {
         let keymap = Keymap::new(vec![
             KeyBinding::new(
                 "secondary-enter",
-                input::Enter { secondary: true },
+                input::Enter {
+                    secondary: true,
+                    shift: false,
+                },
                 Some("Input"),
             ),
             KeyBinding::new(
@@ -6035,6 +6280,15 @@ mod tests {
     }
 
     #[test]
+    fn insert_values_range_covers_all_value_rows_and_nested_calls() {
+        let sql = "INSERT INTO t (a, b) VALUES (1, coalesce(2, 3)), (4, 5)";
+        let range = insert_values_range(sql).expect("VALUES rows should be found");
+
+        assert_eq!("(1, coalesce(2, 3)), (4, 5)", &sql[range]);
+        assert_eq!(None, insert_values_range("INSERT INTO t SELECT * FROM s"));
+    }
+
+    #[test]
     fn unquote_sql_identifier_strips_quoting() {
         assert_eq!("users", unquote_sql_identifier("users"));
         assert_eq!("My Table", unquote_sql_identifier("\"My Table\""));
@@ -6080,9 +6334,9 @@ mod tests {
             Some(values.clone()),
         );
         assert_eq!(2, decorations.len());
-        assert_eq!(InputRangeDecorationStyle::Highlight, decorations[0].style);
-        assert_eq!(values, decorations[0].range.clone());
-        assert_eq!(InputRangeDecorationStyle::Frame, decorations[1].style);
-        assert_eq!(values, decorations[1].range.clone());
+        assert_eq!(RangeDecorationStyle::Fill, decorations[0].style());
+        assert_eq!(&values, decorations[0].range());
+        assert_eq!(RangeDecorationStyle::Frame, decorations[1].style());
+        assert_eq!(&values, decorations[1].range());
     }
 }

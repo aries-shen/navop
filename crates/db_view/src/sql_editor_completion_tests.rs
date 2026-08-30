@@ -50,15 +50,6 @@ mod tests {
         SymbolTable::build_from_tokens(&tokens)
     }
 
-    /// Helper to infer context from SQL at given offset
-    #[allow(dead_code)]
-    fn infer_context(sql: &str, offset: usize) -> SqlContext {
-        let mut tokenizer = SqlTokenizer::new(sql);
-        let tokens = tokenizer.tokenize();
-        let symbol_table = SymbolTable::build_from_tokens(&tokens);
-        ContextInferrer::infer(&tokens, offset, &symbol_table)
-    }
-
     fn tokenize(sql: &str) -> Vec<db::sql_editor::sql_tokenizer::SqlToken> {
         SqlTokenizer::new(sql).tokenize()
     }
@@ -2058,6 +2049,11 @@ mod tests {
         assert_eq!(item_new_text(&items[0]), "test2.");
         assert_eq!(items[0].kind, Some(CompletionItemKind::MODULE));
 
+        let current =
+            qualifier_name_items(&schema, &LocalSqlContext::TableName, "AP", hover_range());
+        assert_eq!(item_labels(&current), vec!["app".to_string()]);
+        assert_eq!(item_new_text(&current[0]), "app.");
+
         // 不匹配的前缀不出现在列表
         let none = qualifier_name_items(&schema, &LocalSqlContext::TableName, "zzz", hover_range());
         assert!(none.is_empty());
@@ -2131,7 +2127,16 @@ mod cross_schema_provider_tests {
             })
             .unwrap()
         });
-        let (qualifiers, tables, columns) = handle
+        let (
+            qualifiers,
+            current_qualifier,
+            tables,
+            columns,
+            from_tables,
+            from_prefix,
+            from_current_qualifier,
+            scoped_tables,
+        ) = handle
             .update(cx, |root, window, cx| {
                 let input = root.0.clone();
                 let mut run = |rope: Rope| {
@@ -2144,8 +2149,13 @@ mod cross_schema_provider_tests {
                     })
                 };
                 let t1 = run(Rope::from_str("SELECT te"));
-                let t2 = run(Rope::from_str("SELECT * FROM test2."));
-                let t3 = run(Rope::from_str("SELECT test2.t1."));
+                let t2 = run(Rope::from_str("SELECT ap"));
+                let t3 = run(Rope::from_str("SELECT * FROM test2."));
+                let t4 = run(Rope::from_str("SELECT test2.t1."));
+                let t5 = run(Rope::from_str("SELECT * FROM "));
+                let t6 = run(Rope::from_str("SELECT * FROM us"));
+                let t7 = run(Rope::from_str("SELECT * FROM ap"));
+                let t8 = run(Rope::from_str("SELECT * FROM app."));
                 cx.spawn(async move |_, _| {
                     let labels = |response: anyhow::Result<CompletionResponse>| -> anyhow::Result<Vec<String>> {
                         let items = match response? {
@@ -2154,7 +2164,16 @@ mod cross_schema_provider_tests {
                         };
                         Ok(items.into_iter().map(|item| item.label).collect())
                     };
-                    anyhow::Ok((labels(t1.await)?, labels(t2.await)?, labels(t3.await)?))
+                    anyhow::Ok((
+                        labels(t1.await)?,
+                        labels(t2.await)?,
+                        labels(t3.await)?,
+                        labels(t4.await)?,
+                        labels(t5.await)?,
+                        labels(t6.await)?,
+                        labels(t7.await)?,
+                        labels(t8.await)?,
+                    ))
                 })
             })
             .unwrap()
@@ -2166,12 +2185,32 @@ mod cross_schema_provider_tests {
             "输入库名前缀应提示其他数据库，实际 {qualifiers:?}"
         );
         assert!(
+            current_qualifier.iter().any(|label| label == "app"),
+            "输入当前库前缀应提示选中的数据库，实际 {current_qualifier:?}"
+        );
+        assert!(
             tables.iter().any(|label| label == "t1"),
             "`db.` 应提示该库的表，实际 {tables:?}"
         );
         assert!(
             columns.iter().any(|label| label == "c1"),
             "`db.tbl.` 应提示该表的列，实际 {columns:?}"
+        );
+        assert!(
+            from_tables.iter().any(|label| label == "users"),
+            "`FROM ` 应提示当前数据库的表，实际 {from_tables:?}"
+        );
+        assert!(
+            from_prefix.iter().any(|label| label == "users"),
+            "`FROM us` 应按前缀提示当前数据库的表，实际 {from_prefix:?}"
+        );
+        assert!(
+            from_current_qualifier.iter().any(|label| label == "app"),
+            "`FROM ap` 应提示选中的数据库，实际 {from_current_qualifier:?}"
+        );
+        assert!(
+            scoped_tables.iter().any(|label| label == "users"),
+            "当前 database 限定名应提示当前表，实际 {scoped_tables:?}"
         );
     }
 }

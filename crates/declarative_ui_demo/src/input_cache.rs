@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use gpui::{App, AppContext, Entity, Subscription, Window};
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, TextareaState};
 
 use crate::{
     ComponentProps, Runtime, VNode,
@@ -29,8 +29,14 @@ pub(crate) struct InputEnvironment<'a> {
     pub(crate) cx: &'a mut App,
 }
 
+#[derive(Clone)]
+pub(crate) enum StatefulInputState {
+    Input(Entity<InputState>),
+    Textarea(Entity<TextareaState>),
+}
+
 struct InputEntry {
-    state: Entity<InputState>,
+    state: StatefulInputState,
     spec: StatefulInputSpec,
     _subscription: Option<Subscription>,
 }
@@ -45,7 +51,7 @@ impl InputCache {
         &mut self,
         request: InputRequest,
         environment: InputEnvironment<'_>,
-    ) -> Entity<InputState> {
+    ) -> StatefulInputState {
         if let Some(entry) = self.entries.get_mut(&request.id)
             && entry.spec.has_same_configuration(&request.spec)
         {
@@ -70,22 +76,34 @@ impl InputEntry {
     fn new(request: InputRequest, environment: InputEnvironment<'_>) -> Self {
         let placeholder = request.spec.placeholder.clone();
         let value = request.spec.value.clone();
-        let multiline = request.spec.multiline;
         let masked = request.spec.masked;
-        let state = environment.cx.new(|cx| {
-            let mut state = InputState::new(environment.window, cx).multi_line(multiline);
-            if masked {
-                state = state.masked(true);
-            }
-            if let Some(text) = placeholder {
-                state = state.placeholder(text);
-            }
-            if let Some(text) = value {
-                state = state.default_value(text);
-            }
-            state
-        });
-        let subscription = subscribe_binding(&state, &request, environment.cx);
+        let (state, subscription) = if request.spec.multiline {
+            let state = environment.cx.new(|cx| {
+                let mut state = TextareaState::new(environment.window, cx);
+                if let Some(text) = placeholder {
+                    state = state.placeholder(text);
+                }
+                if let Some(text) = value {
+                    state = state.default_value(text);
+                }
+                state
+            });
+            let subscription = subscribe_textarea_binding(&state, &request, environment.cx);
+            (StatefulInputState::Textarea(state), subscription)
+        } else {
+            let state = environment.cx.new(|cx| {
+                let mut state = InputState::new(environment.window, cx).masked(masked);
+                if let Some(text) = placeholder {
+                    state = state.placeholder(text);
+                }
+                if let Some(text) = value {
+                    state = state.default_value(text);
+                }
+                state
+            });
+            let subscription = subscribe_input_binding(&state, &request, environment.cx);
+            (StatefulInputState::Input(state), subscription)
+        };
         Self {
             state,
             spec: request.spec,
@@ -96,16 +114,43 @@ impl InputEntry {
     fn sync_bound_value(&mut self, next: &StatefulInputSpec, environment: InputEnvironment<'_>) {
         if next.bind.is_some() && self.spec.value != next.value {
             let value = next.value.clone().unwrap_or_default();
-            self.state.update(environment.cx, |state, cx| {
-                state.set_value(value, environment.window, cx);
-            });
+            match &self.state {
+                StatefulInputState::Input(state) => state.update(environment.cx, |state, cx| {
+                    state.set_value(value, environment.window, cx);
+                }),
+                StatefulInputState::Textarea(state) => state.update(environment.cx, |state, cx| {
+                    state.set_value(value, environment.window, cx);
+                }),
+            }
         }
         self.spec = next.clone();
     }
 }
 
-fn subscribe_binding(
+fn subscribe_input_binding(
     state: &Entity<InputState>,
+    request: &InputRequest,
+    cx: &mut App,
+) -> Option<Subscription> {
+    let key = request.spec.bind.clone()?;
+    let runtime = request.runtime.clone();
+    Some(cx.subscribe(state, move |input, event: &InputEvent, cx| {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let value = input.read(cx).value().to_string();
+        let runtime = runtime.clone();
+        let key = key.clone();
+        cx.defer(move |cx| {
+            runtime.update(cx, |runtime, cx| {
+                runtime.set(key, value, cx);
+            });
+        });
+    }))
+}
+
+fn subscribe_textarea_binding(
+    state: &Entity<TextareaState>,
     request: &InputRequest,
     cx: &mut App,
 ) -> Option<Subscription> {

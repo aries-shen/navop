@@ -886,7 +886,7 @@ impl SettingsPanel {
                                     Button::new("settings-import-custom-fonts")
                                         .icon(IconName::File)
                                         .label(t!("Settings.General.Font.import_custom_fonts"))
-                                        .with_size(options.size)
+                                        .with_size(options.size())
                                         .on_click(|_, window, cx| {
                                             let target_window = window.window_handle();
                                             let future = cx.prompt_for_paths(PathPromptOptions {
@@ -1113,6 +1113,7 @@ impl SettingsPanel {
                                         AppSettings::update_and_save(cx, |settings| {
                                             settings.table_row_height = height;
                                         });
+                                        one_ui::set_table_row_height(height, cx);
                                     },
                                 )
                                 .default_value(default_settings.table_row_height as f64),
@@ -1170,7 +1171,7 @@ impl SettingsPanel {
                             SettingItem::render(move |_options, _window, cx| {
                                 render_manual_update_check_item(cx)
                             })
-                            .search_texts([
+                            .keywords([
                                 t!("Settings.General.Update.group_title").to_string(),
                                 t!("Settings.General.Update.check_now").to_string(),
                                 t!("Settings.General.Update.check_now_desc").to_string(),
@@ -1182,7 +1183,7 @@ impl SettingsPanel {
                             SettingItem::render(move |_options, _window, cx| {
                                 render_global_proxy_settings_item(cx)
                             })
-                            .search_texts([
+                            .keywords([
                                 t!("Settings.General.Proxy.group_title").to_string(),
                                 t!("Settings.General.Proxy.title").to_string(),
                                 t!("Settings.General.Proxy.description").to_string(),
@@ -1206,19 +1207,19 @@ impl SettingsPanel {
                     SettingItem::render(move |_options, window, cx| {
                         render_shortcuts_section(default_system_hotkey.clone(), window, cx)
                     })
-                    .search_texts(shortcut_search_texts()),
+                    .keywords(shortcut_search_texts()),
                 ),
             ),
             SettingPage::new(t!("LlmProviders.title")).group(SettingGroup::new().item(
                 SettingItem::render(move |_options, _window, _cx| {
                     llm_view.clone().into_any_element()
                 })
-                .search_text(t!("LlmProviders.title").to_string()),
+                .keywords([t!("LlmProviders.title").to_string()]),
             )),
             // 账户设置页
             SettingPage::new(t!("Settings.Account.title")).group(SettingGroup::new().item(
                 SettingItem::render(move |_options, window, cx| render_account_section(window, cx))
-                    .search_texts([
+                    .keywords([
                         t!("Settings.Account.title").to_string(),
                         t!("Settings.Account.username").to_string(),
                         t!("Settings.Account.email").to_string(),
@@ -1230,7 +1231,7 @@ impl SettingsPanel {
             // 关于页面
             SettingPage::new(t!("Settings.About.title")).group(SettingGroup::new().item(
                 SettingItem::render(move |_options, _window, cx| render_about_section(cx))
-                    .search_texts([
+                    .keywords([
                         t!("Settings.About.title").to_string(),
                         t!("Settings.About.version").to_string(),
                         t!("Settings.About.opensource_label").to_string(),
@@ -1254,7 +1255,7 @@ fn local_terminal_setting_group(defaults: &LocalTerminalProfileSettings) -> Sett
             SettingItem::render(move |_options, window, cx| {
                 crate::settings::local_terminal_settings::render(window, cx)
             })
-            .search_texts([
+            .keywords([
                 t!("Settings.General.LocalTerminal.custom_profiles").to_string(),
                 t!("Settings.General.LocalTerminal.custom_command").to_string(),
             ]),
@@ -1304,7 +1305,7 @@ fn sync_setting_group(
             SettingItem::render(move |_options, window, cx| {
                 render_personal_sync_actions(window, cx)
             })
-            .search_texts([
+            .keywords([
                 t!("Settings.Sync.status").to_string(),
                 t!("Settings.Sync.test_connection").to_string(),
                 t!("Settings.Sync.sync_now").to_string(),
@@ -1401,7 +1402,9 @@ fn render_personal_sync_path_field(
         .use_keyed_state(
             SharedString::from(format!(
                 "personal-sync-path-{}-{}-{}",
-                options.page_ix, options.group_ix, options.item_ix
+                options.page_ix(),
+                options.group_ix(),
+                options.item_ix()
             )),
             cx,
             |window, cx| {
@@ -1428,8 +1431,8 @@ fn render_personal_sync_path_field(
     let input = state.input.clone();
     h_flex()
         .gap_2()
-        .child(Input::new(&input).with_size(options.size).map(|this| {
-            if options.layout.is_horizontal() {
+        .child(Input::new(&input).with_size(options.size()).map(|this| {
+            if options.layout().is_horizontal() {
                 this.w_64()
             } else {
                 this.w_full()
@@ -1438,7 +1441,7 @@ fn render_personal_sync_path_field(
         .child(
             Button::new("personal-sync-select-directory")
                 .icon(IconName::Folder)
-                .with_size(options.size)
+                .with_size(options.size())
                 .tooltip(t!("Settings.Sync.select_directory").to_string())
                 .on_click(move |_, window, cx| {
                     prompt_for_personal_sync_directory(input.clone(), window, cx);
@@ -1680,7 +1683,7 @@ fn team_key_setting_group() -> SettingGroup {
         SettingItem::render(move |_options, window, cx| {
             render_team_key_management_section(window, cx)
         })
-        .search_text(t!("TeamSync.manage_keys").to_string()),
+        .keywords([t!("TeamSync.manage_keys").to_string()]),
     )
 }
 
@@ -1894,7 +1897,7 @@ fn show_team_key_entry_dialog(team: TeamOption, window: &mut Window, cx: &mut Ap
             .title(format!("{} - {}", t!("TeamSync.save_local_key"), team_name))
             .width(gpui::px(460.))
             .confirm()
-            .on_ok(move |_, window, cx| {
+            .on_ok(move |_, window, cx: &mut App| {
                 let team_key = key_input_ok.read(cx).text().to_string();
                 if team_key.is_empty() {
                     set_team_key_dialog_error(&error_ok, t!("TeamSync.key_empty").to_string(), cx);
@@ -1963,7 +1966,7 @@ fn show_team_key_rotation_dialog(team: TeamOption, window: &mut Window, cx: &mut
             .title(format!("{} - {}", t!("TeamSync.rotate_key"), team_name))
             .width(gpui::px(500.))
             .confirm()
-            .on_ok(move |_, window, cx| {
+            .on_ok(move |_, window, cx: &mut App| {
                 let old_key = old_ok.read(cx).text().to_string();
                 let new_key = new_ok.read(cx).text().to_string();
                 if !team_key_rotation_inputs_valid(&old_key, &new_key) {

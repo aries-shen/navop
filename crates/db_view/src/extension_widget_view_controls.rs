@@ -222,9 +222,6 @@ fn input_state_for_field(
         if field.kind == UiFieldKind::Password {
             state = state.masked(true);
         }
-        if field.kind == UiFieldKind::TextArea {
-            state = state.auto_grow(3, 8);
-        }
         if let Some(value) = &field.value {
             state = state.default_value(value);
         }

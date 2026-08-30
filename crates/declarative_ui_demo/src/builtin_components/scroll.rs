@@ -2,7 +2,7 @@ use gpui::{
     Div, InteractiveElement, IntoElement, ParentElement, ScrollHandle, Stateful,
     StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_component::scroll::{Scrollbar, ScrollbarAxis, ScrollbarShow};
+use gpui_component::scroll::{Scrollbar, ScrollbarAxis, ScrollbarMode};
 
 use crate::{
     ComponentError, ComponentProps, ComponentRegistry, ComponentRenderer, ComponentResult,
@@ -10,7 +10,7 @@ use crate::{
 };
 
 const DEFAULT_AXIS: ScrollbarAxis = ScrollbarAxis::Vertical;
-const DEFAULT_SCROLLBAR_SHOW: ScrollbarShow = ScrollbarShow::Scrolling;
+const DEFAULT_SCROLLBAR_SHOW: ScrollbarMode = ScrollbarMode::Scrolling;
 
 pub(super) fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
     registry.register_with_schema("scroll", scroll_schema(), ScrollComponent)
@@ -81,7 +81,7 @@ fn scrollbar_layer(
     stable_id: &str,
     scroll_handle: &ScrollHandle,
     axis: ScrollbarAxis,
-    show: ScrollbarShow,
+    show: ScrollbarMode,
 ) -> Div {
     div()
         .absolute()
@@ -93,7 +93,7 @@ fn scrollbar_layer(
             Scrollbar::new(scroll_handle)
                 .id(format!("{stable_id}:scrollbar"))
                 .axis(axis)
-                .scrollbar_show(show),
+                .mode(show),
         )
 }
 
@@ -111,14 +111,14 @@ fn parse_axis(element: &VElement) -> Result<ScrollbarAxis, ComponentError> {
     }
 }
 
-fn parse_scrollbar_show(element: &VElement) -> Result<ScrollbarShow, ComponentError> {
+fn parse_scrollbar_show(element: &VElement) -> Result<ScrollbarMode, ComponentError> {
     let Some(value) = element.attr("scrollbar-show") else {
         return Ok(DEFAULT_SCROLLBAR_SHOW);
     };
     match value.trim().to_ascii_lowercase().as_str() {
-        "scrolling" => Ok(ScrollbarShow::Scrolling),
-        "hover" => Ok(ScrollbarShow::Hover),
-        "always" => Ok(ScrollbarShow::Always),
+        "scrolling" => Ok(ScrollbarMode::Scrolling),
+        "hover" => Ok(ScrollbarMode::Hover),
+        "always" => Ok(ScrollbarMode::Always),
         _ => Err(ComponentError::new(format!(
             "attribute `scrollbar-show` on <scroll> must be scrolling, hover, or always, got \
              `{value}`"

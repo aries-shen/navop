@@ -46,7 +46,7 @@
     <a href="CONTRIBUTING.md">参与贡献</a>
   </p>
 
-  <p><img src="app1.png" alt="Navop 概览" width="820" /></p>
+  <p><img src="app.png" alt="Navop 概览" width="820" /></p>
 </div>
 
 ## 功能特性
@@ -62,7 +62,7 @@
 - 可拖拽分屏的 SSH 与本地终端，支持快捷命令、广播输入、Shell integration、会话锁定、会话录制回放和会话日志；同时支持 Telnet 与串口连接。
 - 通过 SFTP 上传下载、搜索、收藏、远程编辑、拖拽传输、ZMODEM 传输和跨服务器复制管理远程文件。
 - 可复用的本地、远程（`ssh -R`）与动态 SOCKS 端口转发；X11 转发；主机密钥变更指纹确认；可按连接启用旧版 SSH 算法。
-- 导入 SecureCRT 会话、服务器监控，以及通过扩展 provider 提供的 RDP/VNC 远程桌面。
+- 导入 SecureCRT 等外部工具的会话，进行服务器监控，并通过扩展 provider 使用 RDP/VNC 远程桌面。
 
 ### 编辑、AI 与扩展
 
@@ -93,6 +93,10 @@ navop skill install --target codex --scope user
 
 ## 应用截图
 
+| 工作台总览 |
+|:-:|
+| [![工作台总览](app1.png)](app1.png) |
+
 | 数据库 | SSH |
 |:-:|:-:|
 | [![数据库](database.png)](database.png) | [![SSH](ssh.png)](ssh.png) |
@@ -101,9 +105,9 @@ navop skill install --target codex --scope user
 |:-:|:-:|
 | [![SFTP](sftp.png)](sftp.png) | [![Redis](redis.png)](redis.png) |
 
-| MongoDB | AI 对话 |
-|:-:|:-:|
-| [![MongoDB](mongodb.png)](mongodb.png) | [![AI 对话](chatdb.png)](chatdb.png) |
+| MongoDB |                AI 对话                 |
+|:-:|:------------------------------------:|
+| [![MongoDB](mongodb.png)](mongodb.png) | [![AI 对话](ai_chat.png)](ai_chat.png) |
 
 | Agent Hub | 扩展市场 |
 |:-:|:-:|

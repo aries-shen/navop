@@ -31,7 +31,6 @@ impl TerminalView {
 
             dialog
                 .title(title.clone())
-                .alert()
                 .child(
                     div()
                         .flex()

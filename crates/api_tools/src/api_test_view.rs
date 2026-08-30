@@ -13,17 +13,14 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::content_state::ContentState;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::ListItem;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_component::panel_header::{PanelHeader, PanelHeaderVariant};
 use gpui_component::popover::Popover;
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::{ScrollableElement, Scrollbar, ScrollbarShow};
 use gpui_component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::spinner::Spinner;
-use gpui_component::status_bar::{StatusBar, StatusPresentation};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::tree::{Tree, TreeItem, TreeState};
@@ -31,6 +28,7 @@ use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _, h_flex,
     v_flex,
 };
+use one_ui::{ContentState, PanelHeader, PanelHeaderVariant, StatusBar, StatusPresentation};
 use rust_i18n::t;
 
 use crate::Protocol;

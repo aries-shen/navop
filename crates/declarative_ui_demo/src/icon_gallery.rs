@@ -1,6 +1,6 @@
 use declarative_ui_demo::{ComponentProps, ComponentRenderer, ComponentResult, RenderContext};
 use gpui::{Div, IntoElement, ParentElement, Styled, div, rgb};
-use gpui_component::{IconKind, IconName, IconSize, StyledExt as _};
+use gpui_component::{IconName, IconNamed as _, IconSize, StyledExt as _};
 
 mod card;
 
@@ -121,10 +121,9 @@ fn render_summary(icon_count: usize, state: &GalleryState) -> Div {
 }
 
 fn icon_matches(icon: IconName, query: &str, kind_filter: &str) -> bool {
-    let metadata = icon.metadata();
     let normalized_kind_filter = kind_filter.trim().to_ascii_lowercase();
     let kind_matches =
-        normalized_kind_filter == "all" || kind_key(metadata.kind) == normalized_kind_filter;
+        normalized_kind_filter == "all" || normalized_kind_filter == "functional-outline";
 
     if !kind_matches {
         return false;
@@ -134,14 +133,7 @@ fn icon_matches(icon: IconName, query: &str, kind_filter: &str) -> bool {
         return true;
     }
 
-    let haystack = format!(
-        "{icon:?} {} {} {} {}",
-        kind_key(metadata.kind),
-        metadata.canonical_path.as_ref(),
-        metadata.source.unwrap_or("unknown audit pending"),
-        metadata.license.unwrap_or("unknown audit pending"),
-    )
-    .to_ascii_lowercase();
+    let haystack = format!("{icon:?} functional-outline {}", icon.path()).to_ascii_lowercase();
     haystack.contains(query)
 }
 
@@ -169,24 +161,6 @@ fn icon_size_label(size: IconSize) -> u8 {
     }
 }
 
-fn kind_key(kind: IconKind) -> &'static str {
-    match kind {
-        IconKind::FunctionalOutline => "functional-outline",
-        IconKind::FunctionalFilled => "functional-filled",
-        IconKind::BrandColor => "brand-color",
-        IconKind::ObjectGlyph => "object-glyph",
-    }
-}
-
-pub(super) fn kind_label(kind: IconKind) -> &'static str {
-    match kind {
-        IconKind::FunctionalOutline => "Functional Outline",
-        IconKind::FunctionalFilled => "Functional Filled",
-        IconKind::BrandColor => "Brand Color",
-        IconKind::ObjectGlyph => "Object Glyph",
-    }
-}
-
 fn filter_label(filter: &str) -> &'static str {
     match filter.trim().to_ascii_lowercase().as_str() {
         "functional-outline" => "Functional Outline",
@@ -199,8 +173,8 @@ fn filter_label(filter: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ICON_SIZE_MATRIX, icon_matches, kind_key, parse_icon_size};
-    use gpui_component::{IconKind, IconName, IconSize};
+    use super::{ICON_SIZE_MATRIX, icon_matches, parse_icon_size};
+    use gpui_component::{IconName, IconSize};
 
     #[test]
     fn icon_size_state_maps_to_the_seven_visual_tokens() {
@@ -232,29 +206,19 @@ mod tests {
 
     #[test]
     fn search_matches_name_kind_and_canonical_path() {
-        assert!(icon_matches(IconName::PostgreSQLColor, "postgresql", "all"));
+        assert!(icon_matches(IconName::PanelLeft, "panelleft", "all"));
         assert!(icon_matches(
-            IconName::PostgreSQLColor,
-            "brand-color",
+            IconName::PanelLeft,
+            "functional-outline",
             "all"
         ));
-        assert!(icon_matches(
-            IconName::PostgreSQLColor,
-            "icons/postgresql_color.svg",
-            "all"
-        ));
-        assert!(icon_matches(
-            IconName::PostgreSQLColor,
-            "audit pending",
-            "all"
-        ));
-        assert!(!icon_matches(IconName::PostgreSQLColor, "redis", "all"));
+        assert!(icon_matches(IconName::PanelLeft, "panel-left.svg", "all"));
+        assert!(!icon_matches(IconName::PanelLeft, "redis", "all"));
     }
 
     #[test]
-    fn kind_filter_uses_semantic_metadata() {
-        assert_eq!(kind_key(IconKind::ObjectGlyph), "object-glyph");
-        assert!(icon_matches(IconName::Table, "", "object-glyph"));
-        assert!(!icon_matches(IconName::Table, "", "functional-outline"));
+    fn removed_upstream_categories_filter_to_the_available_catalog() {
+        assert!(icon_matches(IconName::PanelLeft, "", "functional-outline"));
+        assert!(!icon_matches(IconName::PanelLeft, "", "object-glyph"));
     }
 }

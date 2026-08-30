@@ -2,14 +2,13 @@ use std::{collections::HashSet, ops::Range};
 
 use crate::edit_table::filter_panel::{FilterValue, FilterValueKey};
 use crate::edit_table::{Column, ColumnSort, EditTableState, loading::Loading};
+use crate::{DateTimePicker, DateTimePickerState, TimePicker, TimePickerState};
 use gpui::{
-    AnyElement, App, Context, Div, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, Div, Entity, Font, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Stateful, StatefulInteractiveElement, Styled as _,
     Subscription, Window, div, px,
 };
 use gpui_component::date_picker::{DatePicker, DatePickerState};
-use gpui_component::datetime_picker::{DateTimePicker, DateTimePickerState};
-use gpui_component::time_picker::{TimePicker, TimePickerState};
 use gpui_component::{
     ActiveTheme as _, Colorize as _, Icon, IconName, Size, h_flex,
     input::{Input, InputState},
@@ -51,9 +50,7 @@ impl CellEditor {
                             Input::new(input)
                                 .w_full()
                                 .h_full()
-                                .text_base()
-                                .appearance(false)
-                                .bare(),
+                                .appearance(false),
                         ),
                 )
                 .into_any_element(),
@@ -84,7 +81,6 @@ impl CellEditor {
                         Input::new(input)
                             .flex_1()
                             .h_full()
-                            .text_base()
                             .appearance(false),
                     )
                     .child(
@@ -132,7 +128,6 @@ impl CellEditor {
                         Input::new(input)
                             .flex_1()
                             .h_full()
-                            .text_base()
                             .appearance(false),
                     )
                     .child(
@@ -179,7 +174,6 @@ impl CellEditor {
                         Input::new(input)
                             .flex_1()
                             .h_full()
-                            .text_base()
                             .appearance(false),
                     )
                     .child(
@@ -397,6 +391,10 @@ pub trait EditTableDelegate: Sized + 'static {
         window: &mut Window,
         cx: &mut Context<EditTableState<Self>>,
     ) -> Option<(CellEditor, Vec<Subscription>)> {
+        None
+    }
+
+    fn cell_font(&mut self, _cx: &mut Context<EditTableState<Self>>) -> Option<Font> {
         None
     }
 

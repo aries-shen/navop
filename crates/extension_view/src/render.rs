@@ -3,16 +3,15 @@ use gpui::{
     px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, IconSize, ObjectIcon, Sizable,
+    ActiveTheme, Disableable, Icon, IconName, IconSize, Sizable,
     button::{Button, ButtonVariants},
-    content_state::ContentState,
     h_flex,
     input::Input,
-    panel_header::{PanelHeader, PanelHeaderVariant},
     progress::Progress,
     scroll::ScrollableElement,
     v_flex,
 };
+use one_ui::{ContentState, PanelHeader, PanelHeaderVariant};
 use rust_i18n::t;
 
 use crate::{
@@ -57,7 +56,7 @@ impl ExtensionManagerView {
                     .child(
                         Button::new("extension-manager-local")
                             .small()
-                            .icon(ObjectIcon::new(IconName::File))
+                            .icon(IconName::File)
                             .label(t!("Extension.local_install").to_string())
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.select_local_tarball(cx);
@@ -242,10 +241,8 @@ impl ExtensionManagerView {
     fn render_marketplace(&self, query: &str, cx: &Context<Self>) -> gpui::AnyElement {
         let updatable_entries;
         let entries: &[MarketplaceEntry] = if self.updates_only {
-            updatable_entries = filter_updatable_marketplace(
-                &self.marketplace_entries,
-                &self.installed,
-            );
+            updatable_entries =
+                filter_updatable_marketplace(&self.marketplace_entries, &self.installed);
             &updatable_entries
         } else {
             &self.marketplace_entries

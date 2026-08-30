@@ -12,12 +12,13 @@ use gpui::{
     ParentElement, Styled, Task, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    ActiveTheme, ContentState, IconName, IndexPath, StyledExt, h_flex,
+    ActiveTheme, IconName, IndexPath, StyledExt, h_flex,
     list::{List, ListDelegate, ListItem, ListState},
     scroll::ScrollableElement,
     v_flex,
 };
 use one_core::gpui_tokio::Tokio;
+use one_ui::ContentState;
 use rust_i18n::t;
 use std::collections::HashSet;
 

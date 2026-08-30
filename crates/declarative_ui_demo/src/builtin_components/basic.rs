@@ -3,7 +3,7 @@ use gpui_component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
     group_box::{GroupBox, GroupBoxVariant, GroupBoxVariants},
-    input::Input,
+    input::{Editor, Input, Textarea},
     label::Label,
     skeleton::Skeleton,
     tag::Tag,
@@ -194,9 +194,9 @@ struct CodeEditorComponent;
 impl ComponentRenderer for CodeEditorComponent {
     fn render(&self, props: ComponentProps, context: &mut RenderContext<'_>) -> ComponentResult {
         let state = context.code_editor_state(&props)?;
-        let input = Input::new(&state)
+        let input = Editor::new(&state)
             .disabled(bool_attribute(&props.element, "disabled")?)
-            .read_only(bool_attribute(&props.element, "read-only")?);
+            .readonly(bool_attribute(&props.element, "read-only")?);
         Ok(context.style(input, &props).into_any_element())
     }
 }
@@ -223,10 +223,20 @@ impl ComponentRenderer for InputComponent {
         if !self.multiline {
             text_input_mode(&props.element).map_err(ComponentError::new)?;
         }
+        let disabled = bool_attribute(&props.element, "disabled")?;
+        let readonly = bool_attribute(&props.element, "read-only")?;
         let state = context.input_state(&props, self.multiline);
+        if let crate::input_cache::StatefulInputState::Textarea(state) = state {
+            let textarea = Textarea::new(&state).disabled(disabled).readonly(readonly);
+            return Ok(context.style(textarea, &props).into_any_element());
+        }
+
+        let crate::input_cache::StatefulInputState::Input(state) = state else {
+            unreachable!("input cache returned the wrong state kind")
+        };
         let mut input = Input::new(&state)
-            .disabled(bool_attribute(&props.element, "disabled")?)
-            .read_only(bool_attribute(&props.element, "read-only")?)
+            .disabled(disabled)
+            .readonly(readonly)
             .cleanable(bool_attribute(&props.element, "cleanable")?);
         if let Some(size) = parse_size_attribute(&props.element)? {
             input = input.with_size(size);

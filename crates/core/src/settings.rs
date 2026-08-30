@@ -856,6 +856,8 @@ pub struct AppSettings {
     pub light_theme: String,
     #[serde(default = "default_dark_theme")]
     pub dark_theme: String,
+    #[serde(default)]
+    pub navop_theme_migrated: bool,
     #[serde(default = "default_window_opacity")]
     pub window_opacity: f32,
     #[serde(default)]
@@ -1002,11 +1004,11 @@ fn default_theme_mode() -> String {
 }
 
 fn default_light_theme() -> String {
-    "Default Light".to_string()
+    "Navop Light".to_string()
 }
 
 fn default_dark_theme() -> String {
-    "Default Dark".to_string()
+    "Navop Dark".to_string()
 }
 
 fn default_window_opacity() -> f32 {
@@ -1249,6 +1251,7 @@ impl Default for AppSettings {
             auto_switch_theme: false,
             light_theme: default_light_theme(),
             dark_theme: default_dark_theme(),
+            navop_theme_migrated: true,
             window_opacity: default_window_opacity(),
             custom_accent_enabled: false,
             custom_accent_color: default_custom_accent_color(),
@@ -1391,6 +1394,13 @@ impl AppSettings {
     }
 
     pub fn normalize_appearance_settings(&mut self) {
+        if !self.navop_theme_migrated {
+            if self.light_theme == "Default Light" && self.dark_theme == "Default Dark" {
+                self.light_theme = default_light_theme();
+                self.dark_theme = default_dark_theme();
+            }
+            self.navop_theme_migrated = true;
+        }
         if self.auto_switch_theme {
             self.theme_mode = "system".to_string();
         } else if !matches!(self.theme_mode.as_str(), "light" | "system" | "dark") {
@@ -1575,10 +1585,9 @@ mod tests {
         HomePageStyle, LOCALE_SYSTEM, LargeTextCellEditorOpenMode, LocalTerminalProfileKind,
         LocalTerminalProfileSettings, MainWindowState, McpPermissionMode, McpServerMode,
         PersonalSyncBackendKind, RemoteFileOpenMode, SqlFormatSettings, SqlIndentStyle,
-        SqlKeywordCase, StartupDefaultPage, SyncProvider,
-        default_grid_font_fallback_families, default_grid_monospace_font_family,
-        grid_monospace_font, installed_grid_monospace_font, is_installed_font_family,
-        resolve_installed_grid_monospace_font_family,
+        SqlKeywordCase, StartupDefaultPage, SyncProvider, default_grid_font_fallback_families,
+        default_grid_monospace_font_family, grid_monospace_font, installed_grid_monospace_font,
+        is_installed_font_family, resolve_installed_grid_monospace_font_family,
     };
 
     #[test]
@@ -1601,10 +1610,7 @@ mod tests {
             ..SqlFormatSettings::default()
         };
         let json = serde_json::to_string(&settings).expect("serialize sql format settings");
-        assert_eq!(
-            r#"{"keyword_case":"upper","indent":"tabs"}"#,
-            json.as_str()
-        );
+        assert_eq!(r#"{"keyword_case":"upper","indent":"tabs"}"#, json.as_str());
         assert_eq!(settings, serde_json::from_str(&json).expect("roundtrip"));
 
         let partial: SqlFormatSettings =
@@ -1753,8 +1759,8 @@ mod tests {
         .expect("legacy appearance settings should deserialize");
 
         assert_eq!("light", settings.theme_mode);
-        assert_eq!("Default Light", settings.light_theme);
-        assert_eq!("Default Dark", settings.dark_theme);
+        assert_eq!("Navop Light", settings.light_theme);
+        assert_eq!("Navop Dark", settings.dark_theme);
         assert_eq!(1.0, settings.window_opacity);
         assert!(!settings.custom_accent_enabled);
         assert_eq!("#3b82f6", settings.custom_accent_color);
@@ -1782,6 +1788,26 @@ mod tests {
         settings.auto_switch_theme = true;
         settings.normalize_appearance_settings();
         assert_eq!("system", settings.theme_mode);
+    }
+
+    #[test]
+    fn legacy_default_theme_pair_migrates_to_navop_once() {
+        let mut settings = AppSettings {
+            light_theme: "Default Light".to_string(),
+            dark_theme: "Default Dark".to_string(),
+            navop_theme_migrated: false,
+            ..AppSettings::default()
+        };
+
+        settings.normalize_appearance_settings();
+        assert_eq!("Navop Light", settings.light_theme);
+        assert_eq!("Navop Dark", settings.dark_theme);
+
+        settings.light_theme = "Default Light".to_string();
+        settings.dark_theme = "Default Dark".to_string();
+        settings.normalize_appearance_settings();
+        assert_eq!("Default Light", settings.light_theme);
+        assert_eq!("Default Dark", settings.dark_theme);
     }
 
     #[test]

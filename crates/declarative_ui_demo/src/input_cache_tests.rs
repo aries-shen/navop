@@ -34,10 +34,14 @@ impl InputHarness {
         let element = resolved.element().expect("standalone input").clone();
         let multiline = element.tag == "textarea";
         let props = ComponentProps::new(element, case.path);
-        self.cache.resolve(
+        let state = self.cache.resolve(
             InputRequest::new(&props, multiline, self.runtime.clone()),
             InputEnvironment { window, cx },
-        )
+        );
+        let crate::input_cache::StatefulInputState::Input(state) = state else {
+            panic!("input test expected a single-line state")
+        };
+        state
     }
 
     fn retain(&mut self, source: &str) {

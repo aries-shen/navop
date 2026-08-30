@@ -13,6 +13,7 @@ pub mod extension_downloader;
 mod extension_package_layout;
 mod extension_view_host;
 mod global;
+pub mod language_extensions;
 mod layout;
 pub mod mcp_helper_install;
 mod registration;

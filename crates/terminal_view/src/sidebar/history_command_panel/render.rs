@@ -4,14 +4,15 @@ use gpui::{
     Render, SharedString, Styled, UniformListScrollHandle, Window, div, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, FunctionalIcon, Icon, IconName, Sizable, Size,
-    button::{Button, ButtonVariants, IconButton, IconButtonRole},
+    ActiveTheme, Icon, IconName, Sizable, Size,
+    button::{Button, ButtonVariants},
     h_flex,
     input::Input,
     tooltip::Tooltip,
     v_flex,
 };
 use one_core::storage::{TerminalCommandHistory, TerminalCommandHistorySort};
+use one_ui::{IconButton, IconButtonRole};
 use rust_i18n::t;
 use std::ops::Range;
 
@@ -216,11 +217,11 @@ impl HistoryCommandPanel {
     ) -> impl IntoElement {
         IconButton::new(
             SharedString::from(format!("history-favorite-{index}")),
-            FunctionalIcon::new(if favorite {
+            if favorite {
                 IconName::StarOff
             } else {
                 IconName::Star
-            }),
+            },
         )
         .role(IconButtonRole::Compact)
         .tooltip(if favorite {
@@ -242,7 +243,7 @@ impl HistoryCommandPanel {
     ) -> impl IntoElement {
         IconButton::new(
             SharedString::from(format!("history-paste-{index}")),
-            FunctionalIcon::new(IconName::Paste),
+            IconName::Paste,
         )
         .role(IconButtonRole::Compact)
         .tooltip(t!("HistoryCommand.paste").to_string())
@@ -259,7 +260,7 @@ impl HistoryCommandPanel {
     ) -> impl IntoElement {
         IconButton::new(
             SharedString::from(format!("history-delete-{index}")),
-            FunctionalIcon::new(IconName::Delete),
+            IconName::Delete,
         )
         .role(IconButtonRole::Compact)
         .text_color(cx.theme().danger)
