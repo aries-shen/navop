@@ -51,7 +51,6 @@ impl IconButtonRole {
 #[derive(IntoElement)]
 pub struct IconButton {
     button: Button,
-    icon: Icon,
     hit_size: Size,
     glyph_size: IconSize,
 }
@@ -64,13 +63,13 @@ impl IconButton {
         let glyph_size = role.glyph_size();
         let icon = icon.into();
         let button = Button::new(id)
-            .icon(icon.clone().with_size(glyph_size))
+            .icon(icon)
             .ghost()
-            .with_size(hit_size);
+            .with_size(hit_size)
+            .glyph_size(glyph_size.into());
 
         Self {
             button,
-            icon,
             hit_size,
             glyph_size,
         }
@@ -95,7 +94,7 @@ impl IconButton {
     /// Sets the glyph size without changing the interactive hit target.
     pub fn glyph_size(mut self, size: IconSize) -> Self {
         self.glyph_size = size;
-        self.button = self.button.icon(self.icon.clone().with_size(size));
+        self.button = self.button.glyph_size(size.into());
         self
     }
 

@@ -29,6 +29,8 @@ typed client，不重新引入第三方 UI 协议。
 
 ## gpui-shell 接入点
 
+详细设计见 [`gpui-shell-extension-design.md`](gpui-shell-extension-design.md)。
+
 后续 `ShellPluginHost` 负责：
 
 - 根据 extension.json 中的新 shell contribution 定位脚本入口；
