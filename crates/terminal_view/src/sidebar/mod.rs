@@ -10,6 +10,7 @@ mod broadcast_input_panel;
 pub mod file_manager_panel;
 mod history_command_panel;
 mod quick_command_panel;
+mod remote_path;
 mod server_monitor_panel;
 mod settings_panel;
 pub(crate) mod tool_dock;
@@ -579,6 +580,8 @@ pub enum TerminalSidebarEvent {
     PasteImageUploadChanged(bool),
     /// vim/TUI 滚轮转方向键开关
     VimScrollToArrowKeysChanged(bool),
+    /// 选中文本高亮相同内容开关
+    SelectionHighlightChanged(bool),
     /// 路径与终端同步开关
     SyncPathChanged(bool),
     /// 自定义高亮规则变更
@@ -717,6 +720,11 @@ impl TerminalSidebar {
                 .map(|(conn, manager)| {
                     cx.new(|cx| FileManagerPanel::new(conn, manager, colors.clone(), window, cx))
                 });
+        if let Some(fm_panel) = &file_manager_panel {
+            fm_panel.update(cx, |panel, cx| {
+                panel.set_follow_terminal_cwd(sync_path_enabled, cx);
+            });
+        }
         let file_explorer_panel = local_workspace.map(|workspace| {
             let LocalWorkspaceSidebar { root, editor } = workspace;
             let theme = workspace_theme_from_terminal_colors(&colors, cx.theme());
@@ -838,8 +846,16 @@ impl TerminalSidebar {
                 settings_panel::SettingsPanelEvent::VimScrollToArrowKeysChanged(enabled) => {
                     cx.emit(TerminalSidebarEvent::VimScrollToArrowKeysChanged(*enabled));
                 }
+                settings_panel::SettingsPanelEvent::SelectionHighlightChanged(enabled) => {
+                    cx.emit(TerminalSidebarEvent::SelectionHighlightChanged(*enabled));
+                }
                 settings_panel::SettingsPanelEvent::SyncPathChanged(enabled) => {
                     this.sync_path_enabled = *enabled;
+                    if let Some(fm_panel) = &this.file_manager_panel {
+                        fm_panel.update(cx, |panel, cx| {
+                            panel.set_follow_terminal_cwd(*enabled, cx);
+                        });
+                    }
                     cx.emit(TerminalSidebarEvent::SyncPathChanged(*enabled));
                 }
                 settings_panel::SettingsPanelEvent::CustomHighlightsChanged(rules) => {
@@ -913,6 +929,16 @@ impl TerminalSidebar {
                         }
                         FileManagerPanelEvent::SyncWorkingDir => {
                             cx.emit(TerminalSidebarEvent::SyncWorkingDir);
+                        }
+                        FileManagerPanelEvent::ToggleFollowTerminalCwd => {
+                            let enabled = !this.sync_path_enabled;
+                            this.set_sync_path_enabled(enabled, cx);
+                            if let Some(fm_panel) = &this.file_manager_panel {
+                                fm_panel.update(cx, |panel, cx| {
+                                    panel.set_follow_terminal_cwd(enabled, cx);
+                                });
+                            }
+                            cx.emit(TerminalSidebarEvent::SyncPathChanged(enabled));
                         }
                     },
                 );
@@ -1298,6 +1324,12 @@ impl TerminalSidebar {
         });
     }
 
+    pub fn set_selection_highlight(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings_panel.update(cx, |panel, cx| {
+            panel.set_selection_highlight(enabled, cx);
+        });
+    }
+
     pub fn set_confirm_multiline_paste(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings_panel.update(cx, |panel, cx| {
             panel.set_confirm_multiline_paste(enabled, cx);
@@ -1510,6 +1542,7 @@ impl TerminalSidebar {
                 IconName::Close,
             )
             .role(IconButtonRole::Compact)
+            .custom(self.colors.icon_button_variant(text, cx))
             .tooltip(t!("Common.close").to_string())
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_tool(panel, cx);

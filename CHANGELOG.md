@@ -4,6 +4,70 @@ Navop user-facing release notes. Generate and review each bilingual version entr
 
 <!-- NAVOP_RELEASES -->
 
+## [v0.15.1] - 2026-08-30
+
+#### 更新内容
+
+- 终端新增「选中文本后高亮相同内容」：选中一段文本后，可见区域内相同文本会以淡色背景高亮，SSH 与本地终端同时生效，可在终端侧边栏设置中开关（默认开启）。
+- 连接列表宽度支持持久化：拖拽调整侧栏连接树宽度后自动保存，重启应用恢复上次宽度；停靠模式侧栏与主窗口背景统一、分隔线由拖拽手柄承担，浮动模式改为浮层卡片样式（圆角 + 阴影）。
+- 「自动检查更新」开关与「检查更新」按钮从通用设置页迁移到关于页面，与版本信息同页展示。
+
+#### 修复与优化
+
+- 修复侧边栏与命令栏图标按钮在终端/Agent 自定义主题下颜色不跟随、误显示为黑色的问题。
+- 修复 SFTP 覆盖远端文件时恢复旧修改时间（mtime），导致 rsync 部署、Web/应用缓存与增量构建等基于 mtime 的变更检测误判文件未更新、继续使用旧内容的问题；现在覆盖写入后 mtime 由服务器按实际写入时间记录。
+
+国内下载：如果 GitHub 下载较慢，可从 [CNB 镜像](https://cnb.cool/navop-dev/navop/-/releases/tag/v0.15.1) 下载桌面端安装包
+
+---
+
+#### What's New
+
+- Terminal gains "highlight identical text on selection": after selecting text, matching text in the visible area is highlighted with a subtle background, working in both SSH and local terminals; toggleable in the terminal sidebar settings (on by default).
+- Connection list width is now persisted: resizing the sidebar connection tree is saved automatically and restored on next launch; the docked sidebar shares the main window background with a resize-handle divider, and the floating mode adopts a card-style look (rounded corners + shadow).
+- The "check for updates automatically" toggle and "Check for Updates" button move from general settings to the About page, alongside the version information.
+
+#### Fixes and Improvements
+
+- Fixed sidebar and command bar icon buttons rendering black instead of following the terminal/Agent custom theme colors.
+- Fixed SFTP restoring the old mtime when overwriting remote files, which made mtime-based change detection (rsync deploys, web/app caches, incremental builds) treat the overwritten file as unchanged and keep serving stale content; the server now records the actual write time.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.15.0...v0.15.1
+
+## [v0.15.0] - 2026-08-30
+
+#### 更新内容
+
+- 终端 SSH 监控改为通过当前 SSH 会话推送执行采集脚本，不再向远端主机写入脚本，并在监控面板顶部新增监控开关（#126）。
+- 终端内联凭据/MFA 输入体验优化：用户名与验证码在终端内明文回显，密码以 `*` 掩码显示。
+- 终端文件管理器新增「自动跟随终端工作目录」开关，与设置页开关复用同一持久化链路；远端路径统一归一化，修复面包屑路径重复显示。
+- 笔记目录布局优化：用户显式选择的目录直接作为笔记根，不再自动创建 `files/` 子目录；新增左编辑右预览分栏模式，预览实时镜像（#109）。
+
+#### 修复与优化
+
+- 修复终端内联 MFA/凭据输入时按键透传平台文本输入系统，导致验证码/密码被双写。
+- 修复 MySQL 连接取消 SSL 后残留参数仍强制启用 TLS。
+- 修复 OpenAI Compatible 连接名含非打印 ASCII（如中文）时，出站 User-Agent 被上游拒绝的问题。
+- 完善终端内联连接反馈：重连失败以红色内联提示报告、提示文案固定英文。
+
+---
+
+#### What's New
+
+- Terminal SSH monitoring now runs collection through the current SSH session instead of writing scripts to the remote host, with a new monitoring toggle in the panel header (#126).
+- Terminal inline credential/MFA input now echoes usernames and verification codes in plain text while masking passwords with asterisks.
+- The terminal file manager gains an "auto-follow terminal working directory" toggle sharing the settings persistence path, and remote paths are normalized to fix duplicated breadcrumb segments.
+- Notes directory layout improvements: an explicitly chosen directory becomes the notes root directly (no automatic `files/` subdirectory), plus a split edit-with-live-preview mode (#109).
+
+#### Fixes and Improvements
+
+- Fixed terminal inline MFA/credential keys passing through to the platform text-input system, double-typing verification codes and passwords.
+- Fixed MySQL still forcing TLS after SSL was disabled.
+- Fixed OpenAI Compatible connections whose names contain non-printable ASCII (e.g. Chinese) being rejected for non-printable User-Agent header values.
+- Completed inline terminal connection feedback: reconnect failures are reported as red inline notices with English-only copy.
+
+**Full Changelog**: https://github.com/feigeCode/navop/compare/v0.14.0...v0.15.0
+
 ## [v0.14.0] - 2026-08-29
 
 #### 更新内容

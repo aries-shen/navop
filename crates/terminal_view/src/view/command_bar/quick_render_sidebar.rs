@@ -4,7 +4,13 @@ use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_component::{ActiveTheme, h_flex, scroll::ScrollableElement, v_flex};
+use gpui_component::{
+    ActiveTheme,
+    button::ButtonVariants as _,
+    h_flex,
+    scroll::ScrollableElement,
+    v_flex,
+};
 use one_ui::{IconButton, IconButtonRole, PanelHeader, PanelHeaderVariant};
 use rust_i18n::t;
 
@@ -63,6 +69,10 @@ impl TerminalCommandBar {
                     gpui_component::IconName::Close,
                 )
                 .role(IconButtonRole::Compact)
+                .custom(
+                    self.colors
+                        .icon_button_variant(self.colors.muted_foreground, cx),
+                )
                 .tooltip(t!("TerminalCommandBar.close_quick_commands").to_string())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_quick_commands(window, cx);

@@ -1434,6 +1434,13 @@ struct SqlSchemaUpdateRequest {
     entity: WeakEntity<SqlEditorTab>,
 }
 
+struct SqlSchemaUpdateRequest {
+    database: String,
+    generation: u64,
+    window_handle: AnyWindowHandle,
+    entity: WeakEntity<SqlEditorTab>,
+}
+
 impl SqlEditorTab {
     pub fn new_with_config(
         config: SqlEditorTabConfig,
@@ -3151,9 +3158,11 @@ impl SqlEditorTab {
                     if !merged {
                         return;
                     }
-                    let _ = cx.update_window(window_handle, move |_, window, cx| {
-                        editor.read(cx).input().update(cx, |state, cx| {
-                            state.refresh_completion_popup(window, cx);
+                    let _ = cx.update_window(window_handle, move |_view, window, cx| {
+                        editor.update(cx, |editor, cx| {
+                            let input = editor.input();
+                            input
+                                .update(cx, |state, cx| state.refresh_completion_popup(window, cx));
                         });
                     });
                 }

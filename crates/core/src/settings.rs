@@ -823,12 +823,17 @@ fn format_legacy_custom_command(program: &str, arguments: &str) -> String {
     }
 }
 
+/// 连接侧栏默认宽度（像素），与主题 `context_sidebar_default` 保持一致。
+pub const DEFAULT_CONNECTION_SIDEBAR_TREE_WIDTH: u32 = 260;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionSidebarTreeState {
     #[serde(default)]
     pub hide_empty_workspaces: bool,
     #[serde(default)]
     pub auto_hide_tree: bool,
+    #[serde(default = "default_connection_sidebar_tree_width")]
+    pub tree_width: u32,
 }
 
 impl Default for ConnectionSidebarTreeState {
@@ -836,8 +841,13 @@ impl Default for ConnectionSidebarTreeState {
         Self {
             hide_empty_workspaces: false,
             auto_hide_tree: false,
+            tree_width: DEFAULT_CONNECTION_SIDEBAR_TREE_WIDTH,
         }
     }
+}
+
+fn default_connection_sidebar_tree_width() -> u32 {
+    DEFAULT_CONNECTION_SIDEBAR_TREE_WIDTH
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -910,6 +920,9 @@ pub struct AppSettings {
     pub terminal_confirm_high_risk_command: bool,
     #[serde(default = "default_true")]
     pub terminal_auto_session_logging: bool,
+    /// 选中文本后高亮可见区域内所有相同文本
+    #[serde(default = "default_true")]
+    pub terminal_selection_highlight: bool,
     #[serde(default)]
     pub local_terminal_profile: LocalTerminalProfileSettings,
     #[serde(default)]
@@ -1276,6 +1289,7 @@ impl Default for AppSettings {
             terminal_confirm_multiline_paste: default_true(),
             terminal_confirm_high_risk_command: default_true(),
             terminal_auto_session_logging: default_true(),
+            terminal_selection_highlight: default_true(),
             local_terminal_profile: LocalTerminalProfileSettings::default(),
             log_file_path: String::new(),
             auto_update: true,

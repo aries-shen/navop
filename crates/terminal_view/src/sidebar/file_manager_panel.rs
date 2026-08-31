@@ -5,6 +5,7 @@
 //! 支持文件传输（上传/下载/拖拽），使用独立的传输连接避免阻塞浏览。
 
 use crate::theme::TerminalColors;
+use super::remote_path::{join_remote_path, normalize_remote_path, resolve_remote_path};
 use chrono::{DateTime, Local};
 use gpui::{
     Anchor, App, ClipboardItem, ColorExt as _, Context, Entity, EventEmitter, ExternalPaths,
@@ -629,6 +630,8 @@ pub enum FileManagerPanelEvent {
     CdToTerminal(String),
     /// 请求将终端当前工作目录同步到文件管理器
     SyncWorkingDir,
+    /// 切换“自动跟随终端工作目录”开关（宿主负责持久化并回写视觉态）
+    ToggleFollowTerminalCwd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -789,14 +792,7 @@ fn format_speed(bytes_per_sec: f64) -> String {
     }
 }
 
-/// 拼接远程路径
-fn join_remote_path(base: &str, name: &str) -> String {
-    if base == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", base, name)
-    }
-}
+// 远程路径拼接与归一化见 `super::remote_path`（`join_remote_path` 已在文件头部引入）。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArchiveKind {
@@ -1358,6 +1354,8 @@ pub struct FileManagerPanel {
     sort_order: SortOrder,
     /// 是否显示隐藏文件
     show_hidden: bool,
+    /// 是否自动跟随终端工作目录（视觉态由宿主同步，持久化在应用设置）
+    follow_terminal_cwd: bool,
     /// 搜索输入框
     search_input: Entity<InputState>,
     /// 路径输入框
@@ -1508,6 +1506,7 @@ impl FileManagerPanel {
             sort_column: SortColumn::Name,
             sort_order: SortOrder::Ascending,
             show_hidden: false,
+            follow_terminal_cwd: true,
             search_input,
             path_input,
             search_query: String::new(),
@@ -1602,6 +1601,7 @@ impl FileManagerPanel {
                     }
                     this.sftp_client = Some(Arc::new(Mutex::new(client)));
                     this.connection_state = ConnectionState::Connected;
+                    let real_path = normalize_remote_path(&real_path);
                     this.current_path = real_path.clone();
                     this.working_dir_hint = Some(real_path.clone());
                     this.history = vec![real_path];
@@ -1736,9 +1736,18 @@ impl FileManagerPanel {
     ///
     /// 仅在尚未连接时有效，连接后应使用 `sync_navigate_to`。
     pub fn set_initial_working_dir(&mut self, path: String) {
+        let path = resolve_remote_path(&self.current_path, &path);
         self.working_dir_hint = Some(path.clone());
         if self.connection_state == ConnectionState::Idle {
             self.current_path = path;
+        }
+    }
+
+    /// 同步“自动跟随终端工作目录”的视觉态（真值在应用设置中，由宿主回写）
+    pub fn set_follow_terminal_cwd(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.follow_terminal_cwd != enabled {
+            self.follow_terminal_cwd = enabled;
+            cx.notify();
         }
     }
 
@@ -1746,6 +1755,7 @@ impl FileManagerPanel {
     ///
     /// 仅在已连接且路径不同时才导航，避免不必要的刷新。
     pub fn sync_navigate_to(&mut self, path: String, cx: &mut Context<Self>) {
+        let path = resolve_remote_path(&self.current_path, &path);
         self.working_dir_hint = Some(path.clone());
         if self.connection_state != ConnectionState::Connected {
             return;
@@ -2151,6 +2161,7 @@ impl FileManagerPanel {
 
     /// 导航到指定路径
     fn navigate_to(&mut self, path: String, cx: &mut Context<Self>) {
+        let path = resolve_remote_path(&self.current_path, &path);
         if path == self.current_path {
             self.refresh_dir(cx);
             return;
@@ -4192,6 +4203,36 @@ impl FileManagerPanel {
                                     .text_color(muted_foreground),
                             ),
                     )
+                    // 自动跟随终端工作目录开关
+                    .child({
+                        let follow_terminal_cwd = self.follow_terminal_cwd;
+                        div()
+                            .id("fm-follow-terminal")
+                            .cursor_pointer()
+                            .rounded_md()
+                            .p(px(5.))
+                            .hover(move |s| s.bg(hover))
+                            .when(follow_terminal_cwd, |el| el.bg(hover))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_this, _, _window, cx| {
+                                    cx.emit(FileManagerPanelEvent::ToggleFollowTerminalCwd);
+                                }),
+                            )
+                            .tooltip(move |window, cx| {
+                                let key = if follow_terminal_cwd {
+                                    "FileManager.follow_terminal_dir_on"
+                                } else {
+                                    "FileManager.follow_terminal_dir_off"
+                                };
+                                Tooltip::new(t!(key).to_string()).build(window, cx)
+                            })
+                            .child(
+                                Icon::new(IconName::LocateActiveTab)
+                                    .small()
+                                    .text_color(muted_foreground),
+                            )
+                    })
                     // 同步终端工作目录按钮
                     .child(
                         div()
@@ -4341,7 +4382,10 @@ impl FileManagerPanel {
                     })
                     .child(
                         Button::new("fm-toggle-favorite")
-                            .ghost()
+                            .custom(
+                                self.colors
+                                    .icon_button_variant(muted_foreground, cx),
+                            )
                             .small()
                             .icon(if is_favorite {
                                 IconName::StarFill
@@ -4367,7 +4411,10 @@ impl FileManagerPanel {
         let panel = cx.entity();
         let placement = self.frame_placement;
         Button::new("fm-frame-options")
-            .ghost()
+            .custom(
+                self.colors
+                    .icon_button_variant(self.colors.muted_foreground, cx),
+            )
             .small()
             .icon(IconName::Ellipsis)
             .text_color(self.colors.muted_foreground)
@@ -6405,6 +6452,40 @@ mod tests {
         assert!(toolbar.contains(r#"t!("FileManager.open_sftp")"#));
         assert!(toolbar.contains(".colors(foreground, muted_foreground)"));
         assert!(toolbar.contains(".text_color(muted_foreground)"));
+    }
+
+    #[test]
+    fn toolbar_exposes_follow_terminal_cwd_toggle() {
+        let source = include_str!("file_manager_panel.rs");
+        let toolbar = source
+            .split("fn render_toolbar")
+            .nth(1)
+            .and_then(|source| source.split("fn render_path_breadcrumb").next())
+            .expect("file manager toolbar source");
+
+        assert!(toolbar.contains(r#".id("fm-follow-terminal")"#));
+        assert!(toolbar.contains("FileManagerPanelEvent::ToggleFollowTerminalCwd"));
+        assert!(toolbar.contains(r#""FileManager.follow_terminal_dir_on""#));
+        assert!(toolbar.contains(r#""FileManager.follow_terminal_dir_off""#));
+    }
+
+    #[test]
+    fn sidebar_routes_follow_terminal_cwd_toggle_to_sync_path_setting() {
+        let source = include_str!("mod.rs");
+        let handler = source
+            .split("FileManagerPanelEvent::ToggleFollowTerminalCwd =>")
+            .nth(1)
+            .and_then(|source| source.split("FileManagerPanelEvent::SyncWorkingDir").next())
+            .or_else(|| {
+                source
+                    .split("FileManagerPanelEvent::ToggleFollowTerminalCwd =>")
+                    .nth(1)
+            })
+            .expect("toggle handler branch");
+
+        assert!(handler.contains("set_sync_path_enabled"));
+        assert!(handler.contains("set_follow_terminal_cwd"));
+        assert!(handler.contains("TerminalSidebarEvent::SyncPathChanged"));
     }
 
     #[test]

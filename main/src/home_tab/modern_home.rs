@@ -71,11 +71,17 @@ impl HomePage {
             .size_full()
             .overflow_hidden()
             .child(
-                v_flex().size_full().items_center().px_5().py_3().child(
+                // 不能用 v_flex().items_center() 直接居中含 flex_1 行的内容列：
+                // cross-axis center 会让该行经历一次未定义宽度 pass，其中 h_full
+                // 百分比高度退化为内容自然高度，最近连接行被“撑爆”到只剩一条。
+                // 居中改用主轴 justify_center + 内层每行 items_center，
+                // 两列行的布局链上不再出现 cross-axis center。
+                h_flex().size_full().justify_center().px_5().py_3().child(
                     v_flex()
-                        .w_full()
-                        .min_h_0()
                         .h_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .w_full()
                         .max_w(START_CENTER_MAX_WIDTH)
                         .gap_3()
                         .child(self.render_start_center_hero(view, window, cx))
@@ -590,7 +596,6 @@ fn home_application_id(application: NavigationApplication) -> &'static str {
         NavigationApplication::SessionLogs => "home-app-session-logs",
         NavigationApplication::CredentialVault => "home-app-credential-vault",
         NavigationApplication::Extensions => "home-app-extensions",
-        NavigationApplication::Settings => "home-app-settings",
     }
 }
 
