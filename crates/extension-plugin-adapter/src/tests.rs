@@ -1,20 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use declarative_ui_demo::NodePath;
 use extension_host::{
-    DEFAULT_SESSION_REQUEST_TIMEOUT, FramedTransport, JsonRpcClient, NegotiationConfig,
-    ProcessRpcSession, ProcessRpcSessionConfig, SpawnConfig, SpawnTransport, UniversalPluginClient,
+    FramedTransport, JsonRpcClient, NegotiationConfig, ProcessRpcSession, ProcessRpcSessionConfig,
+    SpawnConfig, UniversalPluginClient,
 };
-use extension_protocol::declarative_ui::{UiDialogKind, UiDialogRequest, UiDialogResult};
 use extension_protocol::resource::ResourceInvokeParams;
 use extension_runtime::ExtensionRuntimeCatalog;
-use extension_runtime::extension::manifest::{DeclarativePanelPlacement, load_from_dir};
+use extension_runtime::extension::manifest::load_from_dir;
 use futures::future::BoxFuture;
 use tokio::io::duplex;
-use tokio::sync::oneshot;
 
 use super::*;
 
@@ -227,7 +224,7 @@ impl ManagedRpcSession for FakeManagedSession {
 }
 
 fn activation_fixture(
-    panel_specs: &[(&str, &str)],
+    _panel_specs: &[(&str, &str)],
 ) -> (
     tempfile::TempDir,
     ExtensionRuntimeCatalog,
@@ -240,21 +237,6 @@ fn activation_fixture(
     std::fs::write(root.path().join("bin/provider"), b"provider").unwrap();
     std::fs::create_dir_all(root.path().join("ui")).unwrap();
 
-    let panels: Vec<serde_json::Value> = panel_specs
-        .iter()
-        .map(|(id, runtime_id)| {
-            let mut panel = serde_json::json!({
-                "id": id,
-                "title": id,
-                "runtimeId": runtime_id,
-                "template": "ui/main.html",
-            });
-            if *id == "overview" {
-                panel["style"] = serde_json::json!("ui/main.css");
-            }
-            panel
-        })
-        .collect();
     let manifest = serde_json::json!({
         "schema_version": 1,
         "id": "com.navop.kafka",
@@ -282,7 +264,6 @@ fn activation_fixture(
                 }
             ]
         },
-        "contributes": {"declarativePanels": panels}
     });
     std::fs::create_dir_all(root.path()).unwrap();
     std::fs::write(root.path().join("extension.json"), manifest.to_string()).unwrap();
@@ -295,6 +276,17 @@ fn activation_fixture(
     let shutdowns = Arc::new(AtomicUsize::new(0));
     let session_closed = Arc::new(AtomicBool::new(false));
     (root, catalog, factory_calls, shutdowns, session_closed)
+}
+
+fn test_host_api_factory() -> HostApiFactory {
+    Arc::new(|_, _| {
+        Arc::new(extension_host::HostApiHandler::new(Arc::new(
+            UniversalProviderHost::new(
+                Vec::<String>::new(),
+                Arc::new(MapSecretResolver::default()),
+            ),
+        )))
+    })
 }
 
 fn activation_manager(
@@ -335,23 +327,6 @@ fn activation_manager(
             Ok(extension_protocol::host::NotifyResult { clicked: None })
         }
 
-        async fn quick_pick(
-            &self,
-            _params: extension_protocol::host::QuickPickParams,
-        ) -> extension_host::HostResult<extension_protocol::host::QuickPickResult> {
-            Ok(extension_protocol::host::QuickPickResult {
-                selected: Vec::new(),
-                cancelled: true,
-            })
-        }
-
-        async fn open_view(
-            &self,
-            _params: extension_protocol::host::OpenViewParams,
-        ) -> extension_host::HostResult<()> {
-            Ok(())
-        }
-
         async fn storage_get(
             &self,
             _params: extension_protocol::host::StorageGetParams,
@@ -371,16 +346,6 @@ fn activation_manager(
             _params: extension_protocol::host::LogParams,
         ) -> extension_host::HostResult<()> {
             Ok(())
-        }
-
-        async fn show_dialog(
-            &self,
-            _params: extension_protocol::declarative_ui::UiDialogRequest,
-        ) -> extension_host::HostResult<extension_protocol::declarative_ui::UiDialogResult>
-        {
-            Err(extension_host::HostError::NotImplemented(
-                "test host does not present dialogs".into(),
-            ))
         }
     }
 
@@ -457,70 +422,6 @@ async fn activation_universal_manager_with_sessions() -> (
     (manager, sessions)
 }
 
-#[derive(Default)]
-struct HoldDialogPresenter {
-    requests: std::sync::Mutex<Vec<DialogActivationRequest>>,
-    completions: std::sync::Mutex<HashMap<DialogActivationKey, oneshot::Sender<DialogUserResult>>>,
-}
-
-impl HoldDialogPresenter {
-    fn requests(&self) -> Vec<DialogActivationRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl DialogPresenter for HoldDialogPresenter {
-    async fn show(
-        &self,
-        request: DialogActivationRequest,
-        complete: oneshot::Sender<DialogUserResult>,
-    ) {
-        self.requests.lock().unwrap().push(request.clone());
-        self.completions
-            .lock()
-            .unwrap()
-            .insert(request.key, complete);
-    }
-
-    fn dismiss(&self, request: &DialogActivationRequest) {
-        if let Some(complete) = self.completions.lock().unwrap().remove(&request.key) {
-            let _ = complete.send(DialogUserResult::Terminal(DialogTerminalResult::Dismissed));
-        }
-    }
-}
-
-#[test]
-fn binding_maps_to_process_session_config_without_losing_spawn_fields() {
-    let extension = tempfile::TempDir::new().unwrap();
-    let config = process_session_config(
-        &binding(extension.path()),
-        NegotiationConfig::new("1.0.0", "instance").offer_api("extension", "1.0"),
-    )
-    .expect("valid binding");
-
-    assert_eq!(extension.path().join("bin/provider"), config.spawn.program);
-    assert_eq!(
-        Some(extension.path().to_path_buf()),
-        config.spawn.program_root
-    );
-    assert_eq!(Some(extension.path().to_path_buf()), config.spawn.cwd_root);
-    assert_eq!(vec!["--mode", "extension"], config.spawn.args);
-    assert_eq!(Some(extension.path().to_path_buf()), config.spawn.cwd);
-    assert_eq!(
-        HashMap::from([("RUST_LOG".into(), "info".into())]),
-        config.spawn.env
-    );
-    assert!(matches!(
-        config.spawn.transport,
-        SpawnTransport::LocalSocket { .. }
-    ));
-    assert_eq!(Duration::from_millis(2_500), config.spawn.ready_timeout);
-    assert_eq!(DEFAULT_SESSION_REQUEST_TIMEOUT, config.request_timeout);
-    assert_eq!(4_000, config.shutdown_grace_ms);
-    assert_eq!("com.navop.kafka::main", config.label);
-}
-
 #[tokio::test]
 async fn activation_manager_starts_runtimes_lazily_and_shares_sessions() {
     let (_root, manager, calls, shutdowns, _closed) = activation_manager(&[
@@ -531,45 +432,32 @@ async fn activation_manager_starts_runtimes_lazily_and_shares_sessions() {
 
     assert_eq!(0, calls.load(Ordering::SeqCst));
     assert_eq!(0, shutdowns.load(Ordering::SeqCst));
-    assert!(manager.active_panel_keys().is_empty());
+    assert!(manager.runtime_state("com.navop.kafka::main").is_err());
 
-    let topics = manager
-        .activate_panel("com.navop.kafka::topics")
+    let first = manager
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
-    assert_eq!(RuntimeActivationState::Active, topics.state);
+    assert_eq!(RuntimeActivationState::Active, first.state);
     assert_eq!(1, calls.load(Ordering::SeqCst));
 
-    manager
-        .activate_panel("com.navop.kafka::consumers")
+    let second = manager
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     assert_eq!(1, calls.load(Ordering::SeqCst));
     assert_eq!(0, shutdowns.load(Ordering::SeqCst));
+    assert_ne!(first.activation_id, second.activation_id);
 
-    manager
-        .deactivate_panel("com.navop.kafka::topics")
-        .await
-        .unwrap();
+    manager.deactivate_activation(&first).await.unwrap();
     assert_eq!(0, shutdowns.load(Ordering::SeqCst));
-    assert_eq!(
-        ["com.navop.kafka::consumers".to_owned()]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
-        manager.active_panel_keys()
-    );
+    assert!(manager.runtime_state("com.navop.kafka::main").is_ok());
 
-    manager
-        .deactivate_panel("com.navop.kafka::consumers")
-        .await
-        .unwrap();
+    manager.deactivate_activation(&second).await.unwrap();
     assert_eq!(1, shutdowns.load(Ordering::SeqCst));
-    assert!(manager.active_panel_keys().is_empty());
+    assert!(manager.runtime_state("com.navop.kafka::main").is_err());
 
-    manager
-        .deactivate_panel("com.navop.kafka::consumers")
-        .await
-        .unwrap();
+    manager.deactivate_activation(&second).await.unwrap();
     assert_eq!(1, shutdowns.load(Ordering::SeqCst));
 }
 
@@ -578,14 +466,14 @@ async fn stale_panel_lease_cannot_deactivate_reactivated_panel() {
     let (_root, manager, calls, shutdowns, _closed) = activation_manager(&[("topics", "main")]);
 
     let first = manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     manager.deactivate_activation(&first).await.unwrap();
     assert_eq!(1, shutdowns.load(Ordering::SeqCst));
 
     let second = manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     assert_ne!(first.activation_id, second.activation_id);
@@ -594,16 +482,11 @@ async fn stale_panel_lease_cannot_deactivate_reactivated_panel() {
 
     manager.deactivate_activation(&first).await.unwrap();
     assert_eq!(1, shutdowns.load(Ordering::SeqCst));
-    assert_eq!(
-        ["com.navop.kafka::topics".to_owned()]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
-        manager.active_panel_keys()
-    );
+    assert!(manager.runtime_state("com.navop.kafka::main").is_ok());
 
     manager.deactivate_activation(&second).await.unwrap();
     assert_eq!(2, shutdowns.load(Ordering::SeqCst));
-    assert!(manager.active_panel_keys().is_empty());
+    assert!(manager.runtime_state("com.navop.kafka::main").is_err());
 }
 
 #[tokio::test]
@@ -611,7 +494,7 @@ async fn panel_lease_survives_provider_generation_restart() {
     let (_root, manager, _calls, shutdowns, closed) =
         activation_manager(&[("consumers", "secondary")]);
     let activation = manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
 
@@ -628,7 +511,7 @@ async fn panel_lease_survives_provider_generation_restart() {
     );
 
     manager.deactivate_activation(&activation).await.unwrap();
-    assert!(manager.active_panel_keys().is_empty());
+    assert!(manager.runtime_state("com.navop.kafka::secondary").is_err());
     assert_eq!(2, shutdowns.load(Ordering::SeqCst));
 }
 
@@ -637,14 +520,174 @@ async fn concurrent_panels_sharing_runtime_start_one_session() {
     let (_root, manager, calls, _shutdowns, _closed) =
         activation_manager(&[("topics", "main"), ("consumers", "main")]);
 
-    let first = manager.activate_panel("com.navop.kafka::topics");
-    let second = manager.activate_panel("com.navop.kafka::consumers");
+    let first = manager.activate_runtime("com.navop.kafka::main");
+    let second = manager.activate_runtime("com.navop.kafka::main");
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
 
     assert_eq!(1, calls.load(Ordering::SeqCst));
-    assert_eq!(2, manager.active_panel_keys().len());
+    assert!(manager.runtime_state("com.navop.kafka::main").is_ok());
+}
+
+#[tokio::test]
+async fn concurrent_activation_waits_for_the_shared_start_result() {
+    let (_root, catalog, _calls, _shutdowns, _closed) = activation_fixture(&[]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let factory: SessionFactory = Arc::new({
+        let calls = Arc::clone(&calls);
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        move |_| {
+            let calls = Arc::clone(&calls);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                release.notified().await;
+                Err(extension_host::HostError::NotImplemented(
+                    "start failed".into(),
+                ))
+            })
+        }
+    });
+    let manager = Arc::new(ActivationManager::new(
+        catalog,
+        factory,
+        test_host_api_factory(),
+    ));
+
+    let first = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.activate_runtime("com.navop.kafka::main").await }
+    });
+    started.notified().await;
+    let second = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.activate_runtime("com.navop.kafka::main").await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!second.is_finished());
+
+    release.notify_one();
+    assert!(first.await.unwrap().is_err());
+    assert!(second.await.unwrap().is_err());
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    assert!(manager.runtime_state("com.navop.kafka::main").is_err());
+}
+
+#[tokio::test]
+async fn cancelled_activation_releases_the_start_claim_for_retry() {
+    let (_root, catalog, _calls, shutdowns, closed) = activation_fixture(&[]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let factory: SessionFactory = Arc::new({
+        let calls = Arc::clone(&calls);
+        let started = Arc::clone(&started);
+        move |_| {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            let started = Arc::clone(&started);
+            let shutdowns = Arc::clone(&shutdowns);
+            let closed = Arc::clone(&closed);
+            Box::pin(async move {
+                if call == 0 {
+                    started.notify_one();
+                    futures::future::pending::<()>().await;
+                }
+                Ok(Arc::new(FakeManagedSession { shutdowns, closed })
+                    as Arc<dyn ManagedRpcSession>)
+            })
+        }
+    });
+    let manager = Arc::new(ActivationManager::new(
+        catalog,
+        factory,
+        test_host_api_factory(),
+    ));
+
+    let first = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.activate_runtime("com.navop.kafka::main").await }
+    });
+    started.notified().await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert!(manager.runtime_state("com.navop.kafka::main").is_err());
+
+    let activation = manager
+        .activate_runtime("com.navop.kafka::main")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Active, activation.state);
+    assert_eq!(2, calls.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn replacing_catalog_exposes_new_runtime_bindings_without_restart() {
+    let (_root, catalog, _calls, shutdowns, closed) = activation_fixture(&[]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factory: SessionFactory = Arc::new({
+        let calls = Arc::clone(&calls);
+        move |_| {
+            let calls = Arc::clone(&calls);
+            let shutdowns = Arc::clone(&shutdowns);
+            let closed = Arc::clone(&closed);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(FakeManagedSession { shutdowns, closed })
+                    as Arc<dyn ManagedRpcSession>)
+            })
+        }
+    });
+    let manager = ActivationManager::new(
+        ExtensionRuntimeCatalog::empty(),
+        factory,
+        test_host_api_factory(),
+    );
+
+    assert!(
+        manager
+            .activate_runtime("com.navop.kafka::main")
+            .await
+            .is_err()
+    );
+    manager.replace_catalog(Arc::new(catalog));
+
+    let activation = manager
+        .activate_runtime("com.navop.kafka::main")
+        .await
+        .unwrap();
+    assert_eq!(RuntimeActivationState::Active, activation.state);
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn releasing_last_activation_removes_runtime_jobs() {
+    let (_root, manager, _calls, _shutdowns, _closed) = activation_manager(&[]);
+    let jobs = Arc::new(JobActivationManager::new());
+    let manager = manager.with_job_activation(Arc::clone(&jobs));
+    let activation = manager
+        .activate_runtime("com.navop.kafka::main")
+        .await
+        .unwrap();
+    let handle = jobs
+        .register_start(
+            "com.navop.kafka",
+            "com.navop.kafka::main",
+            activation.runtime_generation,
+            &extension_protocol::job::JobStartResult {
+                job_id: "job-1".into(),
+                state: extension_protocol::job::JobState::Queued,
+            },
+        )
+        .unwrap();
+
+    manager.deactivate_activation(&activation).await.unwrap();
+
+    assert!(jobs.validate(&handle).is_err());
 }
 
 #[tokio::test]
@@ -652,11 +695,11 @@ async fn deactivating_extension_closes_all_owned_runtimes_once() {
     let (_root, manager, calls, shutdowns, _closed) =
         activation_manager(&[("topics", "main"), ("consumers", "secondary")]);
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
     assert_eq!(2, calls.load(Ordering::SeqCst));
@@ -666,7 +709,7 @@ async fn deactivating_extension_closes_all_owned_runtimes_once() {
         .await
         .unwrap();
     assert_eq!(2, shutdowns.load(Ordering::SeqCst));
-    assert!(manager.active_panel_keys().is_empty());
+    assert!(manager.runtime_state("com.navop.kafka::main").is_err());
 
     manager
         .deactivate_extension("com.navop.kafka")
@@ -676,16 +719,16 @@ async fn deactivating_extension_closes_all_owned_runtimes_once() {
 }
 
 #[tokio::test]
-async fn activation_rejects_unknown_panel_without_calling_factory() {
+async fn activation_rejects_unknown_runtime_without_calling_factory() {
     let (_root, manager, calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
     let error = manager
-        .activate_panel("com.navop.other/topics")
+        .activate_runtime("com.navop.other/main")
         .await
         .unwrap_err();
 
     assert_eq!(
-        ActivationError::PanelNotFound {
-            panel_key: "com.navop.other/topics".into()
+        ActivationError::RuntimeNotFound {
+            runtime_id: "com.navop.other/main".into()
         },
         error
     );
@@ -696,7 +739,7 @@ async fn activation_rejects_unknown_panel_without_calling_factory() {
 async fn runtime_health_reports_active_and_degraded_sessions() {
     let (_root, manager, _calls, _shutdowns, closed) = activation_manager(&[("topics", "main")]);
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
 
@@ -722,7 +765,7 @@ async fn managed_client_acquisition_tracks_restart_generations() {
     let (_root, manager, calls, _shutdowns, closed) =
         activation_manager(&[("consumers", "secondary")]);
     manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
 
@@ -754,7 +797,7 @@ async fn runtime_lifecycle_releases_generation_owned_host_blobs() {
         activation_manager(&[("consumers", "secondary")]);
     let manager = manager.with_blob_store(BlobStore::default());
     manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
     let blobs = manager.blob_store().unwrap();
@@ -814,74 +857,10 @@ async fn runtime_lifecycle_releases_generation_owned_host_blobs() {
 }
 
 #[tokio::test]
-async fn provider_dialogs_are_lifecycle_managed_by_the_host() {
-    let held_presenter = Arc::new(HoldDialogPresenter::default());
-    let presenter: Arc<dyn DialogPresenter> = held_presenter.clone();
-    let dialogs = Arc::new(DialogActivationManager::new(Arc::clone(&presenter)));
-    let (_root, manager, _calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
-    let manager = manager.with_dialog_activation(Arc::clone(&dialogs));
-    let manager = Arc::new(manager);
-    manager
-        .activate_panel("com.navop.kafka::topics")
-        .await
-        .unwrap();
-
-    let shown_manager = Arc::clone(&manager);
-    let shown = tokio::spawn(async move {
-        shown_manager
-            .activate_dialog(
-                "com.navop.kafka",
-                "com.navop.kafka::main",
-                UiDialogRequest {
-                    request_id: "request-1".into(),
-                    dialog_id: "delete-topic".into(),
-                    kind: UiDialogKind::Confirm,
-                    title: "Delete topic".into(),
-                    message: Some("This operation cannot be undone.".into()),
-                    confirm_label: None,
-                    cancel_label: None,
-                    danger: true,
-                    expected_revision: Some(7),
-                },
-            )
-            .await
-    });
-    tokio::time::timeout(Duration::from_millis(100), async {
-        while held_presenter.requests().is_empty() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .expect("dialog reaches host presenter");
-
-    let presented = held_presenter.requests();
-    assert_eq!(1, presented.len());
-    assert_eq!("com.navop.kafka", presented[0].key.extension_id);
-    assert_eq!("com.navop.kafka::main", presented[0].key.runtime_id);
-    assert_eq!(0, presented[0].key.generation);
-    assert_eq!("request-1", presented[0].key.request_id);
-    assert!(presented[0].dialog.danger);
-    assert_eq!(1, dialogs.pending_count("com.navop.kafka::main"));
-
-    manager
-        .deactivate_runtime("com.navop.kafka::main")
-        .await
-        .unwrap();
-    assert_eq!(
-        UiDialogResult::Dismissed,
-        shown
-            .await
-            .expect("dialog activation task succeeds")
-            .expect("runtime cleanup returns a dialog result")
-    );
-    assert_eq!(0, dialogs.pending_count("com.navop.kafka::main"));
-}
-
-#[tokio::test]
 async fn large_inline_provider_results_are_cached_as_host_blobs() {
     let manager = activation_universal_manager().await;
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let runtime_id = "com.navop.kafka::main";
@@ -947,7 +926,7 @@ async fn large_inline_provider_results_are_cached_as_host_blobs() {
     assert!(manager.blob_store().unwrap().is_empty());
 
     manager
-        .deactivate_panel("com.navop.kafka::topics")
+        .deactivate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
 }
@@ -956,7 +935,7 @@ async fn large_inline_provider_results_are_cached_as_host_blobs() {
 async fn small_job_results_stay_inline_and_host_blob_ids_do_not_reach_providers() {
     let manager = activation_universal_manager().await;
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let client = manager
@@ -1002,7 +981,7 @@ async fn small_job_results_stay_inline_and_host_blob_ids_do_not_reach_providers(
     assert!(error.to_string().contains("closed or unknown"));
 
     manager
-        .deactivate_panel("com.navop.kafka::topics")
+        .deactivate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
 }
@@ -1011,7 +990,7 @@ async fn small_job_results_stay_inline_and_host_blob_ids_do_not_reach_providers(
 async fn job_lifecycle_owns_and_reclaims_large_result_blob() {
     let manager = activation_universal_manager().await;
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let runtime_id = "com.navop.kafka::main";
@@ -1075,7 +1054,7 @@ async fn job_lifecycle_owns_and_reclaims_large_result_blob() {
 async fn provider_close_failure_still_reclaims_host_job_ownership() {
     let manager = activation_universal_manager().await;
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let runtime_id = "com.navop.kafka::main";
@@ -1103,7 +1082,7 @@ async fn provider_close_failure_still_reclaims_host_job_ownership() {
 async fn runtime_restart_recovers_job_under_replacement_generation() {
     let (manager, sessions) = activation_universal_manager_with_sessions().await;
     manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
     let runtime_id = "com.navop.kafka::secondary";
@@ -1162,7 +1141,7 @@ async fn runtime_restart_recovers_job_under_replacement_generation() {
 async fn provider_event_streams_are_lifecycle_managed_by_the_host() {
     let manager = activation_universal_manager().await;
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let runtime_id = "com.navop.kafka::main";
@@ -1200,7 +1179,7 @@ async fn provider_event_streams_are_lifecycle_managed_by_the_host() {
     );
 
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let new_client = manager.universal_plugin_client(runtime_id).unwrap();
@@ -1245,7 +1224,7 @@ async fn provider_event_streams_are_lifecycle_managed_by_the_host() {
     );
 
     manager
-        .deactivate_panel("com.navop.kafka::topics")
+        .deactivate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
 }
@@ -1254,7 +1233,7 @@ async fn provider_event_streams_are_lifecycle_managed_by_the_host() {
 async fn check_runtime_does_not_restart_open_sessions() {
     let (_root, manager, calls, shutdowns, _closed) = activation_manager(&[("topics", "main")]);
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
 
@@ -1272,7 +1251,7 @@ async fn check_runtime_does_not_restart_open_sessions() {
 async fn check_runtime_fails_closed_sessions_when_restart_is_disabled() {
     let (_root, manager, calls, shutdowns, closed) = activation_manager(&[("topics", "main")]);
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     closed.store(true, Ordering::SeqCst);
@@ -1295,7 +1274,7 @@ async fn closed_secondary_runtime_restarts_with_backoff_and_budget() {
     let (_root, manager, calls, shutdowns, closed) =
         activation_manager(&[("consumers", "secondary")]);
     manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
     closed.store(true, Ordering::SeqCst);
@@ -1353,7 +1332,7 @@ async fn runtime_monitor_emits_health_transitions_and_removals() {
         activation_manager(&[("consumers", "secondary")]);
     let manager = Arc::new(manager);
     manager
-        .activate_panel("com.navop.kafka::consumers")
+        .activate_runtime("com.navop.kafka::secondary")
         .await
         .unwrap();
     let monitor = RuntimeMonitor::new(
@@ -1414,7 +1393,7 @@ async fn runtime_monitor_task_starts_stops_and_rejects_double_start() {
     let (_root, manager, _calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
     let manager = Arc::new(manager);
     manager
-        .activate_panel("com.navop.kafka::topics")
+        .activate_runtime("com.navop.kafka::main")
         .await
         .unwrap();
     let monitor = RuntimeMonitor::new(
@@ -1446,78 +1425,6 @@ async fn runtime_monitor_task_starts_stops_and_rejects_double_start() {
     assert!(events.try_recv().is_err());
     assert!(monitor.start().is_ok());
     monitor.stop().await;
-}
-
-#[test]
-fn activation_catalog_projects_ui_metadata_without_trusting_paths() {
-    let (_root, manager, _calls, _shutdowns, _closed) =
-        activation_manager(&[("topics", "main"), ("overview", "secondary")]);
-
-    let panels = manager.declarative_panel_catalog();
-    assert_eq!(
-        vec![
-            DeclarativePanelDescriptor {
-                extension_id: "com.navop.kafka".into(),
-                panel_key: "com.navop.kafka::overview".into(),
-                title: "overview".into(),
-                runtime_id: "com.navop.kafka::secondary".into(),
-                placement: DeclarativePanelPlacement::HomeSidebar,
-                icon: None,
-            },
-            DeclarativePanelDescriptor {
-                extension_id: "com.navop.kafka".into(),
-                panel_key: "com.navop.kafka::topics".into(),
-                title: "topics".into(),
-                runtime_id: "com.navop.kafka::main".into(),
-                placement: DeclarativePanelPlacement::HomeSidebar,
-                icon: None,
-            },
-        ],
-        panels
-    );
-}
-
-#[test]
-fn declarative_panel_source_returns_validated_text_without_paths() {
-    let (root, manager, _calls, _shutdowns, _closed) = activation_manager(&[("overview", "main")]);
-    std::fs::write(root.path().join("ui/main.html"), "<span>Topics</span>").unwrap();
-    std::fs::write(root.path().join("ui/main.css"), "span { color: red; }").unwrap();
-
-    let source = manager
-        .declarative_panel_source("com.navop.kafka::overview")
-        .unwrap();
-
-    assert_eq!("com.navop.kafka", source.extension_id);
-    assert_eq!("com.navop.kafka::overview", source.panel_key);
-    assert_eq!("overview", source.title);
-    assert_eq!("<span>Topics</span>", source.template);
-    assert_eq!(Some("span { color: red; }".to_owned()), source.style);
-}
-
-#[test]
-fn declarative_panel_source_allows_templates_without_styles() {
-    let (_root, manager, _calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
-
-    let source = manager
-        .declarative_panel_source("com.navop.kafka::topics")
-        .unwrap();
-
-    assert_eq!("<div></div>", source.template);
-    assert_eq!(None, source.style);
-}
-
-#[test]
-fn declarative_panel_source_rejects_unknown_panels() {
-    let (_root, manager, _calls, _shutdowns, _closed) = activation_manager(&[("topics", "main")]);
-
-    assert_eq!(
-        PanelSourceError::PanelNotFound {
-            panel_key: "com.navop.kafka::missing".to_owned(),
-        },
-        manager
-            .declarative_panel_source("com.navop.kafka::missing")
-            .unwrap_err()
-    );
 }
 
 #[test]
@@ -1585,46 +1492,4 @@ fn binding_rejects_symlink_escape_before_spawn() {
         process_session_config(&escaped, NegotiationConfig::new("1.0.0", "instance")),
         Err(PluginAdapterError::PathEscapesAllowedRoot { .. })
     ));
-}
-
-#[test]
-fn declarative_ui_wire_types_preserve_action_and_state_semantics() {
-    let event = ActionEvent::new("refresh", "topics", NodePath(vec![0, 2]))
-        .with_payload(BTreeMap::from([("filter".into(), "orders".into())]));
-    let request = ui_action_request(&event, "request-1", Some(7));
-    assert_eq!("request-1", request.request_id);
-    assert_eq!("refresh", request.action);
-    assert_eq!("topics", request.source_id);
-    assert_eq!(vec![0, 2], request.source_path);
-    assert_eq!(
-        Some("orders"),
-        request.payload.get("filter").map(String::as_str)
-    );
-    assert_eq!(Some(7), request.expected_revision);
-
-    let operations = state_operations(&UiStatePatch {
-        expected_revision: Some(7),
-        operations: vec![
-            UiStateOperation::Set {
-                key: "status".into(),
-                value: "ready".into(),
-            },
-            UiStateOperation::Remove {
-                key: "error".into(),
-            },
-        ],
-        event_subscriptions: Vec::new(),
-    });
-    assert_eq!(
-        vec![
-            StateOperation::Set {
-                key: "status".into(),
-                value: "ready".into()
-            },
-            StateOperation::Remove {
-                key: "error".into()
-            }
-        ],
-        operations
-    );
 }

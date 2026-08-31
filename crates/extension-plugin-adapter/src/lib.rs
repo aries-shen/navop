@@ -1,20 +1,16 @@
-//! Composite extension manifest、native IPC host 与 Declarative UI 的薄适配层。
+//! Composite extension manifest 与 native IPC host 的薄适配层。
 //!
-//! 本 crate 不实现 provider，也不负责进程重启、通用 capability 授权或面板挂载；
-//! 它只把 catalog 中已经校验的 IPC binding 转为单次 session 配置，在 spawn
-//! 边界复核 command 权限和路径 containment，并在进程内 UI event/state 与稳定
-//! wire DTO 之间做无副作用转换。
+//! 本 crate 不实现 provider，也不负责进程重启或通用 capability 授权；
+//! 它只把 catalog 中已经校验的 IPC binding 转为单次 session 配置，并在
+//! spawn 边界复核 command 权限和路径 containment。
 
 use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use declarative_ui_demo::{ActionEvent, Runtime, RuntimeError, StateChange, StateOperation};
 use extension_host::{NegotiationConfig, ProcessRpcSessionConfig, SpawnConfig};
-use extension_protocol::declarative_ui::{UiActionRequest, UiStateOperation};
 use extension_runtime::RegisteredIpcRuntimeBinding;
-use gpui::Context;
 use thiserror::Error;
 
 pub mod activation;
@@ -22,7 +18,6 @@ pub mod activation;
 pub mod blob_store;
 #[cfg(test)]
 mod blob_store_tests;
-pub mod dialog_activation;
 pub mod event_activation;
 pub mod event_supervisor;
 #[cfg(test)]
@@ -33,28 +28,17 @@ mod job_activation_state;
 mod job_activation_tests;
 pub mod provider_permissions;
 pub mod universal_host;
-pub mod window_activation;
-#[cfg(test)]
-mod window_activation_tests;
-
-pub use extension_protocol::declarative_ui::UiStatePatch;
 
 pub use activation::{
-    ActivationError, ActivationHandle, ActivationManager, DeclarativePanelDescriptor,
-    DeclarativePanelSource, HostApiFactory, ManagedRpcSession, ManagedUniversalPluginClient,
-    PanelSourceError, RuntimeActivationState, RuntimeHealth, RuntimeMonitor, RuntimeMonitorConfig,
-    RuntimeMonitorError, RuntimeMonitorEvent, SessionContext, SessionFactory, SupervisionPolicy,
-    process_session_factory,
+    ActivationError, ActivationHandle, ActivationManager, HostApiFactory, ManagedRpcSession,
+    ManagedUniversalPluginClient, RuntimeActivationState, RuntimeHealth, RuntimeMonitor,
+    RuntimeMonitorConfig, RuntimeMonitorError, RuntimeMonitorEvent, SessionContext, SessionFactory,
+    SupervisionPolicy, process_session_factory,
 };
 
 pub use blob_store::{
     BlobInfo, BlobOwner, BlobStore, BlobStoreError, BlobStoreLimits, DEFAULT_MAX_BLOB_BYTES,
     DEFAULT_MAX_TOTAL_BLOB_BYTES,
-};
-pub use dialog_activation::{
-    DEFAULT_MAX_PENDING_DIALOGS, DialogActivationError, DialogActivationKey,
-    DialogActivationManager, DialogActivationRequest, DialogHostProvider, DialogPresenter,
-    DialogTerminalResult, DialogUserResult, QueueingDialogPresenter,
 };
 pub use event_activation::{
     DEFAULT_MAX_OPEN_EVENT_STREAMS, EventActivationError, EventActivationManager, EventStreamKey,
@@ -71,10 +55,6 @@ pub use provider_permissions::{
     SecretReference,
 };
 pub use universal_host::{MapSecretResolver, SecretResolver, UniversalProviderHost};
-pub use window_activation::{
-    PresentedWindow, WindowActivationKey, WindowActivationManager, WindowActivationRequest,
-    WindowPresentationError, WindowPresenter,
-};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PluginAdapterError {
@@ -191,47 +171,6 @@ fn ensure_path_within(allowed_root: &Path, candidate: &Path) -> Result<(), Plugi
         path: candidate.to_path_buf(),
         allowed_root: allowed_root.to_path_buf(),
     })
-}
-
-/// 将进程内 Declarative UI action 转成跨进程请求。
-pub fn ui_action_request(
-    event: &ActionEvent,
-    request_id: impl Into<String>,
-    expected_revision: Option<u64>,
-) -> UiActionRequest {
-    UiActionRequest {
-        request_id: request_id.into(),
-        action: event.name().to_owned(),
-        source_id: event.source_id().to_owned(),
-        source_path: event.source_path().0.clone(),
-        payload: event.payload().clone(),
-        expected_revision,
-    }
-}
-
-/// 将 provider 返回的 wire patch 转成进程内原子 state operations。
-pub fn state_operations(patch: &UiStatePatch) -> Vec<StateOperation> {
-    patch
-        .operations
-        .iter()
-        .map(|operation| match operation {
-            UiStateOperation::Set { key, value } => StateOperation::Set {
-                key: key.clone(),
-                value: value.clone(),
-            },
-            UiStateOperation::Remove { key } => StateOperation::Remove { key: key.clone() },
-        })
-        .collect()
-}
-
-/// 在 GPUI entity update 中应用 provider 返回的原子 state patch。
-pub fn apply_ui_state_patch(
-    runtime: &mut Runtime,
-    patch: &UiStatePatch,
-    cx: &mut Context<Runtime>,
-) -> Result<Option<StateChange>, RuntimeError> {
-    let operations = state_operations(patch);
-    runtime.apply_external_patch(patch.expected_revision, &operations, cx)
 }
 
 #[cfg(test)]

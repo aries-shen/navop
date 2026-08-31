@@ -11,10 +11,7 @@
     "fs:read:/var/run/docker.sock",
     "fs:write:/var/run/docker.sock",
     "secrets:read:docker.*",
-    "spawn:./bin/docker-provider",
-    "ui:tab",
-    "ui:notify",
-    "ui:progress"
+    "spawn:./bin/docker-provider"
   ],
   "runtime": {
     "ipc": [
@@ -36,19 +33,6 @@
         "kind": "docker",
         "label": "Docker",
         "secretNamespace": "docker"
-      }
-    ],
-    "declarativePanels": [
-      {
-        "id": "docker",
-        "title": "Docker",
-        "runtimeId": "main",
-        "template": "ui/main.html",
-        "placement": "home_sidebar",
-        "icon": "box",
-        "activation": [
-          "onConnectionKind:docker"
-        ]
       }
     ]
   }

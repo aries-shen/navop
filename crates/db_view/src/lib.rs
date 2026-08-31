@@ -21,12 +21,6 @@ pub mod er_diagram;
 pub mod extension_menu;
 #[cfg(test)]
 mod extension_menu_contract_tests;
-pub mod extension_selector;
-pub mod extension_widget;
-#[cfg(test)]
-mod extension_widget_tests;
-pub mod extension_widget_view;
-mod extension_widget_view_controls;
 mod import_export;
 pub mod search_shortcut;
 pub mod settings;

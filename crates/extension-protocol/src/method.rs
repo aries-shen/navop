@@ -107,11 +107,6 @@ pub const JOB_CANCEL: &str = "job/cancel";
 pub const JOB_RESULT: &str = "job/result";
 pub const JOB_CLOSE: &str = "job/close";
 
-// -- Declarative UI bridge --
-pub const UI_ACTION: &str = "ui/action";
-pub const UI_DIALOG: &str = "ui/dialog";
-pub const UI_WINDOW: &str = "ui/window";
-
 // -- Redis --
 pub const REDIS_COMMAND: &str = "redis/command";
 pub const REDIS_PIPELINE: &str = "redis/pipeline";
@@ -128,9 +123,6 @@ pub const MONGODB_CURSOR_CLOSE: &str = "mongodb/cursor_close";
 pub const HOST_REQUEST_CREDENTIAL: &str = "host/request_credential";
 pub const HOST_RESOLVE_SECRET: &str = "host/secret/resolve";
 pub const HOST_NOTIFY: &str = "host/notify";
-pub const HOST_QUICK_PICK: &str = "host/quick_pick";
-pub const HOST_CONFIRM: &str = "host/confirm";
-pub const HOST_OPEN_VIEW: &str = "host/open_view";
 pub const HOST_SSH_OPEN_TUNNEL: &str = "host/ssh/open_tunnel";
 pub const HOST_STORAGE_GET: &str = "host/storage/get";
 pub const HOST_STORAGE_SET: &str = "host/storage/set";
@@ -224,9 +216,6 @@ pub const ALL_METHODS: &[&str] = &[
     JOB_CANCEL,
     JOB_RESULT,
     JOB_CLOSE,
-    UI_ACTION,
-    UI_DIALOG,
-    UI_WINDOW,
     HOST_BLOB_BEGIN,
     HOST_BLOB_WRITE,
     HOST_BLOB_FINISH,
@@ -332,9 +321,6 @@ mod tests {
         for m in [
             HOST_REQUEST_CREDENTIAL,
             HOST_NOTIFY,
-            HOST_QUICK_PICK,
-            HOST_CONFIRM,
-            HOST_OPEN_VIEW,
             HOST_STORAGE_GET,
             HOST_STORAGE_SET,
             HOST_LOG,

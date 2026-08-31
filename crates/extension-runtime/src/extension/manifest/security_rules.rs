@@ -181,12 +181,8 @@ fn validate_db_permission(permission: &str) -> Result<ValidatedPermission, Permi
 
 fn validate_ui_permission(permission: &str) -> Result<ValidatedPermission, PermissionError> {
     const UI_PERMISSIONS: &[&str] = &[
-        "ui:dialog",
-        "ui:webview",
-        "ui:tab",
         "ui:progress",
         "ui:notify",
-        "ui:result_view",
         "ui:refresh_tree",
     ];
     if UI_PERMISSIONS.contains(&permission) {

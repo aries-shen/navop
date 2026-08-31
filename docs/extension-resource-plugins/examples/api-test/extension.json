@@ -10,10 +10,7 @@
   "permissions": [
     "net:tcp:api.example.com:443",
     "secrets:read:api-test.*",
-    "spawn:./bin/api-test-provider",
-    "ui:tab",
-    "ui:notify",
-    "ui:progress"
+    "spawn:./bin/api-test-provider"
   ],
   "runtime": {
     "ipc": [
@@ -36,19 +33,6 @@
         "label": "API Test",
         "secretNamespace": "api-test",
         "supportsCollections": true
-      }
-    ],
-    "declarativePanels": [
-      {
-        "id": "api-test",
-        "title": "API Test",
-        "runtimeId": "main",
-        "template": "ui/main.html",
-        "placement": "home_tab",
-        "icon": "globe",
-        "activation": [
-          "onStartupFinished"
-        ]
       }
     ]
   }

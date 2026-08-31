@@ -3,7 +3,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use extension_host::{HostApiProvider, HostError, HostResult};
-use extension_protocol::declarative_ui::{UiDialogRequest, UiDialogResult};
 use extension_protocol::host::{self, ResolveSecretParams, ResolveSecretResult};
 use extension_protocol::host_blob::{
     HostBlobAbortParams, HostBlobBeginParams, HostBlobBeginResult, HostBlobFinishParams,
@@ -119,20 +118,6 @@ impl HostApiProvider for UniversalProviderHost {
         Ok(host::NotifyResult { clicked: None })
     }
 
-    async fn quick_pick(
-        &self,
-        _params: host::QuickPickParams,
-    ) -> HostResult<host::QuickPickResult> {
-        Ok(host::QuickPickResult {
-            selected: Vec::new(),
-            cancelled: true,
-        })
-    }
-
-    async fn open_view(&self, _params: host::OpenViewParams) -> HostResult<()> {
-        Ok(())
-    }
-
     async fn storage_get(
         &self,
         _params: host::StorageGetParams,
@@ -146,12 +131,6 @@ impl HostApiProvider for UniversalProviderHost {
 
     async fn log(&self, _params: host::LogParams) -> HostResult<()> {
         Ok(())
-    }
-
-    async fn show_dialog(&self, _params: UiDialogRequest) -> HostResult<UiDialogResult> {
-        Err(HostError::NotImplemented(
-            "provider-initiated dialogs require an explicit host presenter".into(),
-        ))
     }
 
     async fn host_blob_begin(

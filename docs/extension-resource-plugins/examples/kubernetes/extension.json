@@ -10,10 +10,7 @@
   "permissions": [
     "fs:read:~/.kube/config",
     "secrets:read:kubernetes.*",
-    "spawn:./bin/kubernetes-provider",
-    "ui:tab",
-    "ui:notify",
-    "ui:progress"
+    "spawn:./bin/kubernetes-provider"
   ],
   "runtime": {
     "ipc": [
@@ -36,19 +33,6 @@
         "label": "Kubernetes",
         "secretNamespace": "kubernetes",
         "credentialReference": "kubeconfig"
-      }
-    ],
-    "declarativePanels": [
-      {
-        "id": "kubernetes",
-        "title": "Kubernetes",
-        "runtimeId": "main",
-        "template": "ui/main.html",
-        "placement": "home_sidebar",
-        "icon": "cluster",
-        "activation": [
-          "onConnectionKind:kubernetes"
-        ]
       }
     ]
   }

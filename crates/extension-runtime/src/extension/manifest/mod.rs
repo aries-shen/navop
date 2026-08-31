@@ -7,8 +7,7 @@ mod security_rules;
 pub mod versioning;
 
 pub use contributes::{
-    CommandContrib, DeclarativePanelContrib, DeclarativePanelPlacement, DocumentExporterContrib,
-    DocumentRendererContrib, RemoteFileEditorLaunchMode,
+    CommandContrib, DocumentExporterContrib, DocumentRendererContrib, RemoteFileEditorLaunchMode,
 };
 #[cfg(test)]
 pub use contributes::{CommandHandlerContrib, ContributesManifest, HtmlPreviewTransformContrib};

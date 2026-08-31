@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -93,81 +92,7 @@ fn validate_structural(manifest: &Manifest) -> Result<(), ManifestError> {
         return Err(ManifestError::DuplicatedRuntimeId { duplicated });
     }
     validate_security(manifest)?;
-    validate_declarative_panels(manifest)?;
     Ok(())
-}
-
-fn validate_declarative_panels(manifest: &Manifest) -> Result<(), ManifestError> {
-    let runtime_ids: HashSet<&str> = manifest
-        .runtime
-        .ipc
-        .iter()
-        .map(|runtime| runtime.id.as_str())
-        .chain(
-            manifest
-                .runtime
-                .wasm
-                .iter()
-                .map(|runtime| runtime.id.as_str()),
-        )
-        .collect();
-    let mut panel_ids = HashSet::new();
-
-    for panel in &manifest.contributes.declarative_panels {
-        let base = format!("/contributes/declarativePanels/{}/", panel.id);
-        if !is_valid_id_format(&panel.id) {
-            return invalid_field(
-                format!("{base}id"),
-                "格式非法，只能包含小写字母、数字、点、下划线、连字符",
-            );
-        }
-        if !panel_ids.insert(panel.id.as_str()) {
-            return invalid_field(format!("{base}id"), "id 重复");
-        }
-        if !runtime_ids.contains(panel.runtime_id.as_str()) {
-            return invalid_field(format!("{base}runtimeId"), "引用的 runtime 不存在");
-        }
-        if panel.template.trim().is_empty() {
-            return invalid_field(format!("{base}template"), "不能为空");
-        }
-        if Path::new(&panel.template).is_absolute() {
-            return invalid_field(format!("{base}template"), "不能使用绝对路径");
-        }
-        if path_has_escape(&panel.template) {
-            return invalid_field(format!("{base}template"), "路径不能逃逸扩展目录");
-        }
-        validate_extension_path_containment(
-            &manifest.manifest_dir,
-            &manifest.manifest_dir.join(&panel.template),
-            format!("{base}template"),
-            "template",
-        )?;
-        if let Some(style) = &panel.style {
-            validate_declarative_panel_style(
-                &manifest.manifest_dir,
-                style,
-                format!("{base}style"),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_declarative_panel_style(
-    extension_root: &Path,
-    style: &str,
-    field: String,
-) -> Result<(), ManifestError> {
-    if style.trim().is_empty() {
-        return invalid_field(field, "不能为空");
-    }
-    if Path::new(style).is_absolute() {
-        return invalid_field(field, "不能使用绝对路径");
-    }
-    if path_has_escape(style) {
-        return invalid_field(field, "路径不能逃逸扩展目录");
-    }
-    validate_extension_path_containment(extension_root, &extension_root.join(style), field, "style")
 }
 
 fn validate_security(manifest: &Manifest) -> Result<(), ManifestError> {

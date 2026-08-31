@@ -1,5 +1,5 @@
+use crate::db_object_selector::DbSelectorKind;
 use db::{GlobalDbState, TableObjectType};
-use extension_component::DbSelectorKind;
 use gpui::{
     App, AppContext, AsyncApp, ColorExt, Context, Entity, IntoElement, ParentElement, Styled,
     Window, div, prelude::FluentBuilder, px,

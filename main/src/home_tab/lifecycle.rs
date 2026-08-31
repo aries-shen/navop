@@ -66,11 +66,6 @@ impl HomePage {
             sidebar_collapsed: false,
             persistent_sidebar_expanded: AppSettings::current(cx).connection_sidebar_expanded,
             workspaces: Vec::new(),
-            universal_plugin_panels: Vec::new(),
-            universal_plugin_activations: BTreeMap::new(),
-            universal_plugin_status: BTreeMap::new(),
-            activating_universal_panels: HashSet::new(),
-            universal_plugin_activation_error: None,
             connections: Vec::new(),
             tab_container,
             search_input,
@@ -102,14 +97,6 @@ impl HomePage {
 
         // 使用持久化身份预载本地团队权限，不等待在线会话恢复。
         page.load_team_options(cx);
-        page.refresh_universal_plugin_panels(cx);
-        if let Some(service) = cx
-            .try_global::<crate::universal_plugins::GlobalUniversalPluginService>()
-            .map(|global| global.service())
-        {
-            page.observe_universal_plugin_health(&service, cx);
-        }
-
         // 异步加载工作区
         page.load_workspaces(cx);
 

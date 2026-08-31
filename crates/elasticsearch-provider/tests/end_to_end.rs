@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
+use std::{fs, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -13,7 +13,6 @@ use extension_plugin_adapter::{
 };
 use extension_protocol::{
     blob::{BlobCloseParams, BlobReadParams, MAX_BLOB_CHUNK_BYTES},
-    declarative_ui::UiActionRequest,
     event_stream::{EventCloseParams, EventOpenParams, EventReadParams},
     job::{
         JobCloseParams, JobResultParams, JobStartParams, JobState, JobStatusParams, ProgressPercent,
@@ -39,7 +38,6 @@ fn manifest(port: u16) -> String {
     "net:tcp:127.0.0.1:{port}",
     "secrets:read:elasticsearch.*",
     "spawn:./bin/elasticsearch-provider",
-    "ui:tab",
     "ui:notify",
     "ui:progress"
   ],
@@ -54,18 +52,8 @@ fn manifest(port: u16) -> String {
       "shutdown_grace_ms": 2500
     }}]
   }},
-  "contributes": {{
-    "declarativePanels": [{{
-      "id": "elasticsearch",
-      "title": "Elasticsearch",
-      "runtimeId": "main",
-      "template": "ui/main.html",
-      "placement": "home_sidebar",
-      "icon": "search",
-      "activation": ["onConnectionKind:elasticsearch"]
-    }}]
-  }}
-}}"##
+  "contributes": {{}}
+ }}"##
     )
 }
 
@@ -286,19 +274,12 @@ async fn harness(secret_allowed: bool) -> TestHarness {
     let records = spawn_http_fixture(listener).await;
     let root = tempfile::tempdir().expect("extension temp root");
     let bin_dir = root.path().join("bin");
-    let ui_dir = root.path().join("ui");
     fs::create_dir_all(&bin_dir).expect("create bin directory");
-    fs::create_dir_all(&ui_dir).expect("create ui directory");
     copy_executable(
         Path::new(env!("CARGO_BIN_EXE_elasticsearch-provider")),
         &bin_dir.join("elasticsearch-provider"),
     );
     fs::write(root.path().join("extension.json"), manifest(port)).expect("write manifest");
-    fs::write(
-        ui_dir.join("main.html"),
-        r#"<div id="elasticsearch-provider"><button id="refresh" action="refresh-resources" /></div>"#,
-    )
-    .expect("write declarative UI");
 
     let manifest = load_from_dir(root.path()).expect("load extension manifest");
     let catalog = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).expect("build catalog");
@@ -452,38 +433,6 @@ async fn provider_performs_authenticated_read_only_http_operations() {
             .expect("hits")
     );
 
-    let patch = harness
-        .client
-        .ui_action(&UiActionRequest {
-            request_id: "request-1".into(),
-            action: "refresh-resources".into(),
-            source_id: "refresh".into(),
-            source_path: Vec::new(),
-            payload: BTreeMap::new(),
-            expected_revision: Some(7),
-        })
-        .await
-        .expect("UI patch");
-    let serialized_patch = serde_json::to_string(&patch).expect("serialize patch");
-    assert_eq!(Some(7), patch.expected_revision);
-    let indices_json = patch
-        .operations
-        .iter()
-        .find_map(|operation| match operation {
-            extension_protocol::declarative_ui::UiStateOperation::Set { key, value }
-                if key == "indices_json" =>
-            {
-                Some(value)
-            }
-            _ => None,
-        })
-        .expect("indices UI state");
-    let indices: Value = serde_json::from_str(indices_json).expect("deserialize indices state");
-    assert_eq!(
-        "orders",
-        indices["indices"][0]["name"].as_str().expect("name")
-    );
-
     harness
         .client
         .close_resource(&ResourceCloseParams {
@@ -496,7 +445,7 @@ async fn provider_performs_authenticated_read_only_http_operations() {
     assert!(harness.cloned_session.is_closed());
 
     let records = harness.records.lock().expect("records lock");
-    assert_eq!(5, records.len());
+    assert_eq!(4, records.len());
     assert!(
         records
             .iter()
@@ -518,16 +467,11 @@ async fn provider_performs_authenticated_read_only_http_operations() {
         ("POST", "/_search"),
         (records[3].method.as_str(), records[3].target.as_str())
     );
-    assert_eq!(
-        ("GET", "/_cat/indices?format=json"),
-        (records[4].method.as_str(), records[4].target.as_str())
-    );
     assert!(
         records
             .iter()
             .all(|record| !record.body.contains("token-value"))
     );
-    assert!(!serialized_patch.contains("token-value"));
     drop(records);
     drop(harness.root);
 }

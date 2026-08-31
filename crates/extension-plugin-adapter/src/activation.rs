@@ -1,18 +1,17 @@
-//! Host-authoritative lazy activation for Declarative UI panels.
+//! Host-authoritative lazy activation for native IPC provider runtimes.
 //!
 //! This layer owns provider process sessions and activation references. It does
-//! not mount a GPUI panel or create a native window; those host UI operations
-//! are performed by a later integration layer after activation succeeds.
+//! not mount a GPUI view; a later gpui-shell integration layer consumes these
+//! runtime services after activation succeeds.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt,
     sync::Arc,
     time::Duration,
 };
 
 use crate::blob_store::BlobStore;
-use crate::dialog_activation::DialogActivationManager;
 use crate::event_activation::EventActivationManager;
 use crate::job_activation::{JobActivationHandle, JobActivationManager, RecoveredJob, RetiredJob};
 use crate::provider_permissions::ResourceOpenAuthorizer;
@@ -29,13 +28,12 @@ use extension_protocol::job::{
 };
 use extension_protocol::resource::{ResourceInvokeParams, ResourceInvokeResult};
 use extension_protocol::result_ref::ResultRef;
-use extension_runtime::extension::manifest::DeclarativePanelPlacement;
 use extension_runtime::{
     ExtensionRuntimeCatalog, RegisteredIpcRuntimeBinding, extension::manifest::current_host_version,
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use parking_lot::Mutex as SyncMutex;
+use parking_lot::{Mutex as SyncMutex, RwLock};
 use tokio::{
     sync::{Mutex, Notify, broadcast, mpsc},
     time::{Instant, sleep},
@@ -159,25 +157,8 @@ pub fn process_session_factory() -> SessionFactory {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ActivationError {
-    #[error("declarative panel `{panel_key}` is not registered")]
-    PanelNotFound { panel_key: String },
     #[error("IPC runtime `{runtime_id}` is not registered")]
     RuntimeNotFound { runtime_id: String },
-    #[error(
-        "runtime `{runtime_id}` is owned by extension `{extension_id}` and cannot serve panel `{panel_key}`"
-    )]
-    OwnerMismatch {
-        extension_id: String,
-        runtime_id: String,
-        panel_key: String,
-    },
-    #[error(
-        "registered declarative panel `{panel_key}` refers to unsupported runtime `{runtime_id}`"
-    )]
-    UnsupportedRuntime {
-        panel_key: String,
-        runtime_id: String,
-    },
     #[error("failed to activate runtime: {0}")]
     SessionStart(String),
     #[error("host blob cache operation failed: {0}")]
@@ -186,42 +167,6 @@ pub enum ActivationError {
     InvalidRuntime { runtime_id: String },
     #[error("runtime `{runtime_id}` has no active session")]
     RuntimeNotReady { runtime_id: String },
-}
-
-/// A UI-safe rendering source loaded by the host after activation.
-///
-/// Only validated text crosses this boundary. Filesystem paths and activation
-/// permissions remain private to [`ActivationManager`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeclarativePanelSource {
-    pub extension_id: String,
-    pub panel_key: String,
-    pub title: String,
-    pub template: String,
-    pub style: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PanelSourceError {
-    #[error("declarative panel `{panel_key}` is not registered")]
-    PanelNotFound { panel_key: String },
-    #[error(
-        "registered declarative panel `{panel_key}` refers to unsupported runtime `{runtime_id}`"
-    )]
-    UnsupportedRuntime {
-        panel_key: String,
-        runtime_id: String,
-    },
-    #[error(
-        "runtime `{runtime_id}` is owned by extension `{extension_id}` and cannot serve panel `{panel_key}`"
-    )]
-    OwnerMismatch {
-        extension_id: String,
-        runtime_id: String,
-        panel_key: String,
-    },
-    #[error("failed to load declarative panel `{panel_key}`: {message}")]
-    Io { panel_key: String, message: String },
 }
 
 /// Host-owned restart timing policy.
@@ -282,58 +227,23 @@ impl ActivationError {
     }
 }
 
-/// The result of a successful panel activation.
+/// The result of a successful runtime activation.
 ///
 /// This value describes ownership and is safe to copy into a UI entity. It does
 /// not own or control the provider process; shutdown remains manager-owned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivationHandle {
     pub extension_id: String,
-    pub panel_key: String,
     pub runtime_id: String,
-    /// Stable identity for this panel mount.
+    /// Stable identity for this activation mount.
     ///
     /// Unlike `runtime_generation`, this value survives provider process
-    /// restarts and changes only after the panel is fully released and
+    /// restarts and changes only after the activation is fully released and
     /// activated again.
     pub activation_id: u64,
     /// Process generation observed when activation completed.
     pub runtime_generation: u64,
     pub state: RuntimeActivationState,
-}
-
-/// A UI-facing, immutable catalog entry for a registered declarative panel.
-///
-/// This projection contains only rendering metadata. Activation authorization
-/// and runtime ownership remain exclusively in [`ActivationManager`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeclarativePanelDescriptor {
-    pub extension_id: String,
-    pub panel_key: String,
-    pub title: String,
-    pub runtime_id: String,
-    pub placement: DeclarativePanelPlacement,
-    pub icon: Option<String>,
-}
-
-fn panel_source_io_error(panel_key: &str, error: std::io::Error) -> PanelSourceError {
-    PanelSourceError::Io {
-        panel_key: panel_key.to_owned(),
-        message: error.to_string(),
-    }
-}
-
-impl<'a> From<&'a extension_runtime::RegisteredDeclarativePanel> for DeclarativePanelDescriptor {
-    fn from(panel: &'a extension_runtime::RegisteredDeclarativePanel) -> Self {
-        Self {
-            extension_id: panel.extension_id.clone(),
-            panel_key: panel.panel_key.clone(),
-            title: panel.title.clone(),
-            runtime_id: panel.runtime_id.clone(),
-            placement: panel.placement,
-            icon: panel.icon.clone(),
-        }
-    }
 }
 
 /// A typed client bound to one activation-owned session generation.
@@ -713,7 +623,7 @@ pub enum RuntimeActivationState {
 
 struct ActivatedRuntime {
     extension_id: String,
-    panels: BTreeMap<String, u64>,
+    activations: BTreeSet<u64>,
     state: RuntimeActivationState,
     session: Option<Arc<dyn ManagedRpcSession>>,
     start_generation: u64,
@@ -736,7 +646,7 @@ impl ActivationState {
         self.next_activation_id = self
             .next_activation_id
             .checked_add(1)
-            .expect("panel activation id space exhausted");
+            .expect("activation id space exhausted");
         activation_id
     }
 }
@@ -744,6 +654,45 @@ impl ActivationState {
 struct StartingRuntime {
     binding: RegisteredIpcRuntimeBinding,
     generation: u64,
+}
+
+struct StartClaimGuard {
+    state: Arc<SyncMutex<ActivationState>>,
+    runtime_id: String,
+    generation: u64,
+    armed: bool,
+}
+
+impl StartClaimGuard {
+    fn new(state: Arc<SyncMutex<ActivationState>>, runtime_id: String, generation: u64) -> Self {
+        Self {
+            state,
+            runtime_id,
+            generation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartClaimGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.state.lock();
+        let abandoned = state.runtimes.get(&self.runtime_id).is_some_and(|runtime| {
+            runtime.start_generation == self.generation
+                && runtime.factory_claimed
+                && runtime.session.is_none()
+        });
+        if abandoned {
+            state.runtimes.remove(&self.runtime_id);
+        }
+    }
 }
 
 enum CheckDecision {
@@ -757,12 +706,11 @@ enum CheckDecision {
 
 /// Manages lazy runtime starts, runtime sharing across panels, and reference-counted shutdown.
 pub struct ActivationManager {
-    catalog: Arc<ExtensionRuntimeCatalog>,
+    catalog: Arc<RwLock<Arc<ExtensionRuntimeCatalog>>>,
     session_factory: SessionFactory,
     host_api_factory: HostApiFactory,
     supervision_policy: SupervisionPolicy,
     blobs: Option<Arc<BlobStore>>,
-    dialogs: Option<Arc<DialogActivationManager>>,
     events: Option<Arc<EventActivationManager>>,
     jobs: Option<Arc<JobActivationManager>>,
     state: Arc<SyncMutex<ActivationState>>,
@@ -788,12 +736,11 @@ impl ActivationManager {
         host_api_factory: HostApiFactory,
     ) -> Self {
         Self {
-            catalog,
+            catalog: Arc::new(RwLock::new(catalog)),
             session_factory,
             host_api_factory,
             supervision_policy: SupervisionPolicy::default(),
             blobs: None,
-            dialogs: None,
             events: None,
             jobs: None,
             state: Arc::new(SyncMutex::new(ActivationState::default())),
@@ -817,35 +764,6 @@ impl ActivationManager {
 
     pub fn blob_store(&self) -> Option<&BlobStore> {
         self.blobs.as_deref()
-    }
-
-    /// Presents a provider-initiated dialog through the host-owned lifecycle.
-    ///
-    /// This service boundary keeps GPUI independent of reverse RPC wiring
-    /// while preserving the same generation and ownership checks.
-    pub async fn activate_dialog(
-        &self,
-        extension_id: &str,
-        runtime_id: &str,
-        request: extension_protocol::declarative_ui::UiDialogRequest,
-    ) -> Result<extension_protocol::declarative_ui::UiDialogResult, extension_host::HostError> {
-        let generation = self
-            .runtime_generation(runtime_id)
-            .map_err(|error| extension_host::HostError::NotImplemented(error.to_string()))?;
-        let Some(dialogs) = &self.dialogs else {
-            return Err(extension_host::HostError::NotImplemented(
-                "no dialog activation manager is attached".into(),
-            ));
-        };
-        dialogs
-            .show(extension_id, runtime_id, generation, request)
-            .await
-    }
-
-    /// Attaches the host-owned lifecycle manager for provider-initiated dialogs.
-    pub fn with_dialog_activation(mut self, dialogs: Arc<DialogActivationManager>) -> Self {
-        self.dialogs = Some(dialogs);
-        self
     }
 
     /// Attaches the host-owned lifecycle manager for provider event streams.
@@ -874,100 +792,79 @@ impl ActivationManager {
         Arc::new(self)
     }
 
-    pub async fn activate_panel(
+    pub fn replace_catalog(&self, catalog: Arc<ExtensionRuntimeCatalog>) {
+        *self.catalog.write() = catalog;
+    }
+
+    pub async fn activate_runtime(
         &self,
-        panel_key: &str,
+        runtime_id: &str,
     ) -> Result<ActivationHandle, ActivationError> {
         let (binding, runtime_id, generation, activation_id) = {
             let mut state = self.state.lock();
-            let matching: Vec<_> = self
-                .catalog
-                .declarative_panels()
-                .iter()
-                .filter(|panel| panel.panel_key == panel_key)
-                .collect();
-            let panel =
-                matching
-                    .first()
-                    .copied()
-                    .ok_or_else(|| ActivationError::PanelNotFound {
-                        panel_key: panel_key.to_owned(),
-                    })?;
-            if matching.len() != 1 {
-                return Err(ActivationError::InvalidRuntime {
-                    runtime_id: panel_key.to_owned(),
-                });
-            }
-
             let binding = self
                 .catalog
+                .read()
                 .ipc_runtime_bindings()
-                .find(|binding| binding.runtime_key == panel.runtime_id)
-                .ok_or_else(|| ActivationError::UnsupportedRuntime {
-                    panel_key: panel_key.to_owned(),
-                    runtime_id: panel.runtime_id.clone(),
+                .find(|binding| binding.runtime_key == runtime_id)
+                .cloned()
+                .ok_or_else(|| ActivationError::RuntimeNotFound {
+                    runtime_id: runtime_id.to_owned(),
                 })?;
-            if binding.extension_id != panel.extension_id {
-                return Err(ActivationError::OwnerMismatch {
-                    extension_id: binding.extension_id.clone(),
-                    runtime_id: panel.runtime_id.clone(),
-                    panel_key: panel_key.to_owned(),
-                });
-            }
 
-            if let Some(runtime) = state.runtimes.get_mut(&panel.runtime_id) {
-                let activation_id = if let Some(activation_id) = runtime.panels.get(panel_key) {
-                    *activation_id
-                } else {
-                    let activation_id = state.allocate_activation_id();
-                    state
-                        .runtimes
-                        .get_mut(&panel.runtime_id)
-                        .expect("runtime still exists")
-                        .panels
-                        .insert(panel_key.to_owned(), activation_id);
-                    activation_id
-                };
+            if state.runtimes.contains_key(runtime_id) {
+                let activation_id = state.allocate_activation_id();
                 let runtime = state
                     .runtimes
-                    .get(&panel.runtime_id)
+                    .get(runtime_id)
                     .expect("runtime still exists");
-                return Ok(ActivationHandle {
-                    extension_id: panel.extension_id.clone(),
-                    panel_key: panel_key.to_owned(),
-                    runtime_id: panel.runtime_id.clone(),
+                if runtime
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.is_closed())
+                {
+                    let runtime = state
+                        .runtimes
+                        .get_mut(runtime_id)
+                        .expect("runtime still exists");
+                    runtime.activations.insert(activation_id);
+                    return Ok(ActivationHandle {
+                        extension_id: runtime.extension_id.clone(),
+                        runtime_id: runtime_id.to_owned(),
+                        activation_id,
+                        runtime_generation: runtime.start_generation,
+                        state: runtime.state,
+                    });
+                }
+                (
+                    binding,
+                    runtime_id.to_owned(),
+                    runtime.start_generation,
                     activation_id,
-                    runtime_generation: runtime.start_generation,
-                    state: runtime.state,
-                });
+                )
+            } else {
+                let activation_id = state.allocate_activation_id();
+                let generation = state
+                    .deactivations
+                    .get(runtime_id)
+                    .map(|generation| generation + 1)
+                    .unwrap_or_default();
+                state.runtimes.insert(
+                    runtime_id.to_owned(),
+                    ActivatedRuntime {
+                        extension_id: binding.extension_id.clone(),
+                        activations: BTreeSet::new(),
+                        state: RuntimeActivationState::Starting,
+                        session: None,
+                        start_generation: generation,
+                        factory_claimed: false,
+                        restart_attempts: 0,
+                        next_restart_at: None,
+                    },
+                );
+
+                (binding, runtime_id.to_owned(), generation, activation_id)
             }
-
-            let activation_id = state.allocate_activation_id();
-            let generation = state
-                .deactivations
-                .get(&panel.runtime_id)
-                .map(|generation| generation + 1)
-                .unwrap_or_default();
-            state.runtimes.insert(
-                panel.runtime_id.clone(),
-                ActivatedRuntime {
-                    extension_id: binding.extension_id.clone(),
-                    panels: BTreeMap::from([(panel_key.to_owned(), activation_id)]),
-                    state: RuntimeActivationState::Starting,
-                    session: None,
-                    start_generation: generation,
-                    factory_claimed: false,
-                    restart_attempts: 0,
-                    next_restart_at: None,
-                },
-            );
-
-            (
-                binding.clone(),
-                panel.runtime_id.clone(),
-                generation,
-                activation_id,
-            )
         };
 
         let start_lock = {
@@ -988,14 +885,14 @@ impl ActivationManager {
                     runtime_id: runtime_id.clone(),
                 });
             }
-            if runtime.factory_claimed {
-                runtime
-                    .panels
-                    .entry(panel_key.to_owned())
-                    .or_insert(activation_id);
+            if runtime
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.is_closed())
+            {
+                runtime.activations.insert(activation_id);
                 return Ok(ActivationHandle {
                     extension_id: binding.extension_id.clone(),
-                    panel_key: panel_key.to_owned(),
                     runtime_id: runtime_id.clone(),
                     activation_id,
                     runtime_generation: runtime.start_generation,
@@ -1008,6 +905,11 @@ impl ActivationManager {
                 generation,
             }
         };
+        let mut claim_guard = StartClaimGuard::new(
+            Arc::clone(&self.state),
+            runtime_id.clone(),
+            starting.generation,
+        );
 
         let context = SessionContext {
             binding: starting.binding.clone(),
@@ -1031,14 +933,8 @@ impl ActivationManager {
             if let Some(runtime) = state.runtimes.get_mut(&runtime_id)
                 && runtime.start_generation == starting.generation
             {
-                runtime
-                    .panels
-                    .entry(panel_key.to_owned())
-                    .or_insert(activation_id);
+                runtime.activations.insert(activation_id);
                 runtime.state = RuntimeActivationState::Active;
-                if let Some(dialogs) = &self.dialogs {
-                    dialogs.mark_runtime_active(&runtime_id, starting.generation);
-                }
                 if let Some(events) = &self.events {
                     events.mark_runtime_active(&runtime_id, starting.generation);
                 }
@@ -1056,10 +952,10 @@ impl ActivationManager {
                 runtime_id: runtime_id.clone(),
             });
         }
+        claim_guard.disarm();
 
         Ok(ActivationHandle {
             extension_id: starting.binding.extension_id.clone(),
-            panel_key: panel_key.to_owned(),
             runtime_id,
             activation_id,
             runtime_generation: starting.generation,
@@ -1067,18 +963,17 @@ impl ActivationManager {
         })
     }
 
-    /// Releases exactly the UI activation represented by `handle`.
+    /// Releases exactly the activation represented by `handle`.
     ///
-    /// Stale handles are idempotent no-ops. In particular, a delayed GPUI tab
-    /// close cannot release a newer mount that reused the same panel key.
+    /// Stale handles are idempotent no-ops. In particular, a delayed GPUI view
+    /// close cannot release a newer mount that reused the same runtime.
     pub async fn deactivate_activation(
         &self,
         handle: &ActivationHandle,
     ) -> Result<(), ActivationError> {
-        let session = self.take_panel_session(
+        let session = self.take_activation_session(
             &handle.extension_id,
             &handle.runtime_id,
-            &handle.panel_key,
             handle.activation_id,
         )?;
         if let Some(session) = session {
@@ -1087,51 +982,20 @@ impl ActivationManager {
         Ok(())
     }
 
-    /// Legacy key-based release for non-UI callers.
-    ///
-    /// UI entities must retain and release an [`ActivationHandle`] so a stale
-    /// close cannot affect a replacement activation.
-    pub async fn deactivate_panel(&self, panel_key: &str) -> Result<(), ActivationError> {
-        let handle = {
-            let state = self.state.lock();
-            state.runtimes.iter().find_map(|(runtime_id, runtime)| {
-                runtime
-                    .panels
-                    .get(panel_key)
-                    .map(|activation_id| ActivationHandle {
-                        extension_id: runtime.extension_id.clone(),
-                        panel_key: panel_key.to_owned(),
-                        runtime_id: runtime_id.clone(),
-                        activation_id: *activation_id,
-                        runtime_generation: runtime.start_generation,
-                        state: runtime.state,
-                    })
-            })
-        };
-        match handle {
-            Some(handle) => self.deactivate_activation(&handle).await,
-            None => Ok(()),
-        }
-    }
-
-    fn take_panel_session(
+    fn take_activation_session(
         &self,
         extension_id: &str,
         runtime_id: &str,
-        panel_key: &str,
         activation_id: u64,
     ) -> Result<Option<Arc<dyn ManagedRpcSession>>, ActivationError> {
         let mut state = self.state.lock();
         let Some(runtime) = state.runtimes.get_mut(runtime_id) else {
             return Ok(None);
         };
-        if runtime.extension_id != extension_id
-            || runtime.panels.get(panel_key) != Some(&activation_id)
-        {
+        if runtime.extension_id != extension_id || !runtime.activations.remove(&activation_id) {
             return Ok(None);
         }
-        runtime.panels.remove(panel_key);
-        if !runtime.panels.is_empty() {
+        if !runtime.activations.is_empty() {
             return Ok(None);
         }
 
@@ -1144,11 +1008,11 @@ impl ActivationManager {
         if let Some(blobs) = &self.blobs {
             blobs.remove_generation(runtime_id, generation);
         }
-        if let Some(dialogs) = &self.dialogs {
-            dialogs.remove_runtime(runtime_id);
-        }
         if let Some(events) = &self.events {
             events.remove_runtime(runtime_id);
+        }
+        if let Some(jobs) = &self.jobs {
+            self.cleanup_retired_jobs(jobs.remove_runtime(runtime_id));
         }
         Ok(session)
     }
@@ -1163,6 +1027,7 @@ impl ActivationManager {
     ) -> Result<ManagedUniversalPluginClient, ActivationError> {
         let binding = self
             .catalog
+            .read()
             .ipc_runtime_bindings()
             .find(|binding| binding.runtime_key == runtime_id)
             .cloned()
@@ -1406,9 +1271,6 @@ impl ActivationManager {
                 if let Some(blobs) = &self.blobs {
                     blobs.remove_generation(runtime_id, runtime.start_generation);
                 }
-                if let Some(dialogs) = &self.dialogs {
-                    dialogs.remove_runtime(runtime_id);
-                }
                 if let Some(events) = &self.events {
                     events.remove_runtime(runtime_id);
                 }
@@ -1449,9 +1311,6 @@ impl ActivationManager {
                 state.deactivations.insert(key.clone(), generation);
                 if let Some(blobs) = &self.blobs {
                     blobs.remove_generation(&key, generation);
-                }
-                if let Some(dialogs) = &self.dialogs {
-                    dialogs.remove_runtime(&key);
                 }
                 if let Some(events) = &self.events {
                     events.remove_runtime(&key);
@@ -1501,93 +1360,6 @@ impl ActivationManager {
             })
     }
 
-    pub fn active_panel_keys(&self) -> BTreeSet<String> {
-        self.state
-            .lock()
-            .runtimes
-            .values()
-            .flat_map(|runtime| runtime.panels.keys().cloned())
-            .collect()
-    }
-
-    /// Returns a UI-facing projection of all registered declarative panels.
-    ///
-    /// Paths and activation permissions are intentionally omitted. The UI can
-    /// display these entries, but cannot activate a runtime by bypassing
-    /// [`ActivationManager::activate_panel`].
-    pub fn declarative_panel_catalog(&self) -> Vec<DeclarativePanelDescriptor> {
-        let mut panels: Vec<_> = self
-            .catalog
-            .declarative_panels()
-            .iter()
-            .map(DeclarativePanelDescriptor::from)
-            .collect();
-        panels.sort_by(|left, right| left.panel_key.cmp(&right.panel_key));
-        panels
-    }
-
-    /// Loads validated panel text without exposing paths to the UI.
-    ///
-    /// This does not start or inspect a runtime. The activation manager remains
-    /// the authorization boundary; callers should load sources only after a
-    /// successful activation and then mount the host-owned declarative view.
-    pub fn declarative_panel_source(
-        &self,
-        panel_key: &str,
-    ) -> Result<DeclarativePanelSource, PanelSourceError> {
-        let matching: Vec<_> = self
-            .catalog
-            .declarative_panels()
-            .iter()
-            .filter(|panel| panel.panel_key == panel_key)
-            .collect();
-        let panel = matching
-            .first()
-            .copied()
-            .ok_or_else(|| PanelSourceError::PanelNotFound {
-                panel_key: panel_key.to_owned(),
-            })?;
-        if matching.len() != 1 {
-            return Err(PanelSourceError::UnsupportedRuntime {
-                panel_key: panel_key.to_owned(),
-                runtime_id: panel.runtime_id.clone(),
-            });
-        }
-
-        let binding = self
-            .catalog
-            .ipc_runtime_bindings()
-            .find(|binding| binding.runtime_key == panel.runtime_id)
-            .ok_or_else(|| PanelSourceError::UnsupportedRuntime {
-                panel_key: panel_key.to_owned(),
-                runtime_id: panel.runtime_id.clone(),
-            })?;
-        if binding.extension_id != panel.extension_id {
-            return Err(PanelSourceError::OwnerMismatch {
-                extension_id: binding.extension_id.clone(),
-                runtime_id: panel.runtime_id.clone(),
-                panel_key: panel_key.to_owned(),
-            });
-        }
-
-        let template = fs::read_to_string(&panel.template_path)
-            .map_err(|error| panel_source_io_error(panel_key, error))?;
-        let style = panel
-            .style_path
-            .as_ref()
-            .map(|path| fs::read_to_string(path))
-            .transpose()
-            .map_err(|error| panel_source_io_error(panel_key, error))?;
-
-        Ok(DeclarativePanelSource {
-            extension_id: panel.extension_id.clone(),
-            panel_key: panel.panel_key.clone(),
-            title: panel.title.clone(),
-            template,
-            style,
-        })
-    }
-
     /// Inspect process health without changing process state.
     pub async fn runtime_health(&self, runtime_id: &str) -> Result<RuntimeHealth, ActivationError> {
         let session = self.active_session(runtime_id);
@@ -1626,6 +1398,7 @@ impl ActivationManager {
             })?;
             let binding = self
                 .catalog
+                .read()
                 .ipc_runtime_bindings()
                 .find(|binding| binding.runtime_key == runtime_id)
                 .cloned()
@@ -1718,10 +1491,6 @@ impl ActivationManager {
                         stale_session = runtime.session.replace(session);
                         if let Some(blobs) = &self.blobs {
                             blobs.remove_generation(runtime_id, generation);
-                        }
-                        if let Some(dialogs) = &self.dialogs {
-                            dialogs.retire_generation(runtime_id, generation);
-                            dialogs.mark_runtime_active(runtime_id, generation + 1);
                         }
                         if let Some(events) = &self.events {
                             events.retire_generation(runtime_id, generation);
@@ -1832,6 +1601,7 @@ impl ActivationManager {
 
     fn binding_restart_budget(&self, runtime_id: &str) -> Result<u32, ActivationError> {
         self.catalog
+            .read()
             .ipc_runtime_bindings()
             .find(|binding| binding.runtime_key == runtime_id)
             .map(|binding| binding.max_restart_attempts)
@@ -1893,7 +1663,7 @@ pub enum RuntimeMonitorError {
 impl fmt::Debug for RuntimeMonitor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuntimeMonitor")
-            .field("manager", &self.manager.catalog)
+            .field("manager_catalog", &*self.manager.catalog.read())
             .field("config", &self.config)
             .field("tracked_runtimes", &self.tracked_runtimes())
             .finish_non_exhaustive()

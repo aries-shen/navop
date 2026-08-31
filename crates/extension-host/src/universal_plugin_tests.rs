@@ -1,12 +1,9 @@
 //! `UniversalPluginClient` 的进程级协议契约测试。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use extension_protocol::{
     blob::{BlobCloseParams, BlobOpenParams, BlobReadParams},
-    declarative_ui::{
-        UiDialogKind, UiDialogRequest, UiDialogResult, UiWindowOperation, UiWindowRequest,
-    },
     envelope::{Response, RpcMessage},
     error::{ProtocolError, error_codes},
     event_stream::{EventCloseParams, EventOpenParams, EventReadParams},
@@ -61,12 +58,6 @@ async fn fake_extension(
                 json!({"events": [{"topic": "orders"}], "closed": true, "dropped_count": 0})
             }
             method::EVENT_CLOSE => Value::Null,
-            method::UI_ACTION => json!({
-                "expected_revision": 7,
-                "operations": [{"operation": "set", "key": "status", "value": "ready"}]
-            }),
-            method::UI_DIALOG => json!({"result": "prompt", "value": "orders"}),
-            method::UI_WINDOW => Value::Null,
             method::SHUTDOWN
             | method::RESOURCE_PING
             | method::RESOURCE_CLOSE
@@ -156,9 +147,6 @@ async fn resource_job_and_ui_methods_use_typed_wire_contracts() {
         method::RESOURCE_OPEN,
         method::RESOURCE_INVOKE,
         method::JOB_START,
-        method::UI_ACTION,
-        method::UI_DIALOG,
-        method::UI_WINDOW,
         method::BLOB_OPEN,
         method::BLOB_READ,
         method::BLOB_CLOSE,
@@ -219,64 +207,6 @@ async fn resource_job_and_ui_methods_use_typed_wire_contracts() {
     assert_eq!(
         method::JOB_START,
         observed.recv().await.expect("job request").0
-    );
-
-    let patch = client
-        .ui_action(&UiActionRequest {
-            request_id: "request-1".into(),
-            action: "refresh".into(),
-            source_id: "topics".into(),
-            source_path: vec![0, 1],
-            payload: BTreeMap::new(),
-            expected_revision: Some(7),
-        })
-        .await
-        .expect("ui action");
-    assert_eq!(Some(7), patch.expected_revision);
-    assert_eq!(1, patch.operations.len());
-    assert_eq!(
-        method::UI_ACTION,
-        observed.recv().await.expect("ui request").0
-    );
-
-    let dialog_result = client
-        .ui_dialog(&UiDialogRequest {
-            request_id: "request-2".into(),
-            dialog_id: "topic-name".into(),
-            kind: UiDialogKind::Prompt,
-            title: "Topic name".into(),
-            message: None,
-            confirm_label: None,
-            cancel_label: None,
-            danger: false,
-            expected_revision: None,
-        })
-        .await
-        .expect("ui dialog");
-    assert_eq!(
-        UiDialogResult::Prompt {
-            value: "orders".into()
-        },
-        dialog_result
-    );
-    assert_eq!(
-        method::UI_DIALOG,
-        observed.recv().await.expect("ui dialog request").0
-    );
-
-    client
-        .ui_window(&UiWindowRequest {
-            request_id: "request-3".into(),
-            window_id: "topic-detail".into(),
-            operation: UiWindowOperation::SetTitle {
-                title: "orders".into(),
-            },
-        })
-        .await
-        .expect("ui window");
-    assert_eq!(
-        method::UI_WINDOW,
-        observed.recv().await.expect("ui window request").0
     );
 
     let blob = client
@@ -457,51 +387,6 @@ async fn event_read_options_propagate_cancellation_to_the_provider() {
     let (method, params) = observed_rx.recv().await.unwrap();
     assert_eq!(method::CANCEL_REQUEST, method);
     assert!(params.get("id").is_some());
-}
-
-#[tokio::test]
-async fn invalid_ui_requests_fail_locally_without_sending_rpc() {
-    let (client, mut observed) = test_client(&[method::UI_DIALOG, method::UI_WINDOW]).await;
-
-    let dialog_error = client
-        .ui_dialog(&UiDialogRequest {
-            request_id: "bad id".into(),
-            dialog_id: "topic-name".into(),
-            kind: UiDialogKind::Prompt,
-            title: "Topic name".into(),
-            message: None,
-            confirm_label: None,
-            cancel_label: None,
-            danger: false,
-            expected_revision: None,
-        })
-        .await
-        .expect_err("invalid dialog");
-    assert!(matches!(
-        dialog_error,
-        HostError::InvalidParams { method, .. } if method == "ui/dialog"
-    ));
-
-    let window_error = client
-        .ui_window(&UiWindowRequest {
-            request_id: "request-1".into(),
-            window_id: "topic-detail".into(),
-            operation: UiWindowOperation::Open {
-                title: "Topic detail".into(),
-                width: 199,
-                height: 768,
-                panel_id: "kafka.topic-detail".into(),
-                modal: false,
-            },
-        })
-        .await
-        .expect_err("invalid window");
-    assert!(matches!(
-        window_error,
-        HostError::InvalidParams { method, .. } if method == "ui/window"
-    ));
-
-    assert!(observed.try_recv().is_err());
 }
 
 #[tokio::test]

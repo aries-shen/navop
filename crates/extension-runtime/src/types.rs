@@ -8,9 +8,7 @@ use one_core::{
 };
 use serde_json::Value;
 
-use crate::extension::manifest::{
-    CommandContrib, DeclarativePanelPlacement, RemoteFileEditorLaunchMode, WasmRuntimeKind,
-};
+use crate::extension::manifest::{CommandContrib, RemoteFileEditorLaunchMode, WasmRuntimeKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredRemoteFileEditorContribution {
@@ -83,20 +81,6 @@ pub struct RegisteredDocumentExporter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisteredDeclarativePanel {
-    pub extension_id: String,
-    pub id: String,
-    pub panel_key: String,
-    pub title: String,
-    pub runtime_id: String,
-    pub template_path: PathBuf,
-    pub style_path: Option<PathBuf>,
-    pub placement: DeclarativePanelPlacement,
-    pub icon: Option<String>,
-    pub activation: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredIpcRuntimeBinding {
     pub extension_id: String,
     pub runtime_key: String,
@@ -132,8 +116,6 @@ pub struct WasmRuntimeBinding {
 pub enum ExtensionRuntimeError {
     #[error("duplicate wasm runtime id: {id}")]
     DuplicateRuntime { id: String },
-    #[error("duplicate declarative panel id: {id}")]
-    DuplicateDeclarativePanel { id: String },
     #[error("unknown runtime_id `{runtime_id}` for command `{command_id}`")]
     UnknownRuntime {
         command_id: String,

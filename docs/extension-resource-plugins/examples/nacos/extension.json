@@ -10,9 +10,7 @@
   "permissions": [
     "net:tcp:nacos.example.com:8848",
     "secrets:read:nacos.*",
-    "spawn:./bin/nacos-provider",
-    "ui:tab",
-    "ui:notify"
+    "spawn:./bin/nacos-provider"
   ],
   "runtime": {
     "ipc": [
@@ -34,19 +32,6 @@
         "kind": "nacos",
         "label": "Nacos",
         "secretNamespace": "nacos"
-      }
-    ],
-    "declarativePanels": [
-      {
-        "id": "nacos",
-        "title": "Nacos",
-        "runtimeId": "main",
-        "template": "ui/main.html",
-        "placement": "home_sidebar",
-        "icon": "cloud",
-        "activation": [
-          "onConnectionKind:nacos"
-        ]
       }
     ]
   }

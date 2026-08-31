@@ -1,27 +1,19 @@
-//! Application-owned lifecycle for universal resource plugin panels.
+//! Application-owned lifecycle for universal resource plugin runtimes.
 //!
-//! GPUI code may render catalog metadata and dispatch activation intents, but
-//! this service remains the sole owner of provider processes and supervision.
+//! GPUI code may dispatch activation intents, but this service remains the
+//! sole owner of provider processes and supervision.
 
-use std::collections::BTreeSet;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use extension_plugin_adapter::{
-    ActivationError, ActivationHandle, ActivationManager, DeclarativePanelDescriptor,
-    DeclarativePanelSource, DialogActivationManager, DialogHostProvider, EventActivationManager,
-    HostApiFactory, PanelSourceError, QueueingDialogPresenter, RuntimeActivationState,
+    ActivationError, ActivationHandle, ActivationManager, EventActivationManager, HostApiFactory,
     RuntimeHealth, RuntimeMonitor, RuntimeMonitorConfig, RuntimeMonitorEvent, SessionFactory,
     UniversalProviderHost,
 };
-use extension_runtime::{
-    ExtensionRuntimeCatalog, GlobalExtensionRuntimeCatalog,
-    extension::manifest::DeclarativePanelPlacement,
-};
-use gpui::SharedString;
-use gpui_component::{IconName, IconNamed};
+use extension_runtime::{ExtensionRuntimeCatalog, GlobalExtensionRuntimeCatalog};
 use one_core::gpui_tokio::Tokio;
 
 /// A global wrapper that gives the service exactly one application owner.
@@ -47,95 +39,18 @@ impl GlobalUniversalPluginService {
 pub(crate) struct UniversalPluginService {
     manager: Arc<ActivationManager>,
     monitor: Arc<RuntimeMonitor>,
-    dialogs: Arc<DialogActivationManager>,
+    catalog_source: GlobalExtensionRuntimeCatalog,
+    catalog_revision: Arc<AtomicU64>,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
     stopped: Arc<AtomicBool>,
 }
 
-/// A GPUI-owned descriptor projected from the host catalog.
-///
-/// The icon is retained because it is UI metadata; activation permissions and
-/// filesystem paths intentionally never cross this boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UniversalPanelDescriptor {
-    pub extension_id: String,
-    pub panel_key: String,
-    pub title: SharedString,
-    pub runtime_id: String,
-    pub placement: UniversalPanelPlacement,
-    pub icon: Option<SharedString>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UniversalPanelPlacement {
-    HomeSidebar,
-    HomeTab,
-}
-
-impl From<DeclarativePanelDescriptor> for UniversalPanelDescriptor {
-    fn from(panel: DeclarativePanelDescriptor) -> Self {
-        Self {
-            extension_id: panel.extension_id,
-            panel_key: panel.panel_key,
-            title: panel.title.into(),
-            runtime_id: panel.runtime_id,
-            placement: match panel.placement {
-                DeclarativePanelPlacement::HomeSidebar => UniversalPanelPlacement::HomeSidebar,
-                DeclarativePanelPlacement::HomeTab => UniversalPanelPlacement::HomeTab,
-            },
-            icon: panel
-                .icon
-                .and_then(|icon| universal_plugin_icon_path(&icon)),
-        }
-    }
-}
-
-fn universal_plugin_icon_path(icon: &str) -> Option<SharedString> {
-    match icon {
-        "database" => Some(IconName::Database),
-        "search" => Some(IconName::Search),
-        "globe" => Some(IconName::Globe),
-        "terminal" => Some(IconName::TerminalColor),
-        "extensions" => Some(IconName::ExtensionsColor),
-        "box" => Some(IconName::Apps),
-        "radio" => Some(IconName::SerialPort),
-        "cluster" => Some(IconName::Network),
-        "cloud" => Some(IconName::DockerColor),
-        "send" => Some(IconName::Export),
-        _ => None,
-    }
-    .map(IconNamed::path)
-}
-
-/// A compact status snapshot safe to render without awaiting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UniversalPluginStatus {
-    Starting,
-    Restarting,
-    Active,
-    Degraded,
-    Failed,
-    CrashLoop,
-}
-
-impl From<RuntimeActivationState> for UniversalPluginStatus {
-    fn from(state: RuntimeActivationState) -> Self {
-        match state {
-            RuntimeActivationState::Starting => Self::Starting,
-            RuntimeActivationState::Restarting => Self::Restarting,
-            RuntimeActivationState::Active => Self::Active,
-            RuntimeActivationState::Degraded => Self::Degraded,
-            RuntimeActivationState::Failed => Self::Failed,
-            RuntimeActivationState::CrashLoop => Self::CrashLoop,
-        }
-    }
-}
-
 impl UniversalPluginService {
-    fn from_catalog(catalog: Arc<ExtensionRuntimeCatalog>) -> Self {
-        let dialogs = Arc::new(DialogActivationManager::new(Arc::new(
-            QueueingDialogPresenter::default(),
-        )));
+    fn from_catalog_source(catalog_source: GlobalExtensionRuntimeCatalog) -> Self {
+        let catalog_revision = catalog_source.revision();
+        let catalog = catalog_source
+            .get()
+            .unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
         let events = Arc::new(EventActivationManager::new());
         let jobs = Arc::new(extension_plugin_adapter::JobActivationManager::new());
         let blobs = extension_plugin_adapter::BlobStore::default();
@@ -143,10 +58,9 @@ impl UniversalPluginService {
             ActivationManager::from_shared_catalog(
                 catalog,
                 production_session_factory(),
-                production_host_api_factory(Arc::clone(&dialogs), blobs.clone()),
+                production_host_api_factory(blobs.clone()),
             )
             .with_blob_store(blobs)
-            .with_dialog_activation(Arc::clone(&dialogs))
             .with_job_activation(jobs)
             .with_event_activation(Arc::clone(&events)),
         );
@@ -157,25 +71,8 @@ impl UniversalPluginService {
         Self {
             manager,
             monitor,
-            dialogs,
-            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
-            stopped: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_activation_manager(manager: ActivationManager) -> Self {
-        let manager = Arc::new(manager);
-        let monitor = Arc::new(RuntimeMonitor::new(
-            Arc::clone(&manager),
-            RuntimeMonitorConfig::default(),
-        ));
-        Self {
-            manager,
-            monitor,
-            dialogs: Arc::new(DialogActivationManager::new(Arc::new(
-                QueueingDialogPresenter::default(),
-            ))),
+            catalog_source,
+            catalog_revision: Arc::new(AtomicU64::new(catalog_revision)),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             stopped: Arc::new(AtomicBool::new(false)),
         }
@@ -186,22 +83,7 @@ impl UniversalPluginService {
         Arc::ptr_eq(&self.manager, &other.manager) && Arc::ptr_eq(&self.monitor, &other.monitor)
     }
 
-    /// UI-safe catalog projection without template/style paths or permissions.
-    pub(crate) fn panel_catalog(&self) -> Vec<DeclarativePanelDescriptor> {
-        self.manager.declarative_panel_catalog()
-    }
-
-    /// Loads UI-safe panel text through the activation manager boundary.
-    ///
-    /// This is deliberately not part of the catalog projection: source loading
-    /// happens only after activation, and paths never reach GPUI.
-    pub(crate) fn panel_source(
-        &self,
-        panel_key: &str,
-    ) -> Result<DeclarativePanelSource, PanelSourceError> {
-        self.manager.declarative_panel_source(panel_key)
-    }
-
+    #[allow(dead_code)]
     pub(crate) fn runtime_healths(&self) -> Vec<(String, RuntimeHealth)> {
         self.monitor
             .runtime_healths()
@@ -209,36 +91,23 @@ impl UniversalPluginService {
             .collect::<Vec<_>>()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<RuntimeMonitorEvent> {
         self.monitor.subscribe()
     }
 
-    pub(crate) async fn activate_panel(
+    /// Activates a provider runtime by its namespaced runtime id.
+    ///
+    /// The returned handle is the caller's activation lease: release it with
+    /// [`UniversalPluginService::deactivate_activation`].
+    pub(crate) async fn activate_runtime(
         &self,
-        panel_key: &str,
+        runtime_id: &str,
     ) -> Result<ActivationHandle, ActivationError> {
-        let handle = self.manager.activate_panel(panel_key).await?;
+        self.sync_catalog();
+        let handle = self.manager.activate_runtime(runtime_id).await?;
         self.monitor.track(handle.runtime_id.clone());
         Ok(handle)
-    }
-
-    pub(crate) async fn deactivate_panel(&self, panel_key: &str) -> Result<(), ActivationError> {
-        let runtime_id = self
-            .panel_catalog()
-            .into_iter()
-            .find(|panel| panel.panel_key == panel_key)
-            .map(|panel| panel.runtime_id);
-        let result = self.manager.deactivate_panel(panel_key).await;
-        if result.is_ok()
-            && let Some(runtime_id) = runtime_id
-        {
-            // Keep monitoring a runtime while another panel still references it,
-            // even if its first session is still starting and has no client yet.
-            if self.manager.runtime_state(&runtime_id).is_err() {
-                self.monitor.untrack(&runtime_id);
-            }
-        }
-        result
     }
 
     pub(crate) async fn deactivate_activation(
@@ -252,40 +121,14 @@ impl UniversalPluginService {
         result
     }
 
-    #[cfg(test)]
+    /// Returns the current session generation for restart-aware clients.
     #[allow(dead_code)]
-    pub(crate) async fn deactivate_extension(
-        &self,
-        extension_id: &str,
-    ) -> Result<(), ActivationError> {
-        let runtime_ids: Vec<String> = self
-            .panel_catalog()
-            .into_iter()
-            .filter(|panel| panel.extension_id == extension_id)
-            .map(|panel| panel.runtime_id)
-            .collect::<Vec<_>>();
-        let result = self.manager.deactivate_extension(extension_id).await;
-        if result.is_ok() {
-            for runtime_id in runtime_ids {
-                self.monitor.untrack(&runtime_id);
-            }
-        }
-        result
-    }
-
-    pub(crate) fn active_panel_keys(&self) -> BTreeSet<String> {
-        self.manager.active_panel_keys()
-    }
-
-    /// Returns the current session generation for restart-aware panel clients.
     pub(crate) fn runtime_generation(&self, runtime_id: &str) -> Result<u64, ActivationError> {
         self.manager.runtime_generation(runtime_id)
     }
 
     /// Acquires a client bound to the current activation-owned session.
-    ///
-    /// The panel compares the returned generation with its mount-time value to
-    /// avoid applying a stale provider patch after supervisor replacement.
+    #[allow(dead_code)]
     pub(crate) fn universal_plugin_client(
         &self,
         runtime_id: &str,
@@ -293,9 +136,11 @@ impl UniversalPluginService {
         extension_plugin_adapter::ManagedUniversalPluginClient,
         extension_plugin_adapter::ActivationError,
     > {
+        self.sync_catalog();
         self.manager.universal_plugin_client(runtime_id)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn invoke_resource_and_cache_blob(
         &self,
         runtime_id: &str,
@@ -304,20 +149,36 @@ impl UniversalPluginService {
         extension_protocol::resource::ResourceInvokeResult,
         extension_plugin_adapter::ActivationError,
     > {
+        self.sync_catalog();
         self.manager
             .invoke_resource_and_cache_blob(runtime_id, params)
             .await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn job_result_and_cache_blob(
         &self,
         runtime_id: &str,
         params: &extension_protocol::job::JobResultParams,
     ) -> Result<extension_protocol::job::JobResultResult, extension_plugin_adapter::ActivationError>
     {
+        self.sync_catalog();
         self.manager
             .job_result_and_cache_blob(runtime_id, params)
             .await
+    }
+
+    fn sync_catalog(&self) {
+        let revision = self.catalog_source.revision();
+        if self.catalog_revision.load(Ordering::Acquire) == revision {
+            return;
+        }
+        let catalog = self
+            .catalog_source
+            .get()
+            .unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
+        self.manager.replace_catalog(catalog);
+        self.catalog_revision.store(revision, Ordering::Release);
     }
 
     /// Gracefully stops active runtimes and then stops the monitor task.
@@ -354,12 +215,9 @@ fn production_session_factory() -> SessionFactory {
     extension_plugin_adapter::process_session_factory()
 }
 
-fn production_host_api_factory(
-    dialogs: Arc<DialogActivationManager>,
-    blobs: extension_plugin_adapter::BlobStore,
-) -> HostApiFactory {
+fn production_host_api_factory(blobs: extension_plugin_adapter::BlobStore) -> HostApiFactory {
     Arc::new(move |binding, generation| {
-        let base = UniversalProviderHost::new(
+        let host = UniversalProviderHost::new(
             binding.permissions.iter().cloned(),
             Arc::new(extension_plugin_adapter::MapSecretResolver::default()),
         )
@@ -370,14 +228,7 @@ fn production_host_api_factory(
                 generation,
             },
         );
-        let dialog_host = DialogHostProvider::new(
-            binding.extension_id.clone(),
-            binding.runtime_key.clone(),
-            generation,
-            Arc::clone(&dialogs),
-            Arc::new(base),
-        );
-        Arc::new(extension_host::HostApiHandler::new(Arc::new(dialog_host)))
+        Arc::new(extension_host::HostApiHandler::new(Arc::new(host)))
     })
 }
 
@@ -387,15 +238,15 @@ pub(crate) fn init(cx: &mut gpui::App) {
         "universal plugin service must have exactly one application owner"
     );
 
-    let catalog = cx
-        .default_global::<GlobalExtensionRuntimeCatalog>()
-        .get()
-        .unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
-    let global = GlobalUniversalPluginService::new(UniversalPluginService::from_catalog(catalog));
+    let catalog_source = cx.default_global::<GlobalExtensionRuntimeCatalog>().clone();
+    let global = GlobalUniversalPluginService::new(UniversalPluginService::from_catalog_source(
+        catalog_source,
+    ));
     let service = global.service();
     let startup_service = service.clone();
     let quit_service = service.clone();
     cx.set_global(global);
+    cx.set_global(crate::shell_plugin_host::ShellPluginHost::new(service));
 
     // RuntimeMonitor::start must be called from the Tokio runtime. Starting it
     // through a spawned task also keeps startup off the GPUI foreground thread.
@@ -430,43 +281,6 @@ pub(crate) fn spawn_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn universal_panel_projection_keeps_only_ui_metadata() {
-        let descriptor = DeclarativePanelDescriptor {
-            extension_id: "elasticsearch".to_owned(),
-            panel_key: "elasticsearch.cluster".to_owned(),
-            title: "Elasticsearch".to_owned(),
-            runtime_id: "elasticsearch.runtime".to_owned(),
-            placement: DeclarativePanelPlacement::HomeSidebar,
-            icon: Some("search".to_owned()),
-        };
-
-        let panel = UniversalPanelDescriptor::from(descriptor);
-
-        assert_eq!(panel.extension_id, "elasticsearch");
-        assert_eq!(panel.panel_key, "elasticsearch.cluster");
-        assert_eq!(panel.title.as_ref(), "Elasticsearch");
-        assert_eq!(panel.runtime_id, "elasticsearch.runtime");
-        assert_eq!(panel.placement, UniversalPanelPlacement::HomeSidebar);
-        assert_eq!(panel.icon.as_deref(), Some("icons/search.svg"));
-    }
-
-    #[test]
-    fn universal_panel_projection_converts_manifest_icon_to_asset_path() {
-        let descriptor = DeclarativePanelDescriptor {
-            extension_id: "kubernetes".to_owned(),
-            panel_key: "kubernetes.cluster".to_owned(),
-            title: "Kubernetes".to_owned(),
-            runtime_id: "kubernetes.runtime".to_owned(),
-            placement: DeclarativePanelPlacement::HomeSidebar,
-            icon: Some("cluster".to_owned()),
-        };
-
-        let panel = UniversalPanelDescriptor::from(descriptor);
-
-        assert_eq!(panel.icon.as_deref(), Some("icons/network.svg"));
-    }
 
     #[gpui::test]
     fn universal_plugin_service_has_one_application_owner(cx: &mut gpui::TestAppContext) {

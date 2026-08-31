@@ -3,11 +3,7 @@ use crate::navigation_quick_open::{
     NavigationApplication, NavigationAvailability, is_overflow_connection_type,
     leading_navigation_applications, trailing_navigation_applications, visible_connection_types,
 };
-use crate::universal_plugins::{
-    GlobalUniversalPluginService, UniversalPanelDescriptor, UniversalPanelPlacement,
-    UniversalPluginStatus,
-};
-use gpui_component::{IconNamed, Selectable as _};
+use gpui_component::Selectable as _;
 
 pub(super) struct LegacyApplicationNavigationConfig {
     pub collapsed: bool,
@@ -78,7 +74,6 @@ impl HomePage {
             footer =
                 footer.child(self.render_legacy_application_button(application, collapsed, cx));
         }
-        footer = footer.child(self.render_universal_plugin_navigation(collapsed, cx));
         footer = footer.child(self.render_legacy_sidebar_button(
             LegacySidebarButton {
                 id: "legacy-more-applications",
@@ -98,71 +93,6 @@ impl HomePage {
         footer
             .child(self.render_legacy_user(collapsed, rail_item_size, cx))
             .into_any_element()
-    }
-
-    fn render_universal_plugin_navigation(
-        &self,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(service) = cx
-            .try_global::<GlobalUniversalPluginService>()
-            .map(|global| global.service())
-        else {
-            return v_flex().into_any_element();
-        };
-        let active_panels = service.active_panel_keys();
-        let mut navigation = v_flex().w_full().gap_2();
-        let panels = self
-            .universal_plugin_panels
-            .iter()
-            .filter(|panel| panel.placement == UniversalPanelPlacement::HomeSidebar)
-            .map(|panel| {
-                universal_plugin_navigation_entry(
-                    panel,
-                    &self.universal_plugin_status,
-                    &self.activating_universal_panels,
-                )
-            })
-            .enumerate();
-
-        for (index, panel) in panels {
-            let panel_key = panel.panel_key.clone();
-            let label = panel.label.clone();
-            let selected = active_panels.contains(panel_key.as_str()) || panel.activating;
-            let icon = panel
-                .icon
-                .clone()
-                .unwrap_or_else(|| IconName::ExtensionsColor.path());
-            let id: SharedString = format!("legacy-universal-plugin-sidebar-{index}").into();
-
-            navigation = navigation.child(if collapsed {
-                IconButton::new(id, Icon::default().path(icon).color())
-                    .hit_size(Size::Size(cx.theme().geometry.layout.global_rail_item))
-                    .glyph_size(one_ui::IconSize::Small)
-                    .selected(selected)
-                    .when(selected, |button| button.bg(cx.theme().list_active))
-                    .tooltip(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_universal_panel(&panel_key, window, cx);
-                    }))
-                    .into_any_element()
-            } else {
-                Button::new(id)
-                    .icon(Icon::default().path(icon).color())
-                    .label(label)
-                    .w_full()
-                    .justify_start()
-                    .selected(selected)
-                    .when(selected, |button| button.bg(cx.theme().list_active))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_universal_panel(&panel_key, window, cx);
-                    }))
-                    .into_any_element()
-            });
-        }
-
-        navigation.into_any_element()
     }
 
     fn render_legacy_filter(
@@ -321,28 +251,6 @@ impl HomePage {
     }
 }
 
-struct UniversalPluginNavigationEntry {
-    panel_key: String,
-    label: SharedString,
-    icon: Option<SharedString>,
-    activating: bool,
-}
-
-fn universal_plugin_navigation_entry(
-    panel: &UniversalPanelDescriptor,
-    statuses: &BTreeMap<String, UniversalPluginStatus>,
-    activating_panels: &HashSet<String>,
-) -> UniversalPluginNavigationEntry {
-    let activating = activating_panels.contains(&panel.panel_key);
-    let status = statuses.get(&panel.runtime_id).copied();
-    UniversalPluginNavigationEntry {
-        label: universal_plugin_sidebar_label(panel.title.clone(), activating, status),
-        icon: panel.icon.clone(),
-        panel_key: panel.panel_key.clone(),
-        activating,
-    }
-}
-
 fn render_legacy_filter_label(
     filter: ConnectionType,
     selected: bool,
@@ -382,23 +290,5 @@ fn legacy_application_icon(application: NavigationApplication) -> IconName {
         NavigationApplication::CredentialVault => IconName::Key,
         NavigationApplication::Extensions => IconName::ExtensionsLine,
         NavigationApplication::Settings => IconName::Settings,
-    }
-}
-
-fn universal_plugin_sidebar_label(
-    title: SharedString,
-    activating: bool,
-    status: Option<UniversalPluginStatus>,
-) -> SharedString {
-    if activating {
-        return format!("{title} · activating…").into();
-    }
-    match status {
-        Some(UniversalPluginStatus::Active) | None => title,
-        Some(UniversalPluginStatus::Starting) => format!("{title} · starting").into(),
-        Some(UniversalPluginStatus::Restarting) => format!("{title} · restarting").into(),
-        Some(UniversalPluginStatus::Degraded) => format!("{title} · degraded").into(),
-        Some(UniversalPluginStatus::Failed) => format!("{title} · failed").into(),
-        Some(UniversalPluginStatus::CrashLoop) => format!("{title} · crash loop").into(),
     }
 }

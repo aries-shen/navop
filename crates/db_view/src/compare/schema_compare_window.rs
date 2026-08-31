@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::db_object_selector::DbSelectorKind;
 use db::{DbNode, DbNodeType, GlobalDbState};
-use extension_component::DbSelectorKind;
 use gpui::{
     App, AppContext, AsyncApp, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled,

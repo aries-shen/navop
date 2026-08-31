@@ -3,13 +3,11 @@
 //! 扩展可以通过 JSON-RPC 请求调用宿主提供的能力：
 //! - `host/request_credential`: 请求凭证
 //! - `host/notify`: 发送通知
-//! - `host/quick_pick`: 显示快速选择对话框
-//! - `host/open_view`: 打开视图
 //! - `host/storage/*`: 键值存储
+//! - `host/blob/*`: 上传宿主管理的 blob
 
 use std::sync::Arc;
 
-use extension_protocol::declarative_ui::{UiDialogRequest, UiDialogResult};
 use extension_protocol::error::{ErrorData, ProtocolError, error_codes};
 use extension_protocol::host;
 use extension_protocol::host_blob::{
@@ -45,12 +43,6 @@ pub trait HostApiProvider: Send + Sync {
     /// 发送通知给用户，返回用户点击的 action id。
     async fn notify(&self, params: host::NotifyParams) -> HostResult<host::NotifyResult>;
 
-    /// 显示快速选择对话框。
-    async fn quick_pick(&self, params: host::QuickPickParams) -> HostResult<host::QuickPickResult>;
-
-    /// 打开视图（对话框、面板等）。
-    async fn open_view(&self, params: host::OpenViewParams) -> HostResult<()>;
-
     /// 从键值存储读取。
     async fn storage_get(
         &self,
@@ -62,12 +54,6 @@ pub trait HostApiProvider: Send + Sync {
 
     /// 记录日志（扩展发送的日志）。
     async fn log(&self, params: host::LogParams) -> HostResult<()>;
-
-    /// Shows a host-owned declarative dialog and returns one explicit user result.
-    ///
-    /// This is the provider-originated direction of the versioned `ui/dialog`
-    /// contract. Implementations must not expose native window objects.
-    async fn show_dialog(&self, params: UiDialogRequest) -> HostResult<UiDialogResult>;
 
     /// Starts a provider upload into host-authoritative blob storage.
     async fn host_blob_begin(
@@ -146,18 +132,6 @@ impl HostApiHandler {
                 let result = self.provider.notify(params).await?;
                 Ok(serde_json::to_value(result).expect("notify result must serialize"))
             }
-            extension_protocol::method::HOST_QUICK_PICK => {
-                let params: host::QuickPickParams =
-                    serde_json::from_value(params).map_err(|e| HostError::Serde(e))?;
-                let result = self.provider.quick_pick(params).await?;
-                Ok(serde_json::to_value(result).expect("quick pick result must serialize"))
-            }
-            extension_protocol::method::HOST_OPEN_VIEW => {
-                let params: host::OpenViewParams =
-                    serde_json::from_value(params).map_err(|e| HostError::Serde(e))?;
-                self.provider.open_view(params).await?;
-                Ok(Value::Null)
-            }
             extension_protocol::method::HOST_STORAGE_GET => {
                 let params: host::StorageGetParams =
                     serde_json::from_value(params).map_err(|e| HostError::Serde(e))?;
@@ -175,12 +149,6 @@ impl HostApiHandler {
                     serde_json::from_value(params).map_err(|e| HostError::Serde(e))?;
                 self.provider.log(params).await?;
                 Ok(Value::Null)
-            }
-            extension_protocol::method::UI_DIALOG => {
-                let params: UiDialogRequest =
-                    serde_json::from_value(params).map_err(HostError::Serde)?;
-                let result = self.provider.show_dialog(params).await?;
-                Ok(serde_json::to_value(result).expect("dialog result must serialize"))
             }
             extension_protocol::method::HOST_BLOB_BEGIN => {
                 let params = serde_json::from_value(params).map_err(HostError::Serde)?;
@@ -248,20 +216,6 @@ mod tests {
             Ok(host::NotifyResult { clicked: None })
         }
 
-        async fn quick_pick(
-            &self,
-            _params: host::QuickPickParams,
-        ) -> HostResult<host::QuickPickResult> {
-            Ok(host::QuickPickResult {
-                selected: vec!["option1".into()],
-                cancelled: false,
-            })
-        }
-
-        async fn open_view(&self, _params: host::OpenViewParams) -> HostResult<()> {
-            Ok(())
-        }
-
         async fn storage_get(
             &self,
             _params: host::StorageGetParams,
@@ -275,10 +229,6 @@ mod tests {
 
         async fn log(&self, _params: host::LogParams) -> HostResult<()> {
             Ok(())
-        }
-
-        async fn show_dialog(&self, _params: UiDialogRequest) -> HostResult<UiDialogResult> {
-            Ok(UiDialogResult::Cancelled)
         }
 
         async fn host_blob_begin(

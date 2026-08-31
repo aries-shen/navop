@@ -505,7 +505,6 @@ fn wake_all_pending(shared: &Arc<ClientShared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_protocol::declarative_ui::{UiDialogRequest, UiDialogResult};
     use extension_protocol::envelope::{Notification, Response, RpcMessage};
     use extension_protocol::host::{ResolveSecretParams, ResolveSecretResult};
     use extension_protocol::{conn::SecretRef, host};
@@ -649,17 +648,6 @@ mod tests {
                 unimplemented!()
             }
 
-            async fn quick_pick(
-                &self,
-                _params: host::QuickPickParams,
-            ) -> HostResult<host::QuickPickResult> {
-                unimplemented!()
-            }
-
-            async fn open_view(&self, _params: host::OpenViewParams) -> HostResult<()> {
-                unimplemented!()
-            }
-
             async fn storage_get(
                 &self,
                 _params: host::StorageGetParams,
@@ -672,10 +660,6 @@ mod tests {
             }
 
             async fn log(&self, _params: host::LogParams) -> HostResult<()> {
-                unimplemented!()
-            }
-
-            async fn show_dialog(&self, _params: UiDialogRequest) -> HostResult<UiDialogResult> {
                 unimplemented!()
             }
         }

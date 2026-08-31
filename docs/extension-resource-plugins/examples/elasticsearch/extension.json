@@ -10,10 +10,7 @@
   "permissions": [
     "net:tcp:elasticsearch.example.com:9200",
     "secrets:read:elasticsearch.*",
-    "spawn:./bin/elasticsearch-provider",
-    "ui:tab",
-    "ui:notify",
-    "ui:progress"
+    "spawn:./bin/elasticsearch-provider"
   ],
   "runtime": {
     "ipc": [
@@ -35,19 +32,6 @@
         "kind": "elasticsearch",
         "label": "Elasticsearch",
         "secretNamespace": "elasticsearch"
-      }
-    ],
-    "declarativePanels": [
-      {
-        "id": "elasticsearch",
-        "title": "Elasticsearch",
-        "runtimeId": "main",
-        "template": "ui/main.html",
-        "placement": "home_sidebar",
-        "icon": "search",
-        "activation": [
-          "onConnectionKind:elasticsearch"
-        ]
       }
     ]
   }

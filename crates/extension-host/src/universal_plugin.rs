@@ -4,12 +4,8 @@
 //! `ResourceInvokeParams::method` 或 `JobStartParams::method` 传递 namespaced
 //! method，不在宿主侧扩展成领域枚举。
 
-use extension_protocol::declarative_ui::{validate_ui_dialog_request, validate_ui_window_request};
 use extension_protocol::{
     blob::{BlobCloseParams, BlobOpenParams, BlobOpenResult, BlobReadParams, BlobReadResult},
-    declarative_ui::{
-        UiActionRequest, UiDialogRequest, UiDialogResult, UiStatePatch, UiWindowRequest,
-    },
     event_stream::{
         EventCloseParams, EventOpenParams, EventOpenResult, EventReadParams, EventReadResult,
     },
@@ -30,7 +26,7 @@ use crate::{HostError, HostResult, ProcessRpcSession, RequestOptions};
 
 pub type OpenAuthorizer = Arc<dyn Fn(&ResourceOpenParams) -> HostResult<()> + Send + Sync>;
 
-/// 在一个已协商的进程 session 上调用通用资源、任务与 Declarative UI 协议。
+/// 在一个已协商的进程 session 上调用通用资源、任务、事件与 blob 协议。
 #[derive(Clone)]
 pub struct UniversalPluginClient {
     session: Arc<ProcessRpcSession>,
@@ -131,22 +127,6 @@ impl UniversalPluginClient {
 
     pub async fn close_event_stream(&self, params: &EventCloseParams) -> HostResult<()> {
         self.request(method::EVENT_CLOSE, params).await
-    }
-
-    pub async fn ui_action(&self, params: &UiActionRequest) -> HostResult<UiStatePatch> {
-        self.request(method::UI_ACTION, params).await
-    }
-
-    pub async fn ui_dialog(&self, params: &UiDialogRequest) -> HostResult<UiDialogResult> {
-        validate_ui_dialog_request(params)
-            .map_err(|error| HostError::invalid_params(method::UI_DIALOG, error.to_string()))?;
-        self.request(method::UI_DIALOG, params).await
-    }
-
-    pub async fn ui_window(&self, params: &UiWindowRequest) -> HostResult<()> {
-        validate_ui_window_request(params)
-            .map_err(|error| HostError::invalid_params(method::UI_WINDOW, error.to_string()))?;
-        self.request(method::UI_WINDOW, params).await
     }
 
     async fn request<P, R>(&self, method_name: &str, params: &P) -> HostResult<R>

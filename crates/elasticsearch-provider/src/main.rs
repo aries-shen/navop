@@ -9,7 +9,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use extension_protocol::{
     blob::{BlobCloseParams, BlobReadParams, BlobReadResult, should_stream_blob},
     conn::SecretRef,
-    declarative_ui::{UiActionRequest, UiStateOperation, UiStatePatch},
     envelope::{Request, RequestId, Response, RpcMessage},
     error::{ProtocolError, error_codes},
     event_stream::{
@@ -769,8 +768,7 @@ where
                 .with_method(method::JOB_CLOSE)
                 .with_method(method::EVENT_OPEN)
                 .with_method(method::EVENT_READ)
-                .with_method(method::EVENT_CLOSE)
-                .with_method(method::UI_ACTION),
+                .with_method(method::EVENT_CLOSE),
         )
         .map_err(|error| boxed_invalid_params(error.to_string())),
         method::RESOURCE_OPEN => {
@@ -1042,21 +1040,6 @@ where
             state.event_streams.clear();
             Ok(Value::Null)
         }
-        method::UI_ACTION => {
-            let params: UiActionRequest = match serde_json::from_value(request.params) {
-                Ok(value) => value,
-                Err(error) => {
-                    return (
-                        Response::err(request.id, *boxed_invalid_params(error.to_string())),
-                        false,
-                    );
-                }
-            };
-            let Some(resource) = state.resource.as_ref() else {
-                return (Response::err(request.id, *resource_error()), false);
-            };
-            ui_patch(resource, &params).await
-        }
         method::SHUTDOWN => {
             state.resource = None;
             state.blobs.clear();
@@ -1074,38 +1057,6 @@ where
         Err(error) => Response::err(request.id, *error),
     };
     (response, should_exit)
-}
-
-async fn ui_patch(resource: &ElasticsearchResource, request: &UiActionRequest) -> ProviderResult {
-    if request.action != "refresh-resources" {
-        return Err(boxed_error(
-            error_codes::METHOD_NOT_FOUND,
-            format!("unknown UI action `{}`", request.action),
-        ));
-    }
-    let indices = execute(resource, "elasticsearch/index/list", &Value::Null).await?;
-    let normalized = normalize_indices(indices);
-    let indices_json = serde_json::to_string(&normalized)
-        .map_err(|error| boxed_invalid_params(error.to_string()))?;
-    let patch = UiStatePatch {
-        expected_revision: request.expected_revision,
-        operations: vec![
-            UiStateOperation::Set {
-                key: "provider_status".to_owned(),
-                value: "ready".to_owned(),
-            },
-            UiStateOperation::Set {
-                key: "indices_json".to_owned(),
-                value: indices_json,
-            },
-            UiStateOperation::Set {
-                key: "last_request_id".to_owned(),
-                value: request.request_id.clone(),
-            },
-        ],
-        event_subscriptions: Vec::new(),
-    };
-    serde_json::to_value(patch).map_err(|error| boxed_invalid_params(error.to_string()))
 }
 
 fn boxed_error(

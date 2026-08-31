@@ -32,7 +32,6 @@ dirs = {workspace = true}
 futures = { workspace = true }
 smol = { workspace = true }
 db_view = { workspace = true }
-declarative-ui-demo.workspace = true
 extension-runtime = { workspace = true, features = ["wasm-components"] }
 extension-host.workspace = true
 extension-plugin-adapter.workspace = true

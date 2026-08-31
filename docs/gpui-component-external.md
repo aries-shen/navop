@@ -50,15 +50,14 @@ For network fetches on this machine, Clash is available at
 cargo check -p main
 cargo test -p main --no-run
 cargo test -p one-ui
-cargo test -p extension-runtime --no-run
+cargo test -p extension-runtime
+cargo test -p extension-wasm
+cargo test -p extension-plugin-adapter
 cargo check -p terminal_view --all-targets
-cargo test -p declarative-ui-demo --lib
 ```
 
-The full declarative UI integration test suite currently contains tests that
-require a real platform-backed window. Under the latest GPUI deterministic test
-window those tests panic with `Test Windows are not backed by a real platform
-window`; the library tests and main build remain valid.
+The retired declarative UI crate is intentionally absent. Plugin UI will be
+reintroduced through gpui-shell after its policy-aware public load API is pinned.
 
 ## SQL Editor Extensions
 

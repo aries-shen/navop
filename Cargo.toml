@@ -40,7 +40,6 @@ members = [
     "crates/notes",
     "crates/api_tools",
     "crates/json_view",
-    "crates/declarative_ui_demo",
     "tools/gpui-rdp-smoke",
     "tools/windows-rdp-probe",
     "main", "crates/ssh", "crates/x11_forwarding", "crates/sftp", "crates/sftp_transfer", "crates/sftp_view", "crates/one_ui", "crates/redis-runtime", "crates/mongodb-runtime", "crates/redis_view", "crates/license_tool", "crates/mongodb_view", "crates/remote_file_editor", "crates/remote_image_preview", "crates/elasticsearch-provider"]
@@ -148,7 +147,6 @@ extension-host = { path = "crates/extension-host" }
 extension-plugin-adapter = { path = "crates/extension-plugin-adapter" }
 extension-driver = { path = "crates/extension-driver" }
 extension-runtime = { path = "crates/extension-runtime", default-features = false }
-declarative-ui-demo = { path = "crates/declarative_ui_demo" }
 extension_view = { path = "crates/extension_view" }
 extension-api = { path = "crates/extension-api" }
 extension-component = { path = "crates/extension-component" }

@@ -34,7 +34,6 @@ pub mod blob;
 pub mod conn;
 pub mod data;
 pub mod ddl;
-pub mod declarative_ui;
 pub mod envelope;
 pub mod error;
 pub mod event;

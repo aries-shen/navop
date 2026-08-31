@@ -10,10 +10,7 @@
   "permissions": [
     "net:tcp:rocketmq.example.com:9876",
     "secrets:read:rocketmq.*",
-    "spawn:./bin/rocketmq-provider",
-    "ui:tab",
-    "ui:notify",
-    "ui:progress"
+    "spawn:./bin/rocketmq-provider"
   ],
   "runtime": {
     "ipc": [
@@ -35,19 +32,6 @@
         "kind": "rocketmq",
         "label": "RocketMQ",
         "secretNamespace": "rocketmq"
-      }
-    ],
-    "declarativePanels": [
-      {
-        "id": "rocketmq",
-        "title": "RocketMQ",
-        "runtimeId": "main",
-        "template": "ui/main.html",
-        "placement": "home_sidebar",
-        "icon": "send",
-        "activation": [
-          "onConnectionKind:rocketmq"
-        ]
       }
     ]
   }

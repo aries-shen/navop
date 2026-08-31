@@ -1,3 +1,4 @@
+use crate::db_object_selector::DbSelectorKind;
 use db::{
     GlobalDbState, TableObjectType,
     compare::{
@@ -6,7 +7,6 @@ use db::{
         TriggerSchema,
     },
 };
-use extension_component::DbSelectorKind;
 use gpui::{
     App, AppContext, AsyncApp, ColorExt, Context, Entity, InteractiveElement, IntoElement,
     ParentElement, Styled, Task, Window, div, prelude::FluentBuilder, px,

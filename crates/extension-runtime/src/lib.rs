@@ -14,7 +14,6 @@ mod extension_package_layout;
 mod extension_view_host;
 mod global;
 pub mod language_extensions;
-mod layout;
 pub mod mcp_helper_install;
 mod registration;
 pub mod remote_desktop_provider_install;
@@ -26,13 +25,9 @@ pub use extension_view_host::MainExtensionViewHost;
 #[cfg(feature = "wasm-components")]
 pub use extension_wasm::{DocumentRenderArtifact, DocumentRenderRequest, DocumentRenderTheme};
 pub use global::{GlobalExtensionRuntimeCatalog, refresh_global_runtime_catalog};
-pub use layout::{
-    LayoutNode, LayoutRegistryError, MAX_LAYOUT_CHILDREN, MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES,
-    NestedPanel, PageRegistry, PageRoot,
-};
 pub use types::{
-    RegisteredDeclarativePanel, RegisteredDocumentExporter, RegisteredIpcRuntimeBinding,
-    RegisteredRemoteFileEditorCommand, RegisteredRemoteFileEditorContribution,
+    RegisteredDocumentExporter, RegisteredIpcRuntimeBinding, RegisteredRemoteFileEditorCommand,
+    RegisteredRemoteFileEditorContribution,
 };
 
 #[cfg(all(test, feature = "wasm-components"))]
@@ -51,5 +46,3 @@ mod extension_downloader_tests;
 mod extension_runtime_contract_tests;
 #[cfg(all(test, feature = "wasm-components"))]
 mod extension_runtime_wasm_contract_tests;
-#[cfg(test)]
-mod layout_tests;

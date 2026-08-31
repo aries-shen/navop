@@ -14,11 +14,11 @@ use crate::extension::manifest::{
 
 use super::catalog::ExtensionRuntimeCatalog;
 use super::types::{
-    ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDeclarativePanel,
-    RegisteredDocumentExporter, RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform,
-    RegisteredIpcRuntimeBinding, RegisteredKeybindingContribution,
-    RegisteredRemoteFileEditorCommand, RegisteredRemoteFileEditorContribution, WasmRuntimeBinding,
-    command_descriptor, runtime_key, slot_item_from_menu,
+    ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
+    RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredIpcRuntimeBinding,
+    RegisteredKeybindingContribution, RegisteredRemoteFileEditorCommand,
+    RegisteredRemoteFileEditorContribution, WasmRuntimeBinding, command_descriptor, runtime_key,
+    slot_item_from_menu,
 };
 
 static WASM_REGISTRATION_LOG_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -30,7 +30,6 @@ impl ExtensionRuntimeCatalog {
     ) -> Result<(), ExtensionRuntimeError> {
         self.register_wasm_runtimes(&manifest)?;
         self.register_ipc_runtimes(&manifest)?;
-        self.register_declarative_panels(&manifest)?;
         self.register_html_preview_transforms(&manifest)?;
         self.register_document_renderers(&manifest)?;
         self.register_document_exporters(&manifest)?;
@@ -76,53 +75,6 @@ impl ExtensionRuntimeCatalog {
                     permissions: manifest.permissions.clone(),
                 },
             );
-        }
-        Ok(())
-    }
-
-    fn register_declarative_panels(
-        &mut self,
-        manifest: &Manifest,
-    ) -> Result<(), ExtensionRuntimeError> {
-        for panel in &manifest.contributes.declarative_panels {
-            let runtime_id = runtime_key(&manifest.id, &panel.runtime_id);
-            let panel_key = runtime_key(&manifest.id, &panel.id);
-            if self
-                .declarative_panels
-                .iter()
-                .any(|registered| registered.panel_key == panel_key)
-            {
-                return Err(ExtensionRuntimeError::DuplicateDeclarativePanel { id: panel_key });
-            }
-            if !self.ipc_runtimes.contains_key(&runtime_id)
-                && !self.wasm_runtimes.contains_key(&runtime_id)
-            {
-                return Err(ExtensionRuntimeError::UnknownRuntime {
-                    command_id: panel.id.clone(),
-                    runtime_id: panel.runtime_id.clone(),
-                });
-            }
-            let registered = RegisteredDeclarativePanel {
-                extension_id: manifest.id.clone(),
-                id: panel.id.clone(),
-                panel_key: runtime_key(&manifest.id, &panel.id),
-                title: panel.title.clone(),
-                runtime_id,
-                template_path: resolve_asset_root(&manifest.manifest_dir, &panel.template),
-                style_path: panel
-                    .style
-                    .as_deref()
-                    .map(|style| resolve_asset_root(&manifest.manifest_dir, style)),
-                placement: panel.placement,
-                icon: panel.icon.clone(),
-                activation: panel.activation.clone(),
-            };
-            self.page_registry
-                .register_legacy_panel(&registered)
-                .map_err(|error| ExtensionRuntimeError::InvalidLayout {
-                    reason: error.to_string(),
-                })?;
-            self.declarative_panels.push(registered);
         }
         Ok(())
     }

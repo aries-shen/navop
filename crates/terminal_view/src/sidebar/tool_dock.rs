@@ -135,7 +135,7 @@ fn render_internal_tool_panel_header(
     .trailing(
         h_flex()
             .child(options_button(sidebar.clone(), panel, placement))
-            .child(close_button(sidebar, panel)),
+            .child(close_button(sidebar, panel))
     )
     .into_any_element()
 }
@@ -180,7 +180,7 @@ fn placement_icon(placement: SidebarPlacement) -> IconName {
 fn options_button(
     sidebar: Entity<TerminalSidebar>,
     panel: SidebarPanel,
-    placement: SidebarPlacement,
+    placement: SidebarPlacement
 ) -> impl IntoElement {
     IconButton::new(
         SharedString::from(format!("terminal-tool-options-{}", panel.local_id())),
