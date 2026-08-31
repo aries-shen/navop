@@ -7,7 +7,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme, FunctionalIcon, Icon, IconName, Selectable, Sizable, Size,
+    ActiveTheme, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonCustomVariant, ButtonVariants},
     h_flex,
     input::Textarea,

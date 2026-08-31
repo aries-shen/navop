@@ -1434,13 +1434,6 @@ struct SqlSchemaUpdateRequest {
     entity: WeakEntity<SqlEditorTab>,
 }
 
-struct SqlSchemaUpdateRequest {
-    database: String,
-    generation: u64,
-    window_handle: AnyWindowHandle,
-    entity: WeakEntity<SqlEditorTab>,
-}
-
 impl SqlEditorTab {
     pub fn new_with_config(
         config: SqlEditorTabConfig,
