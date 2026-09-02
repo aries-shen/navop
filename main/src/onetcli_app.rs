@@ -904,12 +904,12 @@ fn spawn_onetcli_model_refresh(cx: &mut App) {
     .detach();
 }
 
-pub fn init(cx: &mut App) {
+pub fn init(cx: &mut App) -> anyhow::Result<()> {
     gpui_component::init(cx);
     one_core::themes::load_bundled(cx);
     one_core::themes::load_imported(cx);
     setting_tab::init_settings(cx);
-    one_core::init(cx);
+    one_core::init(cx)?;
     init_ssh_session_service(cx);
     ai_chat_view::init(cx);
     crate::public_mcp_approval::init(cx);
@@ -960,6 +960,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(db_state);
     db_view::init_ask_ai_notifier(cx);
     cx.activate(true);
+    Ok(())
 }
 
 #[cfg(not(all(feature = "builtin-redis", feature = "builtin-mongodb")))]

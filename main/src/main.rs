@@ -383,7 +383,12 @@ fn main() {
             .expect("main package version must be valid semver");
         extension_runtime::set_current_host_version(env!("CARGO_PKG_VERSION"))
             .expect("main package version must be valid semver");
-        onetcli_app::init(cx);
+        if let Err(error) = onetcli_app::init(cx) {
+            tracing::error!(error = %error, "failed to initialize Navop application state");
+            eprintln!("Failed to initialize Navop application state: {error:#}");
+            cx.quit();
+            return;
+        }
         if !one_core::app_paths::is_portable() {
             file_association::schedule_registration(cx);
         }
