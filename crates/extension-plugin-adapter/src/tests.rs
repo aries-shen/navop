@@ -1079,7 +1079,7 @@ async fn provider_close_failure_still_reclaims_host_job_ownership() {
 }
 
 #[tokio::test]
-async fn runtime_restart_recovers_job_under_replacement_generation() {
+async fn runtime_restart_retires_jobs_without_a_recovery_contract() {
     let (manager, sessions) = activation_universal_manager_with_sessions().await;
     manager
         .activate_runtime("com.navop.kafka::secondary")
@@ -1100,40 +1100,23 @@ async fn runtime_restart_recovers_job_under_replacement_generation() {
 
     manager.check_runtime(runtime_id).await.unwrap();
     let new_client = manager.universal_plugin_client(runtime_id).unwrap();
-    let new_handle = manager
-        .job_activation()
-        .unwrap()
-        .handle(
-            "com.navop.kafka",
-            runtime_id,
-            new_client.runtime_generation(),
-            &old_handle.job_id,
-        )
-        .unwrap();
 
-    assert_eq!(old_handle.generation + 1, new_handle.generation);
     assert!(old_client.job_status(&old_handle).await.is_err());
-    assert_eq!(
-        extension_protocol::job::JobState::Running,
-        new_client.job_status(&new_handle).await.unwrap().state
-    );
-    assert!(matches!(
-        manager
-            .job_result_and_cache_blob(
-                runtime_id,
-                &extension_protocol::job::JobResultParams {
-                    job_id: new_handle.job_id.clone(),
-                },
-            )
-            .await
-            .unwrap()
-            .result,
-        extension_protocol::result_ref::ResultRef::Inline { .. }
-    ));
-    new_client.close_job(&new_handle).await.unwrap();
     assert_eq!(
         0,
         manager.job_activation().unwrap().active_count(runtime_id)
+    );
+    assert!(
+        manager
+            .job_activation()
+            .unwrap()
+            .handle(
+                "com.navop.kafka",
+                runtime_id,
+                new_client.runtime_generation(),
+                &old_handle.job_id,
+            )
+            .is_err()
     );
 }
 

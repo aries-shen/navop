@@ -7,6 +7,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::{collections::HashSet, sync::RwLock};
 
 use extension_plugin_adapter::{
     ActivationError, ActivationHandle, ActivationManager, EventActivationManager, HostApiFactory,
@@ -41,16 +42,17 @@ pub(crate) struct UniversalPluginService {
     monitor: Arc<RuntimeMonitor>,
     catalog_source: GlobalExtensionRuntimeCatalog,
     catalog_revision: Arc<AtomicU64>,
+    catalog_sync_lock: Arc<std::sync::Mutex<()>>,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
     stopped: Arc<AtomicBool>,
+    retiring_extensions: Arc<RwLock<HashSet<String>>>,
+    activation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl UniversalPluginService {
     fn from_catalog_source(catalog_source: GlobalExtensionRuntimeCatalog) -> Self {
-        let catalog_revision = catalog_source.revision();
-        let catalog = catalog_source
-            .get()
-            .unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
+        let (catalog_revision, catalog) = catalog_source.snapshot();
+        let catalog = catalog.unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
         let events = Arc::new(EventActivationManager::new());
         let jobs = Arc::new(extension_plugin_adapter::JobActivationManager::new());
         let blobs = extension_plugin_adapter::BlobStore::default();
@@ -73,8 +75,11 @@ impl UniversalPluginService {
             monitor,
             catalog_source,
             catalog_revision: Arc::new(AtomicU64::new(catalog_revision)),
+            catalog_sync_lock: Arc::new(std::sync::Mutex::new(())),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             stopped: Arc::new(AtomicBool::new(false)),
+            retiring_extensions: Arc::new(RwLock::new(HashSet::new())),
+            activation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -104,7 +109,20 @@ impl UniversalPluginService {
         &self,
         runtime_id: &str,
     ) -> Result<ActivationHandle, ActivationError> {
+        let _activation_guard = self.activation_lock.lock().await;
         self.sync_catalog();
+        if self
+            .runtime_extension(runtime_id)
+            .is_some_and(|extension_id| {
+                self.retiring_extensions
+                    .read()
+                    .is_ok_and(|retiring| retiring.contains(&extension_id))
+            })
+        {
+            return Err(ActivationError::RuntimeNotReady {
+                runtime_id: runtime_id.to_string(),
+            });
+        }
         let handle = self.manager.activate_runtime(runtime_id).await?;
         self.monitor.track(handle.runtime_id.clone());
         Ok(handle)
@@ -140,6 +158,59 @@ impl UniversalPluginService {
         self.manager.universal_plugin_client(runtime_id)
     }
 
+    pub(crate) fn shell_view(
+        &self,
+        extension_id: &str,
+        view_id: &str,
+    ) -> Option<extension_runtime::RegisteredShellViewContribution> {
+        self.sync_catalog();
+        self.catalog_source
+            .get()?
+            .shell_view(extension_id, view_id)
+            .cloned()
+    }
+
+    pub(crate) async fn deactivate_extension(&self, extension_id: &str) {
+        let _activation_guard = self.activation_lock.lock().await;
+        self.sync_catalog();
+        let runtime_ids = self
+            .catalog_source
+            .get()
+            .into_iter()
+            .flat_map(|catalog| {
+                catalog
+                    .ipc_runtime_bindings()
+                    .filter(|binding| binding.extension_id == extension_id)
+                    .map(|binding| binding.runtime_key.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for runtime_id in runtime_ids {
+            let _ = self.manager.deactivate_runtime(&runtime_id).await;
+            self.monitor.untrack(&runtime_id);
+        }
+    }
+
+    pub(crate) fn begin_extension_retire(&self, extension_id: &str) {
+        if let Ok(mut retiring) = self.retiring_extensions.write() {
+            retiring.insert(extension_id.to_string());
+        }
+    }
+
+    pub(crate) fn finish_extension_retire(&self, extension_id: &str) {
+        if let Ok(mut retiring) = self.retiring_extensions.write() {
+            retiring.remove(extension_id);
+        }
+    }
+
+    fn runtime_extension(&self, runtime_id: &str) -> Option<String> {
+        self.catalog_source
+            .get()?
+            .ipc_runtime_bindings()
+            .find(|binding| binding.runtime_key == runtime_id)
+            .map(|binding| binding.extension_id.clone())
+    }
+
     #[allow(dead_code)]
     pub(crate) async fn invoke_resource_and_cache_blob(
         &self,
@@ -169,14 +240,15 @@ impl UniversalPluginService {
     }
 
     fn sync_catalog(&self) {
-        let revision = self.catalog_source.revision();
-        if self.catalog_revision.load(Ordering::Acquire) == revision {
+        let _sync_guard = self
+            .catalog_sync_lock
+            .lock()
+            .expect("catalog sync lock poisoned");
+        let (revision, catalog) = self.catalog_source.snapshot();
+        if self.catalog_revision.load(Ordering::Acquire) >= revision {
             return;
         }
-        let catalog = self
-            .catalog_source
-            .get()
-            .unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
+        let catalog = catalog.unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
         self.manager.replace_catalog(catalog);
         self.catalog_revision.store(revision, Ordering::Release);
     }
@@ -246,7 +318,15 @@ pub(crate) fn init(cx: &mut gpui::App) {
     let startup_service = service.clone();
     let quit_service = service.clone();
     cx.set_global(global);
-    cx.set_global(crate::shell_plugin_host::ShellPluginHost::new(service));
+    gpui_shell::init_embedded(cx);
+    match crate::shell_plugin_host::ShellPluginHost::new(service, cx) {
+        Ok(host) => {
+            host.start_monitor_bridge(cx);
+            extension_view::register_shell_view_opener(std::rc::Rc::new(host.clone()), cx);
+            cx.set_global(host);
+        }
+        Err(error) => tracing::warn!(%error, "failed to initialize gpui-shell host"),
+    }
 
     // RuntimeMonitor::start must be called from the Tokio runtime. Starting it
     // through a spawned task also keeps startup off the GPUI foreground thread.

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use super::schema::Manifest;
 use super::security::{path_has_escape, validate_permissions};
+use super::shell_validation::validate_shell_views;
 use super::versioning::{CompatibilityError, HostApiVersions, check_compatibility};
 
 pub const MANIFEST_FILE_NAME: &str = "extension.json";
@@ -91,6 +92,10 @@ fn validate_structural(manifest: &Manifest) -> Result<(), ManifestError> {
     if !duplicated.is_empty() {
         return Err(ManifestError::DuplicatedRuntimeId { duplicated });
     }
+    validate_shell_views(manifest).map_err(|error| ManifestError::InvalidField {
+        field: error.field,
+        reason: error.reason,
+    })?;
     validate_security(manifest)?;
     Ok(())
 }
@@ -258,7 +263,7 @@ pub(crate) fn required_spawn_permission(command: &str, working_dir: Option<&str>
     format!("spawn:./{normalized}")
 }
 
-fn validate_extension_path_containment(
+pub(super) fn validate_extension_path_containment(
     extension_root: &Path,
     candidate: &Path,
     field: String,

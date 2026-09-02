@@ -309,6 +309,26 @@ impl ExtensionManagerView {
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let action_busy = self.busy.is_some();
+        let mut actions = summary
+            .shell_views
+            .iter()
+            .cloned()
+            .map(|shell_view| {
+                let extension_id = summary.name.clone();
+                let view_id = shell_view.id.clone();
+                Button::new(format!(
+                    "extension-manager-open-{}-{}",
+                    extension_id, view_id
+                ))
+                .small()
+                .primary()
+                .label(shell_view.title)
+                .disabled(action_busy)
+                .on_click(move |_, window, cx| {
+                    crate::shell::open_shell_view(&extension_id, &view_id, window, cx);
+                })
+            })
+            .collect::<Vec<_>>();
         let summary_for_reload = summary.clone();
         let reload = Button::new(format!("extension-manager-reload-{}", summary.name))
             .small()
@@ -327,12 +347,13 @@ impl ExtensionManagerView {
             .on_click(cx.listener(move |view, _, window, cx| {
                 view.uninstall_extension(summary_for_uninstall.clone(), window, cx);
             }));
+        actions.extend([reload, uninstall]);
         extension_card(
             kind_label(summary.kind),
             summary.name,
             summary.version,
             summary.description,
-            vec![reload, uninstall],
+            actions,
             cx,
         )
     }

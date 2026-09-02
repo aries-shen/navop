@@ -5,9 +5,15 @@
   "version": "0.1.0",
   "description": "Reference IPC provider for Elasticsearch indices, mappings, search and documents.",
   "engines": {
-    "onetcli": ">=0.1.0"
+    "onetcli": ">=0.15.1",
+    "gpui_shell": "0.2.0"
+  },
+  "api": {
+    "extension": "1.0",
+    "shell": "1.0"
   },
   "permissions": [
+    "shell:exec",
     "net:tcp:elasticsearch.example.com:9200",
     "secrets:read:elasticsearch.*",
     "spawn:./bin/elasticsearch-provider"
@@ -32,6 +38,19 @@
         "kind": "elasticsearch",
         "label": "Elasticsearch",
         "secretNamespace": "elasticsearch"
+      }
+    ],
+    "shellViews": [
+      {
+        "id": "explorer",
+        "title": "Open Elasticsearch Explorer",
+        "entry": "ui/explorer.js",
+        "surface": "tab",
+        "singleton": false,
+        "backends": {
+          "search": "main"
+        },
+        "modules": ["context", "resource"]
       }
     ]
   }

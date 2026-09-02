@@ -10,6 +10,10 @@ use serde_json::Value;
 
 use crate::extension::manifest::{CommandContrib, RemoteFileEditorLaunchMode, WasmRuntimeKind};
 
+#[path = "types/shell.rs"]
+mod shell;
+pub use shell::RegisteredShellViewContribution;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredRemoteFileEditorContribution {
     pub extension_id: String,
@@ -136,6 +140,10 @@ pub enum ExtensionRuntimeError {
     UnsupportedCommand { command_id: String },
     #[error("invalid remote file editor `{editor_id}`: {reason}")]
     InvalidRemoteFileEditor { editor_id: String, reason: String },
+    #[error("invalid shell view manifest field {field}: {reason}")]
+    InvalidShellView { field: String, reason: String },
+    #[error("duplicate shell view key: {view_key}")]
+    DuplicateShellView { view_key: String },
     #[error("invalid declarative layout: {reason}")]
     InvalidLayout { reason: String },
 }

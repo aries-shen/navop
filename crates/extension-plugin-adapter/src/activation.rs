@@ -13,7 +13,7 @@ use std::{
 
 use crate::blob_store::BlobStore;
 use crate::event_activation::EventActivationManager;
-use crate::job_activation::{JobActivationHandle, JobActivationManager, RecoveredJob, RetiredJob};
+use crate::job_activation::{JobActivationHandle, JobActivationManager, RetiredJob};
 use crate::provider_permissions::ResourceOpenAuthorizer;
 use extension_host::{HostError, ProcessRpcSession, RequestOptions};
 use extension_protocol::blob::{
@@ -623,6 +623,7 @@ pub enum RuntimeActivationState {
 
 struct ActivatedRuntime {
     extension_id: String,
+    binding: RegisteredIpcRuntimeBinding,
     activations: BTreeSet<u64>,
     state: RuntimeActivationState,
     session: Option<Arc<dyn ManagedRpcSession>>,
@@ -818,6 +819,11 @@ impl ActivationManager {
                     .runtimes
                     .get(runtime_id)
                     .expect("runtime still exists");
+                if runtime.binding != binding {
+                    return Err(ActivationError::RuntimeNotReady {
+                        runtime_id: runtime_id.to_owned(),
+                    });
+                }
                 if runtime
                     .session
                     .as_ref()
@@ -853,6 +859,7 @@ impl ActivationManager {
                     runtime_id.to_owned(),
                     ActivatedRuntime {
                         extension_id: binding.extension_id.clone(),
+                        binding: binding.clone(),
                         activations: BTreeSet::new(),
                         state: RuntimeActivationState::Starting,
                         session: None,
@@ -1025,20 +1032,7 @@ impl ActivationManager {
         &self,
         runtime_id: &str,
     ) -> Result<ManagedUniversalPluginClient, ActivationError> {
-        let binding = self
-            .catalog
-            .read()
-            .ipc_runtime_bindings()
-            .find(|binding| binding.runtime_key == runtime_id)
-            .cloned()
-            .ok_or_else(|| ActivationError::RuntimeNotFound {
-                runtime_id: runtime_id.to_owned(),
-            })?;
-        let authorizer = Arc::new(
-            ResourceOpenAuthorizer::new(binding.permissions.iter().cloned()).into_host_authorizer(),
-        );
-
-        let (generation, session) =
+        let (binding, generation, session) =
             {
                 let state = self.state.lock();
                 let runtime = state.runtimes.get(runtime_id).ok_or_else(|| {
@@ -1047,6 +1041,7 @@ impl ActivationManager {
                     }
                 })?;
                 (
+                    runtime.binding.clone(),
                     runtime.start_generation,
                     runtime
                         .session
@@ -1056,6 +1051,9 @@ impl ActivationManager {
                         })?,
                 )
             };
+        let authorizer = Arc::new(
+            ResourceOpenAuthorizer::new(binding.permissions.iter().cloned()).into_host_authorizer(),
+        );
         if session.is_closed() {
             return Err(ActivationError::RuntimeNotReady {
                 runtime_id: runtime_id.to_owned(),
@@ -1175,21 +1173,6 @@ impl ActivationManager {
         }
     }
 
-    fn cleanup_recovered_job_blobs(&self, recovered: Vec<RecoveredJob>) {
-        let Some(blobs) = &self.blobs else {
-            return;
-        };
-        for job in recovered {
-            let owner = crate::BlobOwner {
-                runtime_id: job.previous_handle.runtime_id,
-                generation: job.previous_handle.generation,
-            };
-            for blob_id in job.retired_blob_ids {
-                let _ = blobs.remove_owned_blob(&owner, &blob_id);
-            }
-        }
-    }
-
     async fn cache_inline_result<T>(
         &self,
         runtime_id: &str,
@@ -1261,6 +1244,11 @@ impl ActivationManager {
     }
 
     pub async fn deactivate_runtime(&self, runtime_id: &str) -> Result<(), ActivationError> {
+        let start_lock = {
+            let mut state = self.state.lock();
+            Arc::clone(state.start_locks.entry(runtime_id.to_owned()).or_default())
+        };
+        let _start_guard = start_lock.lock().await;
         let runtime = {
             let mut state = self.state.lock();
             let runtime = state.runtimes.remove(runtime_id);
@@ -1292,44 +1280,16 @@ impl ActivationManager {
     }
 
     pub async fn deactivate_extension(&self, extension_id: &str) -> Result<(), ActivationError> {
-        let removed = {
-            let mut state = self.state.lock();
-            let keys: Vec<String> = state
-                .runtimes
-                .iter()
-                .filter(|(_, runtime)| runtime.extension_id == extension_id)
-                .map(|(key, _)| key.clone())
-                .collect();
-            let deactivations = keys
-                .iter()
-                .map(|key| {
-                    let generation = state.runtimes[key].start_generation;
-                    (key.clone(), generation)
-                })
-                .collect::<Vec<_>>();
-            for (key, generation) in deactivations {
-                state.deactivations.insert(key.clone(), generation);
-                if let Some(blobs) = &self.blobs {
-                    blobs.remove_generation(&key, generation);
-                }
-                if let Some(events) = &self.events {
-                    events.remove_runtime(&key);
-                }
-                self.cleanup_retired_jobs(
-                    self.jobs
-                        .as_ref()
-                        .map(|jobs| jobs.remove_runtime(&key))
-                        .unwrap_or_default(),
-                );
-            }
-            keys.into_iter()
-                .filter_map(|key| state.runtimes.remove(&key))
-                .collect::<Vec<_>>()
-        };
-        for runtime in removed {
-            if let Some(session) = runtime.session {
-                session.shutdown().await;
-            }
+        let runtime_ids = self
+            .state
+            .lock()
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| runtime.extension_id == extension_id)
+            .map(|(runtime_id, _)| runtime_id.clone())
+            .collect::<Vec<_>>();
+        for runtime_id in runtime_ids {
+            self.deactivate_runtime(&runtime_id).await?;
         }
         Ok(())
     }
@@ -1396,16 +1356,8 @@ impl ActivationManager {
                     runtime_id: runtime_id.to_owned(),
                 }
             })?;
-            let binding = self
-                .catalog
-                .read()
-                .ipc_runtime_bindings()
-                .find(|binding| binding.runtime_key == runtime_id)
-                .cloned()
-                .ok_or_else(|| ActivationError::RuntimeNotFound {
-                    runtime_id: runtime_id.to_owned(),
-                })?;
-            let budget = self.binding_restart_budget(runtime_id)?;
+            let binding = runtime.binding.clone();
+            let budget = binding.max_restart_attempts;
 
             if !binding.auto_restart {
                 runtime.state = RuntimeActivationState::Failed;
@@ -1497,9 +1449,10 @@ impl ActivationManager {
                             events.mark_runtime_active(runtime_id, generation + 1);
                         }
                         if let Some(jobs) = &self.jobs {
-                            let recovered =
-                                jobs.recover_generation(runtime_id, generation, generation + 1);
-                            self.cleanup_recovered_job_blobs(recovered);
+                            self.cleanup_retired_jobs(
+                                jobs.retire_generation(runtime_id, generation),
+                            );
+                            jobs.mark_runtime_active(runtime_id, generation + 1);
                         }
                     }
                     None => {
@@ -1584,9 +1537,7 @@ impl ActivationManager {
             session_closed: session_closed || runtime.session.is_none(),
             ping_error,
             restart_attempts: runtime.restart_attempts,
-            restart_budget: self
-                .binding_restart_budget(runtime_id)
-                .expect("runtime exists"),
+            restart_budget: runtime.binding.max_restart_attempts,
             restart_backoff_remaining,
         }
     }
@@ -1597,17 +1548,6 @@ impl ActivationManager {
             .runtimes
             .get(runtime_id)
             .and_then(|runtime| runtime.session.clone())
-    }
-
-    fn binding_restart_budget(&self, runtime_id: &str) -> Result<u32, ActivationError> {
-        self.catalog
-            .read()
-            .ipc_runtime_bindings()
-            .find(|binding| binding.runtime_key == runtime_id)
-            .map(|binding| binding.max_restart_attempts)
-            .ok_or_else(|| ActivationError::RuntimeNotFound {
-                runtime_id: runtime_id.to_owned(),
-            })
     }
 
     #[cfg(test)]

@@ -51,8 +51,11 @@ edition = "2024"
 
 [workspace.dependencies]
 # Local development checkout. Canonical fork: https://github.com/feigeCode/gpui-component
-gpui-component = { package = "gpui_ce_components", git = "https://github.com/feigeCode/gpui-component.git", rev = "0f727461bfd30f9d23e6f334cb52cdeb004f326d", version = "0.2.0" }
-gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/feigeCode/gpui-component.git", rev = "0f727461bfd30f9d23e6f334cb52cdeb004f326d", version = "0.2.0" }
+gpui-component = { package = "gpui_ce_components", git = "https://github.com/feigeCode/gpui-component.git", rev = "e6459613910143b817eecbacc8767976e86cac84", version = "0.2.0" }
+gpui-component-assets = { package = "gpui_ce_components_assets", git = "https://github.com/feigeCode/gpui-component.git", rev = "e6459613910143b817eecbacc8767976e86cac84", version = "0.2.0" }
+gpui-base = { package = "gpui_ce_components_base", git = "https://github.com/feigeCode/gpui-component.git", rev = "e6459613910143b817eecbacc8767976e86cac84", version = "0.2.0" }
+gpui-shell = { package = "gpui_ce_components_shell", git = "https://github.com/feigeCode/gpui-component.git", rev = "e6459613910143b817eecbacc8767976e86cac84", version = "0.2.0" }
+gpui-component-shell = { package = "gpui-component-shell", git = "https://github.com/feigeCode/gpui-component.git", rev = "e6459613910143b817eecbacc8767976e86cac84", version = "0.1.0" }
 
 gpui = { package = "gpui_ce", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456", version = "=0.2.2" }
 gpui_tokio = { package = "gpui_ce_tokio", git = "https://github.com/feigeCode/gpui-ce.git", rev = "c13e489375c7cd93838bdabef0213771bc2fe456" }

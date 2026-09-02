@@ -5,6 +5,10 @@ use serde_json::Value;
 
 use super::menus::{MenuCommandRef, MenuContrib};
 
+#[path = "contributes/shell.rs"]
+mod shell;
+pub use shell::{ShellHostModule, ShellSurface, ShellViewContrib};
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ContributesManifest {
     #[serde(default)]
@@ -31,6 +35,8 @@ pub struct ContributesManifest {
     pub document_exporters: Vec<DocumentExporterContrib>,
     #[serde(default, rename = "remoteFileEditors")]
     pub remote_file_editors: Vec<RemoteFileEditorContrib>,
+    #[serde(default, rename = "shellViews")]
+    pub shell_views: Vec<ShellViewContrib>,
     #[serde(default)]
     pub views: Vec<Value>,
     #[serde(default)]
@@ -67,6 +73,7 @@ impl ContributesManifest {
             + self.document_renderers.len()
             + self.document_exporters.len()
             + self.remote_file_editors.len()
+            + self.shell_views.len()
             + self.views.len()
             + self.tasks.len()
             + self.data_types.len()

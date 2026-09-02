@@ -36,6 +36,7 @@ mod session_logs;
 mod setting_tab;
 mod settings;
 mod shell_plugin_host;
+mod shell_plugin_tab;
 mod sync_conflict_dialog;
 mod team_management;
 mod universal_plugins;

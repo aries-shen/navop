@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::extension::is_active_install_dir_name;
 use crate::extension::manifest::{
     HostApiVersions, Manifest, ManifestError, current_host_version, load_and_check,
-    required_spawn_permission,
+    required_spawn_permission, validate_shell_views,
 };
 
 use super::catalog::ExtensionRuntimeCatalog;
@@ -17,8 +17,8 @@ use super::types::{
     ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
     RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredIpcRuntimeBinding,
     RegisteredKeybindingContribution, RegisteredRemoteFileEditorCommand,
-    RegisteredRemoteFileEditorContribution, WasmRuntimeBinding, command_descriptor, runtime_key,
-    slot_item_from_menu,
+    RegisteredRemoteFileEditorContribution, RegisteredShellViewContribution, WasmRuntimeBinding,
+    command_descriptor, runtime_key, slot_item_from_menu,
 };
 
 static WASM_REGISTRATION_LOG_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -30,6 +30,7 @@ impl ExtensionRuntimeCatalog {
     ) -> Result<(), ExtensionRuntimeError> {
         self.register_wasm_runtimes(&manifest)?;
         self.register_ipc_runtimes(&manifest)?;
+        self.register_shell_views(&manifest)?;
         self.register_html_preview_transforms(&manifest)?;
         self.register_document_renderers(&manifest)?;
         self.register_document_exporters(&manifest)?;
@@ -73,6 +74,51 @@ impl ExtensionRuntimeCatalog {
                     max_restart_attempts: runtime.max_restart_attempts,
                     shutdown_grace_ms: runtime.shutdown_grace_ms,
                     permissions: manifest.permissions.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn register_shell_views(&mut self, manifest: &Manifest) -> Result<(), ExtensionRuntimeError> {
+        validate_shell_views(manifest).map_err(|error| {
+            ExtensionRuntimeError::InvalidShellView {
+                field: error.field,
+                reason: error.reason,
+            }
+        })?;
+        for view in &manifest.contributes.shell_views {
+            let view_key = runtime_key(&manifest.id, &view.id);
+            if self.shell_views.contains_key(&view_key) {
+                return Err(ExtensionRuntimeError::DuplicateShellView { view_key });
+            }
+            let backends = view
+                .backends
+                .iter()
+                .map(|(alias, runtime_id)| (alias.clone(), runtime_key(&manifest.id, runtime_id)))
+                .collect();
+            self.shell_views.insert(
+                view_key.clone(),
+                RegisteredShellViewContribution {
+                    extension_id: manifest.id.clone(),
+                    extension_version: manifest.version.clone(),
+                    id: view.id.clone(),
+                    view_key,
+                    title: view.title.clone(),
+                    description: view.description.clone(),
+                    icon_path: view
+                        .icon
+                        .as_deref()
+                        .map(|icon| resolve_extension_path(&manifest.manifest_dir, icon)),
+                    extension_root: manifest.manifest_dir.clone(),
+                    entry_path: resolve_extension_path(&manifest.manifest_dir, &view.entry),
+                    surface: view.surface,
+                    singleton: view.singleton,
+                    backends,
+                    modules: view.modules.iter().copied().collect(),
+                    permissions: manifest.permissions.clone(),
+                    shell_api_version: manifest.api.shell.clone(),
+                    required_gpui_shell_version: manifest.engines.gpui_shell.clone(),
                 },
             );
         }
@@ -377,6 +423,10 @@ fn resolve_module_path(manifest_dir: &Path, module: &str) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
+    manifest_dir.join(path).components().collect()
+}
+
+fn resolve_extension_path(manifest_dir: &Path, path: &str) -> PathBuf {
     manifest_dir.join(path).components().collect()
 }
 

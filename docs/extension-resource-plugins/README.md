@@ -1,12 +1,17 @@
 # Universal Resource Plugins
 
-当前 MVP 只建设无 UI 的资源插件底层机制：
+当前底层机制保持 headless；MVP 已在其上接入一个最小 gpui-shell embedded UI：
 
 - extension.json 声明 native IPC runtime；
 - 宿主按 namespaced runtime id 惰性启动和监督 provider；
 - provider 通过稳定 RPC 提供 resource、job、event stream、blob 能力；
 - 权限、进程生命周期、重启代数和 host blob 均由宿主管理；
-- 插件 UI 不再支持 declarative panel、ViewSpec/WIT UI 或 provider 反向 UI RPC。
+- shell view 由 gpui-shell 加载，所有脚本组件统一来自 `gpui-component-shell` 的
+  `gpui-component` module；provider 仍不返回 UI tree。
+
+MVP 的可运行范围是：扩展管理页展示并打开 `contributes.shellViews`，shell tab 持有
+provider activation lease，并通过 `navop.context`、`navop.resource` 访问 headless runtime。
+job/event/blob/connection profile、热更新 drain 和完整 permission facade 后续分阶段接入。
 
 后续 UI 统一由 gpui-shell 承载。gpui-shell 将复用本层的 runtime activation 和
 typed client，不重新引入第三方 UI 协议。

@@ -7,8 +7,8 @@ use crate::{
     extension::manifest::{
         ApiVersions, CommandContrib, CommandHandlerContrib, ContributesManifest,
         DocumentExporterContrib, Engines, HtmlPreviewTransformContrib, IpcEntry, IpcRuntime,
-        IpcTransport, Manifest, MenuCommandRef, MenuContrib, RuntimeSection, WasmRuntime,
-        WasmRuntimeKind,
+        IpcTransport, Manifest, MenuCommandRef, MenuContrib, RuntimeSection, ShellHostModule,
+        ShellSurface, ShellViewContrib, WasmRuntime, WasmRuntimeKind,
         contributes::{
             RemoteFileEditorCommandContrib, RemoteFileEditorContrib, RemoteFileEditorLaunchMode,
         },
@@ -179,6 +179,93 @@ fn runtime_catalog_registers_remote_file_editors() {
     );
     assert_eq!(vec!["notepad++.exe"], editors[0].command.program_candidates);
     assert_eq!(vec!["{file}"], editors[0].command.args);
+}
+
+#[test]
+fn runtime_catalog_registers_shell_view_with_resolved_backend() {
+    let mut manifest = shell_manifest();
+    manifest
+        .contributes
+        .shell_views
+        .push(shell_view("ui/explorer.js"));
+
+    let catalog = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap();
+    let contribution = catalog.shell_view("com.example.tools", "explorer").unwrap();
+
+    assert_eq!("com.example.tools::explorer", contribution.view_key);
+    assert_eq!("Example Explorer", contribution.title);
+    assert_eq!(
+        PathBuf::from("/tmp/com.example.tools/ui/explorer.js"),
+        contribution.entry_path
+    );
+    assert_eq!(
+        Some("com.example.tools::provider"),
+        contribution.backends.get("search").map(String::as_str)
+    );
+    assert_eq!(
+        vec![ShellHostModule::Context, ShellHostModule::Resource],
+        contribution.modules.iter().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec!["shell:exec", "spawn:./bin/provider"],
+        contribution.permissions
+    );
+}
+
+#[test]
+fn runtime_catalog_rejects_shell_view_with_unknown_backend() {
+    let mut manifest = shell_manifest();
+    let mut view = shell_view("ui/explorer.js");
+    view.backends
+        .insert("search".to_string(), "missing".to_string());
+    manifest.contributes.shell_views.push(view);
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("unknown IPC runtime"), "{error}");
+}
+
+#[test]
+fn runtime_catalog_rejects_shell_view_without_shell_exec_permission() {
+    let mut manifest = shell_manifest();
+    manifest
+        .permissions
+        .retain(|permission| permission != "shell:exec");
+    manifest
+        .contributes
+        .shell_views
+        .push(shell_view("ui/explorer.js"));
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("shell:exec"), "{error}");
+}
+
+#[test]
+fn runtime_catalog_rejects_shell_view_with_reserved_backend_alias() {
+    let mut manifest = shell_manifest();
+    let mut view = shell_view("ui/explorer.js");
+    view.backends.clear();
+    view.backends
+        .insert("navop".to_string(), "provider".to_string());
+    manifest.contributes.shell_views.push(view);
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("reserved"), "{error}");
+}
+
+#[test]
+fn runtime_catalog_rejects_shell_view_entry_escape() {
+    let mut manifest = shell_manifest();
+    manifest
+        .contributes
+        .shell_views
+        .push(shell_view("../escape.js"));
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("entry"), "{error}");
 }
 
 #[test]
@@ -432,6 +519,42 @@ fn runtime_catalog_rebuild_after_uninstall_drops_db_tree_menu() {
     );
 }
 
+fn shell_manifest() -> Manifest {
+    let mut manifest = base_manifest();
+    manifest.permissions = vec!["shell:exec".to_string(), "spawn:./bin/provider".to_string()];
+    manifest.runtime.ipc.push(IpcRuntime {
+        id: "provider".to_string(),
+        entry: IpcEntry {
+            command: "./bin/provider".to_string(),
+            args: Vec::new(),
+            working_dir: None,
+            env: std::collections::BTreeMap::new(),
+        },
+        transport: IpcTransport::default(),
+        auto_restart: true,
+        max_restart_attempts: 3,
+        shutdown_grace_ms: 1_000,
+    });
+    manifest
+}
+
+fn shell_view(entry: &str) -> ShellViewContrib {
+    ShellViewContrib {
+        id: "explorer".to_string(),
+        title: "Example Explorer".to_string(),
+        description: None,
+        icon: None,
+        entry: entry.to_string(),
+        surface: ShellSurface::Tab,
+        singleton: false,
+        backends: std::collections::BTreeMap::from([(
+            "search".to_string(),
+            "provider".to_string(),
+        )]),
+        modules: vec![ShellHostModule::Context, ShellHostModule::Resource],
+    }
+}
+
 fn wasm_runtime(id: &str) -> WasmRuntime {
     WasmRuntime {
         id: id.to_string(),
@@ -475,6 +598,7 @@ fn base_manifest() -> Manifest {
         keywords: vec![],
         engines: Engines {
             onetcli: ">=0.1.0".to_string(),
+            gpui_shell: "0.2.0".to_string(),
         },
         api: ApiVersions::default(),
         activation: vec![],

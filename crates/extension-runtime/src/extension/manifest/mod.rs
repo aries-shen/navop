@@ -4,10 +4,12 @@ pub mod parser;
 pub mod schema;
 pub mod security;
 mod security_rules;
+mod shell_validation;
 pub mod versioning;
 
 pub use contributes::{
     CommandContrib, DocumentExporterContrib, DocumentRendererContrib, RemoteFileEditorLaunchMode,
+    ShellHostModule, ShellSurface, ShellViewContrib,
 };
 #[cfg(test)]
 pub use contributes::{CommandHandlerContrib, ContributesManifest, HtmlPreviewTransformContrib};
@@ -21,6 +23,7 @@ pub use schema::{
 };
 pub use schema::{Manifest, WasmRuntimeKind};
 pub use security::build_permission_review;
+pub(crate) use shell_validation::validate_shell_views;
 pub use versioning::{HostApiVersions, current_host_version, set_current_host_version};
 
 #[cfg(test)]

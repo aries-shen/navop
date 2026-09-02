@@ -18,7 +18,8 @@ use super::registration::load_installed_composite_manifests;
 use super::types::{
     ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
     RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredIpcRuntimeBinding,
-    RegisteredKeybindingContribution, RegisteredRemoteFileEditorContribution, WasmRuntimeBinding,
+    RegisteredKeybindingContribution, RegisteredRemoteFileEditorContribution,
+    RegisteredShellViewContribution, WasmRuntimeBinding,
 };
 
 static WASM_CATALOG_LOG_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -42,6 +43,7 @@ pub struct ExtensionRuntimeCatalog {
     pub(super) document_exporter_runtimes:
         Mutex<HashMap<String, Arc<extension_wasm::DocumentExporterRuntime>>>,
     pub(super) remote_file_editors: Vec<RegisteredRemoteFileEditorContribution>,
+    pub(super) shell_views: BTreeMap<String, RegisteredShellViewContribution>,
 }
 
 #[derive(Debug)]
@@ -77,6 +79,7 @@ impl ExtensionRuntimeCatalog {
             #[cfg(feature = "wasm-components")]
             document_exporter_runtimes: Mutex::new(HashMap::new()),
             remote_file_editors: Vec::new(),
+            shell_views: BTreeMap::new(),
         }
     }
 
@@ -156,6 +159,18 @@ impl ExtensionRuntimeCatalog {
 
     pub fn ipc_runtime_bindings(&self) -> impl Iterator<Item = &RegisteredIpcRuntimeBinding> {
         self.ipc_runtimes.values()
+    }
+
+    pub fn shell_views(&self) -> impl Iterator<Item = &RegisteredShellViewContribution> {
+        self.shell_views.values()
+    }
+
+    pub fn shell_view(
+        &self,
+        extension_id: &str,
+        view_id: &str,
+    ) -> Option<&RegisteredShellViewContribution> {
+        self.shell_views.get(&format!("{extension_id}::{view_id}"))
     }
 
     pub fn document_renderer_for_kind(

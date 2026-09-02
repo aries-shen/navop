@@ -313,6 +313,179 @@ fn manifest_parses_document_exporters() {
 }
 
 #[test]
+fn manifest_parses_typed_shell_view() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_shell_entry(tmp.path(), "ui/explorer.js");
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "ui/explorer.js",
+            "surface": "tab",
+            "backends": { "main": "provider" },
+            "modules": ["context", "resource"]
+        }),
+    );
+
+    let manifest = load_from_dir(tmp.path()).unwrap();
+    let view = &manifest.contributes.shell_views[0];
+
+    assert_eq!("explorer", view.id);
+    assert_eq!("ui/explorer.js", view.entry);
+    assert_eq!(
+        Some("provider"),
+        view.backends.get("main").map(String::as_str)
+    );
+}
+
+#[test]
+fn manifest_rejects_shell_view_entry_escape() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "../escape.js",
+            "surface": "tab",
+            "backends": { "main": "provider" },
+            "modules": ["resource"]
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::InvalidField { field, reason } => {
+            assert_eq!("/contributes/shellViews/explorer/entry", field);
+            assert!(reason.contains("escape"), "{reason}");
+        }
+        other => panic!("expected invalid shell entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_rejects_missing_shell_view_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "ui/missing.js",
+            "surface": "tab",
+            "backends": { "main": "provider" },
+            "modules": ["resource"]
+        }),
+    );
+
+    let error = load_from_dir(tmp.path()).unwrap_err();
+
+    assert!(error.to_string().contains("does not exist"), "{error}");
+}
+
+#[test]
+fn manifest_rejects_unknown_shell_view_field() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_shell_entry(tmp.path(), "ui/explorer.js");
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "ui/explorer.js",
+            "surface": "tab",
+            "backends": { "main": "provider" },
+            "modules": ["resource"],
+            "unexpected": true
+        }),
+    );
+
+    match load_from_dir(tmp.path()).unwrap_err() {
+        ManifestError::Parse { message, .. } => {
+            assert!(message.contains("unknown field"), "{message}")
+        }
+        other => panic!("expected shell view parse failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn manifest_rejects_removed_ui_host_module() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_shell_entry(tmp.path(), "ui/explorer.js");
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "ui/explorer.js",
+            "surface": "tab",
+            "modules": ["ui"]
+        }),
+    );
+
+    let error = load_from_dir(tmp.path()).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown variant `ui`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn manifest_rejects_shell_modules_not_yet_registered_by_the_host() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_shell_entry(tmp.path(), "ui/explorer.js");
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "ui/explorer.js",
+            "surface": "tab",
+            "modules": ["job"]
+        }),
+    );
+
+    let error = load_from_dir(tmp.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("shell host module `Job` is not supported"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_rejects_shell_entry_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tempfile::TempDir::new().unwrap();
+    std::fs::write(outside.path().join("outside.js"), "export default class {}").unwrap();
+    std::fs::create_dir_all(tmp.path().join("ui")).unwrap();
+    symlink(
+        outside.path().join("outside.js"),
+        tmp.path().join("ui/explorer.js"),
+    )
+    .unwrap();
+    write_shell_manifest(
+        tmp.path(),
+        serde_json::json!({
+            "id": "explorer",
+            "title": "Resources",
+            "entry": "ui/explorer.js",
+            "surface": "tab",
+            "backends": { "main": "provider" },
+            "modules": ["context", "resource"]
+        }),
+    );
+
+    let error = load_from_dir(tmp.path()).unwrap_err();
+
+    assert!(error.to_string().contains("符号链接"), "{error}");
+}
+
+#[test]
 fn manifest_rejects_auto_restart_without_restart_budget() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_ipc_manifest(
@@ -455,7 +628,32 @@ fn manifest_rejects_ipc_command_that_relies_on_path_lookup() {
     }
 }
 
-#[cfg(unix)]
+fn write_shell_manifest(dir: &std::path::Path, view: serde_json::Value) {
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "id": "com.example.resources",
+        "name": "Resources",
+        "version": "0.1.0",
+        "engines": { "onetcli": ">=0.1.0", "gpui_shell": "0.2.0" },
+        "api": { "shell": "1.0" },
+        "permissions": ["shell:exec", "spawn:./bin/provider"],
+        "runtime": {
+            "ipc": [{
+                "id": "provider",
+                "entry": { "command": "./bin/provider" }
+            }]
+        },
+        "contributes": { "shellViews": [view] }
+    });
+    write_manifest(dir, &serde_json::to_string_pretty(&manifest).unwrap());
+}
+
+fn write_shell_entry(dir: &std::path::Path, entry: &str) {
+    let path = dir.join(entry);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "export default class View {}").unwrap();
+}
+
 #[cfg(unix)]
 fn write_ipc_manifest(dir: &std::path::Path, runtime: serde_json::Value) {
     let manifest = serde_json::json!({

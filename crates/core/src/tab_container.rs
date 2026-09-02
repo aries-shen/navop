@@ -4249,6 +4249,7 @@ impl TabContainer {
                                                     source.take_tab(from_idx, window, cx)
                                                 });
                                                 if let Some(tab) = moved {
+                                                    this.subscribe_tab_content(&tab, window, cx);
                                                     this.tabs.insert(to_idx, tab);
                                                     this.set_active_index(to_idx, window, cx);
                                                     cx.emit(TabContainerEvent::LayoutChanged);

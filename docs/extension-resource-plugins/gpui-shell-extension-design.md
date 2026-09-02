@@ -23,11 +23,10 @@ UI RPC。已有 provider 协议保持不变，Elasticsearch、Kafka、Kubernetes
 
 1. 公开带显式 `Policy` 和 load options 的嵌入式 view load API。
 2. 提供接收 GPUI `App` 的对称、幂等 loaded-view unload 生命周期。
-3. 增加 contained embedding profile，关闭全局 keybinding、window mutation、open URL
-   和其他宿主级 built-in authority。
-4. unload 时撤销 per-policy HostModules，并让 retired application 的旧 frame 不再进入 VM。
-5. 让异步 HostModule 可传播底层 cancellation。
-6. 提供不重复初始化 `gpui-base` 的 embedded init 入口。
+3. unload 时撤销 per-policy HostModules，并让 retired application 的旧 frame 不再进入 VM。
+4. 让异步 HostModule 可传播底层 cancellation。
+5. 提供不重复初始化 `gpui-base` 的 embedded init 入口。
+6. 直接复用上游 `gpui-component-shell` frozen registry，不维护 Navop 专用组件绑定。
 
 不修改 `gpui-component` 控件，不让 gpui-shell 依赖 `gpui-component::Root`，不把 Navop
 业务类型放入 fork。
@@ -59,7 +58,7 @@ UI RPC。已有 provider 协议保持不变，Elasticsearch、Kafka、Kubernetes
 
 ### 2.2 gpui-shell 已有能力
 
-固定 fork `0f727461bfd30f9d23e6f334cb52cdeb004f326d` 已包含
+固定 fork `e6459613910143b817eecbacc8767976e86cac84` 已合并最新上游并包含
 `gpui_ce_components_shell`，crate 名为 `gpui_shell`。它已经提供：
 
 - QuickJS ES module 执行和 `ScriptView`。
@@ -69,11 +68,8 @@ UI RPC。已有 provider 协议保持不变，Elasticsearch、Kafka、Kubernetes
 - plain-data `HostValue` 边界。
 - script task、application generation 和 hot reload 生命周期。
 
-当前阻塞是 `crates/shell/src/plugin.rs::load_view_with_policy` 仍为私有函数，且
-`Plugin::shutdown` 中的 unload 语义没有公开给外部 embedder。另一个必须先解决的差异
-是：当前 gpui-shell policy 并不约束所有 built-in UI authority，脚本仍可直接注册全局
-keybinding、修改 window 和打开 HTTP(S) URL。因此“空 Capabilities”本身不足以构成
-Navop 所需的 contained embedding。
+Navop 只保留上游尚未公开的嵌入生命周期薄层：显式 policy load、幂等 unload、异步取消和
+embedded init。UI 组件、类型声明和 materializer 全部来自上游 `gpui-component-shell`。
 
 ### 2.3 当前不能直接使用 `PluginManager`
 
@@ -99,16 +95,15 @@ Navop 不应直接采用 gpui-shell 的 `PluginManager` 作为扩展目录和权
 6. 每个 view 的脚本权限、backend、资源句柄和异步任务相互隔离。
 7. view 关闭、加载失败、启动取消和 runtime restart 都有确定的清理语义。
 8. Navop 可继续使用现有 TabContainer、Root、通知、凭据和连接管理能力。
-9. gpui-component fork 只暴露 engine-neutral 的嵌入 API。
+9. gpui-component adapter 提供全部脚本 UI 组件；fork 只暴露 engine-neutral 的嵌入 API。
 
 ### 3.2 非目标
 
 - 不支持 Rust dylib 作为第三方 UI 插件。
 - 不允许 provider 向宿主发送任意 UI 描述。
 - 不把 manifest permission 宣称为 native process 的 OS sandbox。
-- MVP 不支持脚本直接使用 `ShellRoot` 的 dialog、sheet、toast 和 window overlay。
-- MVP 不允许脚本使用 gpui-shell 的全局 keybinding、window mutation、open URL/Link 等
-  application-owner API；这些能力必须走 Navop contribution 或 `navop.ui`。
+- MVP 不支持脚本直接使用 `ShellRoot` 的 dialog、sheet、toast 和 window overlay；脚本 UI
+  统一使用 `gpui-component-shell` 提供的 `gpui-component` registry。
 - MVP 不保证恶意脚本的进程级隔离；gpui-shell policy 是 API authority 隔离。
 - MVP 不实现跨进程脚本 renderer，也不把 QuickJS 放入 provider process。
 - 不让 shell view 直接访问任意 Navop 内部 crate 或数据库对象。
@@ -237,7 +232,6 @@ Navop 只读取根目录的 `extension.json`。shell entry 是 contribution 的�
           "job",
           "event",
           "blob",
-          "ui",
           "log"
         ]
       }
@@ -369,27 +363,16 @@ network      = denied
 execute      = denied
 clipboard    = denied
 exit         = denied
-embedding    = contained
+ui catalog   = gpui-component-shell
 host modules = 经过 contribution + permission 交集后注册
 ```
 
 扩展脚本连接中间件必须通过 provider，不把 `net:*` 映射为 gpui-shell direct network。
 这保证连接审计、secret 注入、timeout、取消、blob 和 generation 语义都只有一套。
 
-`contained` 还必须在 gpui-shell 内部拒绝：
-
-- `cx.bind_keys()`；
-- minimize、zoom、fullscreen、rem size 等 window mutation；
-- action dispatch 到应用级 action；
-- `cx.open_url()` 和 declarative Link 导航；
-- script-owned exit request。
-
-viewport、theme、mouse position 等只读信息和 view 内部 GPUI event/render 能力保留。
-
-embedding profile 必须成为 immutable `Policy` 字段，而不是 runtime global 或只存在于
-load options 的临时开关。module top-level owner-less task、Promise continuation、nested
-`ScriptView` 和未来的 reload replacement 都从 scope 中捕获同一个 Policy，因此不能在
-`await` 后或子 view 中退回 application profile。
+UI 组件不再通过 Navop 专用 UI HostModule 或第二套组件协议表达。shell view 统一导入
+`gpui-component-shell` 注册的 `gpui-component` 模块；provider 数据访问仍通过显式声明的
+Navop HostModule。`shell:exec` 安装审查覆盖脚本 UI 在 Navop 进程内运行的整体风险。
 
 ### 7.3 HostModule 授权
 
@@ -403,7 +386,6 @@ contribution 请求的 modules
 
 例如：
 
-- `ui` 模块的 `notify` 需要 `notifications:show`。
 - `connection` 保存 secret 需要精确 extension namespace。
 - `database` 读取 Navop 连接需要 `db:connections:list` 和对应 `db:read:*`。
 - backend resource 的 endpoint descriptor 由 connection profile 或标准 metadata 提供，
@@ -445,8 +427,7 @@ impl ShellRuntime {
 }
 
 let options = ViewLoadOptions::new(root, entry, policy)
-    .embedding_profile(EmbeddingProfile::Contained)
-    .emit_type_declarations(false);
+    .write_type_declarations(false);
 ```
 
 `LoadedScriptView` 是 opaque handle：
@@ -485,20 +466,14 @@ entity 时的第二道保护。`Drop` 只能做无上下文的 generation/task/m
 - `SpecArena`、materializer、callback arena 和 module resolver。
 - GPUI Entity 的脚本桥接表示。
 
-Navop 只依赖 `ShellRuntime`、`Policy`、`EmbeddingProfile`、`ViewLoadOptions`、
-`HostModule`、`HostValue`、`ScriptView` 和 `LoadedScriptView`。
+Navop 只依赖 `ShellRuntime`、`Policy`、`ViewLoadOptions`、`HostModule`、`HostValue`、
+`ScriptView`、`LoadedScriptView` 和 `gpui-component-shell` 的 frozen registry。
 
 ### 8.3 不修改 `gpui_component::Root`
 
-Navop 主窗口的第一层 view 必须继续是 `gpui_component::Root`。MVP 中嵌入的
-`ScriptView` 不使用 `ShellRoot` overlay API：
-
-- toast/notify 走 `navop.ui`。
-- confirm/dialog 走 `navop.ui`，由现有 Root 展示。
-- file picker、open external 和 window action 同样由宿主实现。
-
-如果未来确实需要 shell 内置 overlay，新增 engine-neutral `OverlayHost` callback seam，
-由 Navop 映射到 Root；禁止让 gpui-shell 直接依赖 gpui-component。
+Navop 主窗口的第一层 view 继续是 `gpui_component::Root`。MVP 中嵌入的 `ScriptView`
+不使用 `ShellRoot` overlay API；toast/notify、confirm/dialog、表单和其他 UI 统一使用
+`gpui-component-shell` registry，由现有 Root 承载。
 
 ### 8.4 可取消 HostModule task
 
@@ -705,7 +680,6 @@ job 默认属于 mount。view 关闭时 cancel/close job；最终 lease 清理�
 | `navop.job` | start、status、cancel、result、close |
 | `navop.event` | open、read、close；SDK 封装为 async iterator |
 | `navop.blob` | open/read/close、text/base64 helper |
-| `navop.ui` | notify、confirm、file picker、open external |
 | `navop.log` | 带 extension/view/mount 字段的结构化日志 |
 | `navop.database` | 可选的 Navop 内建数据库 facade，受 `db:*` 权限约束 |
 
@@ -1135,12 +1109,9 @@ script 在 backend 激活完成后才加载。wrapper 使用 Navop 原生状态�
 
 ### 17.3 dialog 和 notify
 
-`navop.ui` 通过 mount 捕获的 window/root bridge 发起操作。所有回调都检查 mount 仍活跃，
-窗口关闭后的迟到结果丢弃。
-
-script 不应调用要求 `ShellRoot` 的内置 overlay API。Navop SDK 和开发文档必须明确这一
-embedded profile 差异。contained profile 还会在运行时拒绝 window mutation、全局
-keybinding 和 open URL/Link，不能只靠文档要求脚本自律。
+dialog、sheet、notification 和其他 UI 统一使用 `gpui-component` module。Navop 主窗口已由
+`gpui_component::Root` 承载。窗口关闭后的脚本 view 由
+`LoadedScriptView::unload` 统一 retire，并取消其 HostModule task。
 
 ## 18. extension_view 集成
 
@@ -1187,12 +1158,11 @@ Elasticsearch 特例。
 1. explicit-policy view load 使用传入 policy，而不是 default policy。
 2. 两个 view 的 HostModule registry 和 storage 不互相可见。
 3. load/link/construct 失败会取消该 policy 创建的 task。
-4. contained profile 拒绝全局 keybinding、window mutation、action dispatch 和 open URL/Link。
-5. `LoadedScriptView::unload(cx)` 幂等，撤销 HostModules 并取消 owner-less task。
-6. generation retired 后，即使旧 frame 保留 entity 也不再进入 VM。
-7. `HostAsyncTask.cancel` 在 unload 时触发底层 cancellation。
-8. `emit_type_declarations(false)` 不写只读 extension root。
-9. contained profile 在 module top-level task、await continuation 和 nested view 中不丢失。
+4. `LoadedScriptView::unload(cx)` 幂等，撤销 HostModules 并取消 owner-less task。
+5. generation retired 后，即使旧 frame 保留 entity 也不再进入 VM。
+6. `HostAsyncTask.cancel` 在 unload 时触发底层 cancellation。
+7. `write_type_declarations(false)` 不写只读 extension root。
+8. `gpui-component` module 可在 Navop shell view 中导入并物化组件。
 
 ### 20.2 manifest/catalog
 
@@ -1221,7 +1191,7 @@ Elasticsearch 特例。
 11. 超出 JS safe integer 的 JSON 值无损 round-trip。
 12. 未声明 backend alias/module/permission 的调用 fail closed。
 13. endpoint descriptor 支持 wildcard、Unix socket 和 profile path，legacy extractor 仅回退。
-14. `navop.ui` 使用现有 Root，不要求窗口 root 为 `ShellRoot`。
+14. `gpui-component` overlay 使用现有 Root，不要求窗口 root 为 `ShellRoot`。
 15. cancel 与 success response 同时 ready 时保留 result，并执行 create-call compensator。
 16. forced tab removal/clear 不经过 `try_close` 时仍会取消 mount 并释放 policy/runtime。
 17. late-response tombstone 达到容量上限时 fail closed，不发生无界增长或静默丢弃。
@@ -1271,8 +1241,7 @@ install extension
 
 ### Phase 1：最小 fork 改动
 
-- 在 gpui-shell 增加 `ViewLoadOptions`、`EmbeddingProfile::Contained` 和 public view loader。
-- contained profile gate 全局 keybinding、window mutation、action dispatch 和 open URL/Link。
+- 在 gpui-shell 增加 `ViewLoadOptions` 和 public view loader。
 - 增加 opaque `LoadedScriptView`、`unload(cx)`、module revoke 和 generation liveness guard。
 - 增加 cancellable HostModule task，并允许关闭 type declaration 写入。
 - 增加 fork 单元测试。
@@ -1295,7 +1264,7 @@ install extension
 
 ### Phase 4：HostModules 与 SDK
 
-- 先实现 context、runtime、resource、blob、ui、log。
+- 先实现 context、runtime、resource、blob、log。
 - 再实现 job、event、connection 和 database。
 - 提供 TypeScript declarations、`NavopValue` codec 和 async iterator helper。
 - 所有 Tokio-bound 调用走 Navop Tokio bridge 和 root cancellation token。
@@ -1330,8 +1299,8 @@ install extension
 
 ### 22.4 修改 `gpui_component::Root` 适配 ShellRoot
 
-MVP 拒绝原因：影响所有 Navop window，扩大 fork 面和回归范围。`navop.ui` 已能以应用层
-bridge 使用现有 Root。
+MVP 拒绝原因：影响所有 Navop window，扩大 fork 面和回归范围。现有 Navop Root 已可承载
+`gpui-component-shell` 注册的组件和 overlay。
 
 ### 22.5 脚本直接获得 provider client/runtime id
 
@@ -1350,8 +1319,8 @@ MVP 拒绝原因：绕过 provider 的 permission authorizer、secret、timeout�
 1. 不存在新的 provider UI method 或 declarative UI DTO。
 2. gpui-component 普通控件和 Root 无 Navop 专用改动。
 3. 一个安装包可声明 shell view 和任意 IPC provider，并在无需重启 Navop 时打开。
-4. `shell:exec` 必须经过高危权限门禁；contained view 不能注册全局 keybinding、修改
-   window 或绕过 `navop.ui` 打开 URL。
+4. `shell:exec` 必须经过高危权限门禁；脚本 UI 统一使用 `gpui-component` module，不存在
+   第二套 Navop UI API。
 5. shell view 只能使用声明的 backend alias 和已授权 HostModules。
 6. 两个 mount 共享 runtime process，但关闭和取消互不释放对方 lease。
 7. 最后一个 mount 关闭后 process、job、event、blob、HostModules 和 policy task 均清理。

@@ -54,25 +54,65 @@ impl UniversalPluginClient {
         &self,
         params: &ResourceOpenParams,
     ) -> HostResult<ResourceOpenResult> {
+        self.open_resource_with_options(params, RequestOptions::default())
+            .await
+    }
+
+    pub async fn open_resource_with_options(
+        &self,
+        params: &ResourceOpenParams,
+        options: RequestOptions,
+    ) -> HostResult<ResourceOpenResult> {
         if let Some(authorizer) = &self.open_authorizer {
             authorizer(params)?;
         }
-        self.request(method::RESOURCE_OPEN, params).await
+        self.request_with_options(method::RESOURCE_OPEN, params, options)
+            .await
     }
 
     pub async fn ping_resource(&self, params: &ResourcePingParams) -> HostResult<()> {
-        self.request(method::RESOURCE_PING, params).await
+        self.ping_resource_with_options(params, RequestOptions::default())
+            .await
+    }
+
+    pub async fn ping_resource_with_options(
+        &self,
+        params: &ResourcePingParams,
+        options: RequestOptions,
+    ) -> HostResult<()> {
+        self.request_with_options(method::RESOURCE_PING, params, options)
+            .await
     }
 
     pub async fn invoke_resource(
         &self,
         params: &ResourceInvokeParams,
     ) -> HostResult<ResourceInvokeResult> {
-        self.request(method::RESOURCE_INVOKE, params).await
+        self.invoke_resource_with_options(params, RequestOptions::default())
+            .await
+    }
+
+    pub async fn invoke_resource_with_options(
+        &self,
+        params: &ResourceInvokeParams,
+        options: RequestOptions,
+    ) -> HostResult<ResourceInvokeResult> {
+        self.request_with_options(method::RESOURCE_INVOKE, params, options)
+            .await
     }
 
     pub async fn close_resource(&self, params: &ResourceCloseParams) -> HostResult<()> {
-        self.request(method::RESOURCE_CLOSE, params).await
+        self.close_resource_with_options(params, RequestOptions::default())
+            .await
+    }
+
+    pub async fn close_resource_with_options(
+        &self,
+        params: &ResourceCloseParams,
+        options: RequestOptions,
+    ) -> HostResult<()> {
+        self.request_with_options(method::RESOURCE_CLOSE, params, options)
+            .await
     }
 
     pub async fn start_job(&self, params: &JobStartParams) -> HostResult<JobStartResult> {

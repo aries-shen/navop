@@ -1,6 +1,5 @@
 use std::{fs, path::PathBuf, process::Command};
 
-use anyhow::Result;
 use db::GlobalDbState;
 use db_view::extension_menu::DbTreeExtensionActionContext;
 use one_core::storage::DatabaseType;

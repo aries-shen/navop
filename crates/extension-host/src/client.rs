@@ -166,12 +166,12 @@ impl JsonRpcClientHandle {
         let resp = if let Some(token) = options.cancel.clone() {
             tokio::select! {
                 biased;
+                r = timeout(to, recv_fut) => r,
                 _ = token.cancelled() => {
                     drop(guard);
                     let _ = self.send_cancel(id).await;
                     return Err(HostError::Cancelled { method: method.to_string() });
                 }
-                r = timeout(to, recv_fut) => r,
             }
         } else {
             timeout(to, recv_fut).await

@@ -6,7 +6,7 @@ workspace manifest:
 
 ```text
 https://github.com/feigeCode/gpui-component.git
-rev 0f727461bfd30f9d23e6f334cb52cdeb004f326d
+rev e6459613910143b817eecbacc8767976e86cac84
 ```
 
 The checkout belongs to `https://github.com/feigeCode/gpui-component` and the
@@ -34,12 +34,38 @@ resolution are injected by `main`.
 
 ## Updating
 
-1. Fetch the latest `gpui-ce/gpui-component` adaptation into the fork.
-2. Rebase or merge it into `navop-gpui-ce`.
-3. Resolve the small compatibility layer in the component worktree.
-4. Run `cargo check -p gpui_ce_components`.
-5. Run `cargo check -p main` and the verification commands below in Navop.
-6. Update the fixed `git` and `rev` in Navop's workspace manifest and lockfile.
+Use the synchronization script from the Navop repository:
+
+```bash
+# Verify the merge in a temporary worktree without changing either branch.
+script/sync-gpui-component.sh \
+  --component-dir /path/to/gpui-component \
+  --no-fetch \
+  --dry-run
+
+# Merge, verify, push the compatibility branch, and update Navop revisions,
+# package versions, shell compatibility constants, examples, docs, and lockfile.
+script/sync-gpui-component.sh \
+  --component-dir /path/to/gpui-component \
+  --fetch-source git@github.com:feigeCode/gpui-component.git \
+  --push \
+  --update-navop
+```
+
+The script merges in a temporary worktree first and enables Git rerere for known
+conflicts. Unknown conflicts or failed verification stop without changing the
+compatibility branch or Navop files. It never guesses a semantic conflict.
+
+To update only Navop after an already-pushed component commit:
+
+```bash
+python3 script/update_gpui_component_revision.py \
+  --component-dir /path/to/gpui-component \
+  --revision <commit>
+```
+
+The updater reads actual package versions from `cargo metadata`; do not edit the
+five dependency versions or `GPUI_SHELL_VERSION` independently.
 
 For network fetches on this machine, Clash is available at
 `http://127.0.0.1:7897`.
@@ -56,8 +82,9 @@ cargo test -p extension-plugin-adapter
 cargo check -p terminal_view --all-targets
 ```
 
-The retired declarative UI crate is intentionally absent. Plugin UI will be
-reintroduced through gpui-shell after its policy-aware public load API is pinned.
+The retired declarative UI crate is intentionally absent. Plugin UI uses
+`gpui-component-shell`; Navop keeps only the generic shell embedding lifecycle
+and provider HostModules.
 
 ## SQL Editor Extensions
 
