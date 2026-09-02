@@ -1116,6 +1116,22 @@ TerminalView:
     en: Paste preview
     zh-CN: 粘贴预览
     zh-HK: 貼上預覽
+  paste_summary:
+    en: "%{lines} lines · %{chars} chars"
+    zh-CN: 共 %{lines} 行 · %{chars} 字符
+    zh-HK: 共 %{lines} 行 · %{chars} 字元
+  paste_as_single_line:
+    en: Paste as single line
+    zh-CN: 合并为单行粘贴
+    zh-HK: 合併為單行貼上
+  large_paste_title:
+    en: Confirm Large Paste
+    zh-CN: 确认大段粘贴
+    zh-HK: 確認大段貼上
+  large_paste_message:
+    en: The pasted content is large (over 200 lines or 32 KB). Please confirm before pasting.
+    zh-CN: 粘贴内容较大（超过 200 行或 32 KB），请确认后再粘贴。
+    zh-HK: 貼上內容較大（超過 200 行或 32 KB），請確認後再貼上。
 
 TerminalSidebar:
   paste_to_terminal:

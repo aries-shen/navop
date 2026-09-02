@@ -105,7 +105,8 @@ use one_ui::resize_handle::{HandlePlacement, ResizePanel, resize_handle};
 #[cfg(test)]
 use paste_safety::has_unterminated_shell_quote;
 use paste_safety::{
-    UnbracketedPasteHazard, detect_unbracketed_paste_hazard, multiline_non_empty_line_count,
+    UnbracketedPasteHazard, detect_unbracketed_paste_hazard, is_large_paste,
+    multiline_non_empty_line_count, strip_dangerous_control_chars,
 };
 use remote_image_preview::image_from_local_path;
 use rust_i18n::t;
@@ -175,6 +176,8 @@ mod vi_input;
 mod zmodem_picker;
 
 use actions::*;
+#[cfg(test)]
+use clipboard_image::join_paste_as_single_line;
 use command_bar::{TerminalCommandBar, TerminalCommandBarConfig, TerminalCommandBarEvent};
 pub(crate) use command_bar_model::quick_command_executes_on_click;
 use helpers::*;
