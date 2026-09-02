@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "agent_runtime"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "ai_chat_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "agent-client-protocol",
  "agent_runtime",
@@ -445,7 +445,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "api_tools"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "connection-form"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "gpui_ce",
  "gpui_ce_components",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "connection-import-protocol"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2293,7 +2293,7 @@ checksum = "510ca239cf13b7f8d16a2b48f263de7b4f8c566f0af58d901031473c76afb1e3"
 
 [[package]]
 name = "connection_tunnel"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "serde",
  "ssh",
@@ -3127,7 +3127,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "db"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "db_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "ai_chat_view",
  "anyhow",
@@ -3871,7 +3871,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "er_flow"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "ferrum-flow",
@@ -3960,7 +3960,7 @@ dependencies = [
 
 [[package]]
 name = "extension-api"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "serde",
  "wit-parser 0.244.0",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "extension-component"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3981,7 +3981,7 @@ dependencies = [
 
 [[package]]
 name = "extension-driver"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3994,7 +3994,7 @@ dependencies = [
 
 [[package]]
 name = "extension-host"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "async-trait",
  "extension-protocol",
@@ -4031,7 +4031,7 @@ dependencies = [
 
 [[package]]
 name = "extension-protocol"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -4042,7 +4042,7 @@ dependencies = [
 
 [[package]]
 name = "extension-runtime"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "extension-wasm"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "async-trait",
  "connection-import-protocol",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "extension_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "ferrum-flow"
-version = "0.3.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -5078,7 +5078,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-rdp-smoke"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "gpui_ce",
  "gpui_ce_platform",
@@ -5088,7 +5088,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-wry"
-version = "0.5.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "gpui_ce",
@@ -6091,7 +6091,7 @@ dependencies = [
 
 [[package]]
 name = "html-preview"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "dirs 6.0.0",
  "futures",
@@ -6968,7 +6968,7 @@ dependencies = [
 
 [[package]]
 name = "json_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "gpui_ce",
  "gpui_ce_components",
@@ -7338,7 +7338,7 @@ dependencies = [
 
 [[package]]
 name = "license_tool"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7876,7 +7876,7 @@ checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "main"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "agent_runtime",
  "ai_chat_view",
@@ -7992,7 +7992,7 @@ dependencies = [
 
 [[package]]
 name = "markdown-editor"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "cssparser 0.37.0",
@@ -8017,7 +8017,7 @@ dependencies = [
 
 [[package]]
 name = "markdown-source"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "markdown",
  "thiserror 2.0.20",
@@ -8254,7 +8254,7 @@ dependencies = [
 
 [[package]]
 name = "modem-transfer"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "bitflags 2.13.1",
  "hex",
@@ -8370,7 +8370,7 @@ dependencies = [
 
 [[package]]
 name = "mongodb-runtime"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8393,7 +8393,7 @@ dependencies = [
 
 [[package]]
 name = "mongodb_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "ai_chat_view",
  "anyhow",
@@ -8674,7 +8674,7 @@ dependencies = [
 
 [[package]]
 name = "notes"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9322,7 +9322,7 @@ dependencies = [
 
 [[package]]
 name = "one-core"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "aes-gcm 0.10.3",
  "agent-client-protocol",
@@ -9370,7 +9370,7 @@ dependencies = [
 
 [[package]]
 name = "one-ui"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9387,7 +9387,7 @@ dependencies = [
 
 [[package]]
 name = "onetcli_runtime"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "agent_runtime",
  "anyhow",
@@ -10241,7 +10241,7 @@ dependencies = [
 
 [[package]]
 name = "port_forwarding"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "one-core",
@@ -10251,7 +10251,7 @@ dependencies = [
 
 [[package]]
 name = "port_forwarding_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "connection-form",
@@ -10517,7 +10517,7 @@ dependencies = [
 
 [[package]]
 name = "process-util"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "tokio",
 ]
@@ -10604,7 +10604,7 @@ dependencies = [
 
 [[package]]
 name = "public_mcp"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "agent_runtime",
  "anyhow",
@@ -11228,7 +11228,7 @@ dependencies = [
 
 [[package]]
 name = "redis-runtime"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11254,7 +11254,7 @@ dependencies = [
 
 [[package]]
 name = "redis_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "agent_runtime",
  "ai_chat_view",
@@ -11406,7 +11406,7 @@ dependencies = [
 
 [[package]]
 name = "remote_desktop"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -11425,7 +11425,7 @@ dependencies = [
 
 [[package]]
 name = "remote_desktop_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "cocoa 0.26.0",
@@ -11451,7 +11451,7 @@ dependencies = [
 
 [[package]]
 name = "remote_file_editor"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "extension-runtime",
@@ -11470,7 +11470,7 @@ dependencies = [
 
 [[package]]
 name = "remote_image_preview"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "gpui_ce",
@@ -11540,7 +11540,7 @@ dependencies = [
 
 [[package]]
 name = "reqwest_client"
-version = "0.5.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -12778,7 +12778,7 @@ dependencies = [
 
 [[package]]
 name = "sftp"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12798,7 +12798,7 @@ dependencies = [
 
 [[package]]
 name = "sftp_transfer"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12813,7 +12813,7 @@ dependencies = [
 
 [[package]]
 name = "sftp_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13277,7 +13277,7 @@ dependencies = [
 
 [[package]]
 name = "ssh"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13939,7 +13939,7 @@ dependencies = [
 
 [[package]]
 name = "terminal"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -13971,7 +13971,7 @@ dependencies = [
 
 [[package]]
 name = "terminal_view"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "agent_runtime",
  "ai_chat_view",
@@ -14504,7 +14504,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tool_runtime"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "futures",
  "serde",
@@ -16573,7 +16573,7 @@ dependencies = [
 
 [[package]]
 name = "windows-rdp-probe"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "cc",
 ]
@@ -16927,7 +16927,7 @@ checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
 
 [[package]]
 name = "windows_rdp_host"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "cc",
  "tracing",
@@ -17151,7 +17151,7 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 
 [[package]]
 name = "workspace_explorer"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "gpui_ce",
@@ -17226,7 +17226,7 @@ dependencies = [
 
 [[package]]
 name = "x11_forwarding"
-version = "0.1.0"
+version = "0.15.2"
 dependencies = [
  "dashmap 5.5.3",
  "hex",
