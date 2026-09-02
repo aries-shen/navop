@@ -1129,7 +1129,6 @@ impl ContextMenuHandler for SftpView {
             cx,
         );
         self.active_extract = Some(ActiveExtract { background_task });
-        self.show_background_tasks(cx);
         cx.notify();
 
         let session_manager = Arc::new(SshSessionManager::new(self.sftp_config.clone()));

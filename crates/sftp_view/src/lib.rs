@@ -44,7 +44,6 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex,
 };
-use one_core::background_task_panel::show_background_tasks_or_notify;
 use one_core::background_tasks::{
     BackgroundTaskCancellation, BackgroundTaskHandle, BackgroundTaskProgressUnit,
     BackgroundTaskSpec,
@@ -589,9 +588,6 @@ impl TransferQueue {
 
     fn bottom_visible_tasks(&self) -> Vec<TransferTask> {
         self.active_tasks()
-            .into_iter()
-            .filter(|task| task.external_transfer_id.is_none() && task.background_task.is_none())
-            .collect()
     }
 }
 
@@ -4111,7 +4107,6 @@ impl SftpView {
             connection_source: SftpUploadConnection::Config(self.sftp_config.clone()),
             task_group: self.background_task_group(),
         };
-        let mut submitted = false;
         for transfer in transfers {
             let prepared = prepare_global_upload(&transfer, conflict_policy, &upload_context);
             let reservation = self
@@ -4130,30 +4125,15 @@ impl SftpView {
             };
             let refresh_target = self.reconcile_transfer_snapshot_to_mirror(&snapshot);
             self.refresh_transfer_target_if_visible(refresh_target, cx);
-            submitted = true;
         }
 
-        if submitted {
-            self.show_background_tasks(cx);
-        }
         self.start_progress_refresh(cx);
         cx.notify();
     }
-
-    fn show_background_tasks(&self, cx: &mut Context<Self>) {
-        let manager = one_core::background_tasks::global(cx);
-        if let Some(window) = cx.active_window() {
-            let _ = window.update(cx, |_, window, cx| {
-                show_background_tasks_or_notify(manager, window, cx);
-            });
-        }
-    }
-
     fn background_task_group(&self) -> SharedString {
         // 分组标题只保留「连接名称 - IP」，同一连接的多个面板合并到同一分组。
         format!("{} - {}", self.connection_name, self.sftp_config.host).into()
     }
-
     fn register_local_background_task(
         &self,
         kind: &'static str,
@@ -4435,7 +4415,6 @@ impl SftpView {
             connection_source: SftpUploadConnection::Config(self.sftp_config.clone()),
             task_group: self.background_task_group(),
         };
-        let mut submitted = false;
         for transfer in transfers {
             let prepared = prepare_global_download(&transfer, &download_context);
             let reservation = self.upload_executor.update(cx, |executor, _| {
@@ -4454,10 +4433,6 @@ impl SftpView {
             };
             let refresh_target = self.reconcile_transfer_snapshot_to_mirror(&snapshot);
             self.refresh_transfer_target_if_visible(refresh_target, cx);
-            submitted = true;
-        }
-        if submitted {
-            self.show_background_tasks(cx);
         }
         self.start_progress_refresh(cx);
         cx.notify();
@@ -4613,7 +4588,6 @@ impl SftpView {
             {
                 task.background_task = Some(handle);
             }
-            self.show_background_tasks(cx);
         }
 
         self.schedule_transfers(cx);
@@ -4741,7 +4715,6 @@ impl SftpView {
         };
         let refresh_target = self.reconcile_transfer_snapshot_to_mirror(&snapshot);
         self.refresh_transfer_target_if_visible(refresh_target, cx);
-        self.show_background_tasks(cx);
         self.start_progress_refresh(cx);
         cx.notify();
     }
@@ -5367,7 +5340,6 @@ impl SftpView {
             {
                 task.background_task = Some(handle);
             }
-            self.show_background_tasks(cx);
         }
         self.schedule_transfers(cx);
     }
@@ -8150,7 +8122,7 @@ mod tests {
     }
 
     #[test]
-    fn bottom_queue_hides_global_uploads_and_downloads() {
+    fn bottom_queue_shows_all_active_tasks_including_uploads_and_downloads() {
         let mut queue = TransferQueue::new(2);
         let mut upload = transfer_task(1);
         upload.external_transfer_id = Some(SftpTransferId::new(7));
@@ -8182,7 +8154,7 @@ mod tests {
         let visible = queue.bottom_visible_tasks();
 
         assert_eq!(
-            vec![3],
+            vec![1, 2, 3],
             visible.iter().map(|task| task.id).collect::<Vec<_>>()
         );
     }

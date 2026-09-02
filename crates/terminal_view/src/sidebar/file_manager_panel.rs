@@ -30,7 +30,6 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex,
 };
-use one_core::background_task_panel::show_background_tasks_or_notify;
 use one_core::background_tasks::{BackgroundTaskHandle, BackgroundTaskSpec};
 use one_core::gpui_tokio::Tokio;
 use one_core::sidebar_contribution::SidebarPlacement;
@@ -2928,7 +2927,6 @@ impl FileManagerPanel {
                 .update(cx, |executor, cx| executor.submit(request, cx));
         }
 
-        self.show_background_tasks(cx);
         cx.notify();
     }
 
@@ -3083,15 +3081,6 @@ impl FileManagerPanel {
             .update(cx, |executor, cx| executor.submit_download(request, cx));
     }
 
-    fn show_background_tasks(&self, cx: &mut Context<Self>) {
-        let manager = one_core::background_tasks::global(cx);
-        if let Some(window) = cx.active_window() {
-            let _ = window.update(cx, |_, window, cx| {
-                show_background_tasks_or_notify(manager, window, cx);
-            });
-        }
-    }
-
     fn background_task_group(&self) -> SharedString {
         self.background_task_group.clone()
     }
@@ -3148,7 +3137,6 @@ impl FileManagerPanel {
         });
         self.pending_global_deletes
             .insert(id, GlobalDeleteView { remote_dir });
-        self.show_background_tasks(cx);
         cx.notify();
     }
 
@@ -3677,7 +3665,6 @@ impl FileManagerPanel {
             cx,
         );
         self.active_extract = Some(ActiveExtract { background_task });
-        self.show_background_tasks(cx);
         cx.notify();
 
         let session_manager = self.session_manager.clone();
@@ -3902,7 +3889,6 @@ impl FileManagerPanel {
                                 cx,
                             );
                         }
-                        this.show_background_tasks(cx);
                     });
                 }
             }
@@ -5163,12 +5149,6 @@ impl FileManagerPanel {
     fn upload_progress_view(&self, cx: &mut Context<Self>) -> Option<TransferProgressView> {
         self.global_executor.read_with(cx, |executor, _| {
             let snapshot = executor.active_for_connection(&self.upload_connection_identity)?;
-            if matches!(
-                snapshot.operation,
-                SftpTransferOperation::Upload | SftpTransferOperation::Download
-            ) {
-                return None;
-            }
             let icon = match snapshot.operation {
                 SftpTransferOperation::Upload => IconName::ArrowUp,
                 SftpTransferOperation::Download => IconName::ArrowDown,
@@ -5451,7 +5431,12 @@ impl FileManagerPanel {
         };
         let scroll_handle = self.scroll_handle.clone();
         let is_loading = self.loading;
-        let has_active_transfer = self.transfer_queue.has_active();
+        let has_active_transfer = self.transfer_queue.has_active()
+            || self.global_executor.read_with(cx, |executor, _| {
+                executor
+                    .active_for_connection(&self.upload_connection_identity)
+                    .is_some()
+            });
         let background = self.colors.background;
         let foreground = self.colors.foreground;
         let hover = self.colors.muted.opacity(0.72);
