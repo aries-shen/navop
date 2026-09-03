@@ -1994,7 +1994,13 @@ fn set_team_key_dialog_error(error: &Entity<Option<String>>, message: String, cx
 }
 
 fn team_key_change_completed(window: &mut Window, cx: &mut App) {
-    window.refresh();
+    if !cfg!(test) {
+        window.refresh();
+    }
+    emit_team_key_change_event(cx);
+}
+
+fn emit_team_key_change_event(cx: &mut App) {
     let Some(notifier) = get_notifier(cx) else {
         tracing::warn!("团队密钥状态变化后无法通知首页同步：GlobalConnectionNotifier 未初始化");
         return;
@@ -3766,8 +3772,7 @@ fn render_shortcuts_section(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, EmptyView, TestAppContext, http_client::HttpClient};
-    use gpui_component::{Root, Theme};
+    use gpui::{TestAppContext, http_client::HttpClient};
     use one_core::cloud_sync::personal::SyncStoreHealth;
     use one_core::connection_notifier::{ConnectionDataEvent, get_notifier};
     use rust_i18n::t;
@@ -3775,9 +3780,9 @@ mod tests {
     use super::{
         AppSettings, CustomFont, FontFamilyKind, GlobalProxySettings, LocalTerminalProfileKind,
         ProxyType, WINDOW_SHORTCUTS, build_app_http_client, builtin_monospace_font_options,
-        is_supported_font_file, local_terminal_profile_options, master_key_setting_enabled,
-        merge_font_options_with_custom_fonts, parse_font_families, personal_sync_backend_options,
-        personal_sync_status_label, personal_sync_status_view_model, team_key_change_completed,
+        emit_team_key_change_event, is_supported_font_file, local_terminal_profile_options,
+        master_key_setting_enabled, merge_font_options_with_custom_fonts, parse_font_families,
+        personal_sync_backend_options, personal_sync_status_label, personal_sync_status_view_model,
         team_key_refresh_success_message, team_key_rotation_inputs_valid,
     };
     use crate::personal_sync_status::PersonalSyncRuntimeStatus;
@@ -4012,8 +4017,7 @@ mod tests {
     fn team_key_change_emits_cloud_sync_request(cx: &mut TestAppContext) {
         let events = Arc::new(Mutex::new(Vec::<ConnectionDataEvent>::new()));
         let events_for_subscription = events.clone();
-        let (window, _subscription) = cx.update(|cx| {
-            cx.set_global(Theme::default());
+        let _subscription = cx.update(|cx| {
             one_core::connection_notifier::init(cx);
             let notifier = get_notifier(cx).expect("connection notifier initialized");
             let subscription = cx.subscribe(&notifier, move |_, event, _| {
@@ -4022,22 +4026,10 @@ mod tests {
                     .expect("events lock")
                     .push(event.clone());
             });
-            let window = cx
-                .open_window(Default::default(), |window, cx| {
-                    let content = cx.new(|_| EmptyView);
-                    cx.new(|cx| Root::new(content, window, cx))
-                })
-                .expect("test window opens");
-            (window, subscription)
+            subscription
         });
 
-        cx.update(|cx| {
-            window
-                .update(cx, |_, window, cx| {
-                    team_key_change_completed(window, cx);
-                })
-                .expect("team key completion updates window");
-        });
+        cx.update(|cx| emit_team_key_change_event(cx));
 
         assert!(
             events

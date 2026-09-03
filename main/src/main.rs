@@ -842,9 +842,9 @@ mod native_driver_feature_contract_tests {
         );
         assert!(
             remote_desktop_view_features.contains(
-                "windows-native-rdp = [\"dep:raw-window-handle\", \"dep:windows_rdp_host\"]"
+                "windows-native-rdp = [\n    \"dep:raw-window-handle\",\n    \"dep:windows_rdp_host\",\n    \"remote_desktop/windows-native-rdp\",\n]"
             ),
-            "the feature must enable only the optional native presentation dependencies"
+            "the feature must enable native presentation dependencies and the shared capability marker"
         );
         assert_eq!("default = []", remote_desktop_view_default.trim());
         assert!(dependency_is_optional_or_absent(
