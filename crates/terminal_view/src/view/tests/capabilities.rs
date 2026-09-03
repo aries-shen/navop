@@ -758,7 +758,11 @@ fn credential_capture_consumed_keys_block_text_system_passthrough() {
     );
 
     for (action, capability) in [
-        ("self.capture_append_text(key, cx)", "printable capture input"),
+        (
+            "self.capture_append_text(keystroke_capture_text(&event.keystroke), cx)",
+            "printable capture input must use the platform-resolved character \
+             (key_char) instead of the unshifted keycap name",
+        ),
         (
             "self.handle_credential_capture_submit(window, cx)",
             "capture submit",
