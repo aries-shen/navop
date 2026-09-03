@@ -2120,7 +2120,6 @@ impl SqlEditorTab {
     /// to Running and finalized by the execution-state observer. Multi-statement
     /// or selection runs conservatively leave markers untouched.
     fn bind_execution_marker_for_sql(&mut self, sql: &str, cx: &mut Context<Self>) {
-        self.refresh_statement_snapshot(cx);
         let cursor = self.editor.read(cx).cursor_offset(cx);
         let marker_id = match_sql_to_statement_marker(
             &self.statement_snapshot,
@@ -2503,7 +2502,6 @@ impl SqlEditorTab {
                 else {
                     return;
                 };
-                this.refresh_statement_snapshot(cx);
                 let revision = this.editor.read(cx).document_revision(cx);
                 let Some(statement) = statement_for_gutter_marker(
                     this.statement_snapshot.statement_ranges(),
@@ -4947,6 +4945,28 @@ mod tests {
         assert!(!refresh.contains("InlineWidget"));
         assert!(!refresh.contains("set_inline_widgets"));
         assert!(refresh.contains("state.clear_inline_widgets(cx)"));
+    }
+
+    #[test]
+    fn gutter_run_does_not_rescan_the_full_document_before_execution() {
+        let source = include_str!("sql_editor_view.rs");
+        let gutter_handler = source
+            .split("fn bind_gutter_marker_event")
+            .nth(1)
+            .unwrap()
+            .split("fn bind_connection_data_event")
+            .next()
+            .unwrap();
+        let marker_binding = source
+            .split("fn bind_execution_marker_for_sql")
+            .nth(1)
+            .unwrap()
+            .split("fn is_context_generation_current")
+            .next()
+            .unwrap();
+
+        assert!(!gutter_handler.contains("refresh_statement_snapshot(cx)"));
+        assert!(!marker_binding.contains("refresh_statement_snapshot(cx)"));
     }
 
     #[test]
