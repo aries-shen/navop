@@ -1854,9 +1854,7 @@ impl SqlEditorTab {
         )
         .into_iter()
         .map(|decoration| match decoration.style() {
-            RangeDecorationStyle::Fill => {
-                decoration.with_color(cx.theme().primary.opacity(0.07))
-            }
+            RangeDecorationStyle::Fill => decoration.with_color(cx.theme().primary.opacity(0.07)),
             RangeDecorationStyle::Frame => decoration.with_color(cx.theme().primary),
         })
         .collect();
@@ -2923,6 +2921,31 @@ impl SqlEditorTab {
             })
             .collect();
         schema = schema.with_tables(table_items);
+
+        // 表名先发布：大 schema 的逐表列扫描耗时较长，先让表名补全可用，
+        // 列/函数/qualifier 等完整元数据由随后的终态发布补齐。
+        let early_scope = scope.clone();
+        let early_schema = schema.clone();
+        let early_info = db_completion_info.clone();
+        let early_db = db.clone();
+        let early_entity = entity.clone();
+        let _ = cx.update_window(window_handle, move |_view, _window, cx| {
+            let _ = early_entity.update(cx, |this, cx| {
+                if this
+                    .current_metadata_scope(generation, Some(&early_db), cx)
+                    .as_ref()
+                    != Some(&early_scope)
+                {
+                    return;
+                }
+                this.editor.update(cx, |editor, cx| {
+                    editor.set_db_completion_info(early_info, early_schema, cx);
+                });
+            });
+        });
+        if !self.is_metadata_scope_current(&scope, cx) {
+            return;
+        }
 
         // Load columns for each table with bounded concurrency instead of a
         // serial full-schema catalog scan. Results arrive in completion order,
@@ -4619,6 +4642,9 @@ fn metadata_scope_selection(
     supports_schema: bool,
     uses_schema_as_database: bool,
 ) -> (Option<String>, Option<String>) {
+    // 空串 override（update_schema_for_db 在 scope.database 为 None 时传 db=""）
+    // 必须忽略，否则会覆盖下拉当前选择，导致发布守卫永远不匹配。
+    let database = database.filter(|database| !database.trim().is_empty());
     if uses_schema_as_database {
         (None, database.map(str::to_string).or(selected_schema))
     } else {
@@ -4905,16 +4931,15 @@ mod tests {
         can_switch_query_connection, collect_bounded, current_statement_frame_decorations,
         foreign_prefetch_key, foreign_qualifier_fetch_scope, foreign_qualifier_scope,
         initial_database_select_value, insert_target_table, insert_values_range,
-        is_current_diagnostic_identity,
-        is_current_manual_transaction_owner, is_current_manual_transaction_start,
-        is_current_query_context_generation, lookup_table_columns, manual_sql_execution_action,
-        manual_transaction_control_sql, manual_transaction_invalidation_mode,
-        manual_transaction_stop_action, match_sql_to_statement_marker, metadata_scope_selection,
-        preferred_default_database, query_connection_context_label, query_connection_ids,
-        query_file_path_for_name, query_toolbar_action, schema_changed_event_matches_scope,
-        should_render_schema_select, sql_text_for_run_all, sql_text_for_toolbar_run,
-        statement_for_gutter_marker, statement_marker_id, supports_manual_transactions,
-        toggle_sql_line_comments,
+        is_current_diagnostic_identity, is_current_manual_transaction_owner,
+        is_current_manual_transaction_start, is_current_query_context_generation,
+        lookup_table_columns, manual_sql_execution_action, manual_transaction_control_sql,
+        manual_transaction_invalidation_mode, manual_transaction_stop_action,
+        match_sql_to_statement_marker, metadata_scope_selection, preferred_default_database,
+        query_connection_context_label, query_connection_ids, query_file_path_for_name,
+        query_toolbar_action, schema_changed_event_matches_scope, should_render_schema_select,
+        sql_text_for_run_all, sql_text_for_toolbar_run, statement_for_gutter_marker,
+        statement_marker_id, supports_manual_transactions, toggle_sql_line_comments,
         unquote_sql_identifier, viewport_statement_scan_input, write_new_sql_file, write_sql_file,
     };
     use db::DbManager;
@@ -5436,6 +5461,37 @@ mod tests {
         );
         assert_eq!(
             metadata_scope_selection(None, selected_database, selected_schema, false, false),
+            (Some("selected-db".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn metadata_scope_selection_ignores_empty_override_for_schema_as_database() {
+        // Oracle（uses_schema_as_database）：update_schema_for_db 用 db=""（scope.database
+        // 为 None 时的 unwrap_or_default）回调 current_metadata_scope，空串必须被忽略，
+        // 否则会覆盖 schema 下拉的当前选择，导致元数据发布守卫永远不匹配。
+        assert_eq!(
+            metadata_scope_selection(
+                Some(""),
+                Some("ignored-db".to_string()),
+                Some("APP".to_string()),
+                false,
+                true
+            ),
+            (None, Some("APP".to_string()))
+        );
+    }
+
+    #[test]
+    fn metadata_scope_selection_ignores_empty_override_for_regular_databases() {
+        assert_eq!(
+            metadata_scope_selection(
+                Some(""),
+                Some("selected-db".to_string()),
+                None,
+                false,
+                false
+            ),
             (Some("selected-db".to_string()), None)
         );
     }

@@ -347,6 +347,22 @@ ConnectionForm:
     en: orcl (or use Service Name)
     zh-CN: orcl（或使用服务名称）
     zh-HK: orcl（或使用服務名稱）
+  oracle_role:
+    en: Role
+    zh-CN: 角色
+    zh-HK: 角色
+  oracle_role_default:
+    en: default
+    zh-CN: 默认
+    zh-HK: 預設
+  oracle_role_sysdba:
+    en: SYSDBA
+    zh-CN: SYSDBA
+    zh-HK: SYSDBA
+  oracle_role_sysoper:
+    en: SYSOPER
+    zh-CN: SYSOPER
+    zh-HK: SYSOPER
   proxy_enabled:
     en: Enable Proxy
     zh-CN: 启用代理

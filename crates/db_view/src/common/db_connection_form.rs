@@ -17,8 +17,8 @@ use connection_form::{
 };
 use db::plugin_manifest::FormVisibilityRule;
 use db::{
-    DEFAULT_SCHEMA_PARAM, GlobalDbState, SCHEMA_FILTER_EXCLUDE_PARAM, SCHEMA_FILTER_INCLUDE_PARAM,
-    SCHEMA_FILTER_MODE_PARAM, oracle,
+    DEFAULT_SCHEMA_PARAM, GlobalDbState, ORACLE_ROLE_PARAM, SCHEMA_FILTER_EXCLUDE_PARAM,
+    SCHEMA_FILTER_INCLUDE_PARAM, SCHEMA_FILTER_MODE_PARAM, oracle,
 };
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -883,6 +883,27 @@ impl DbFormConfig {
                     FormField::new("sid", "SID", FormFieldType::Text)
                         .optional()
                         .placeholder(t!("ConnectionForm.sid_placeholder").to_string()),
+                    FormField::new(
+                        ORACLE_ROLE_PARAM,
+                        t!("ConnectionForm.oracle_role"),
+                        FormFieldType::Select,
+                    )
+                    .optional()
+                    .default("default")
+                    .options(vec![
+                        (
+                            "default".to_string(),
+                            t!("ConnectionForm.oracle_role_default").to_string(),
+                        ),
+                        (
+                            "sysdba".to_string(),
+                            t!("ConnectionForm.oracle_role_sysdba").to_string(),
+                        ),
+                        (
+                            "sysoper".to_string(),
+                            t!("ConnectionForm.oracle_role_sysoper").to_string(),
+                        ),
+                    ]),
                 ]),
                 TabGroup::new("advanced", t!("ConnectionForm.advanced")).fields(
                     Self::with_schema_preference_fields(vec![
@@ -3409,6 +3430,22 @@ mod tests {
         let config = DbFormConfig::oracle();
 
         assert!(config.tab_groups.iter().all(|group| group.name != "ssl"));
+    }
+
+    #[test]
+    fn oracle_form_offers_connect_role_select() {
+        let config = DbFormConfig::oracle();
+        let field = config
+            .tab_groups
+            .iter()
+            .flat_map(|group| group.fields.iter())
+            .find(|field| field.name == ORACLE_ROLE_PARAM)
+            .expect("Oracle form should contain the role field");
+
+        assert_eq!(field.field_type, FormFieldType::Select);
+        let values: Vec<&str> = field.options.iter().map(|(value, _)| value.as_str()).collect();
+        assert_eq!(values, vec!["default", "sysdba", "sysoper"]);
+        assert_eq!(field.default_value, "default");
     }
 
     #[test]
