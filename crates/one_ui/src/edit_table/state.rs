@@ -168,6 +168,7 @@ pub struct EditTableState<D: EditTableDelegate> {
     selected_row: Option<usize>,
     selection_state: SelectionState,
     right_clicked_row: Option<usize>,
+    right_clicked_col: Option<usize>,
     selected_col: Option<usize>,
     selected_cell: Option<(usize, usize)>,
     resizing_col: Option<usize>,
@@ -212,6 +213,7 @@ where
             selection_state: SelectionState::Row,
             selected_row: None,
             right_clicked_row: None,
+            right_clicked_col: None,
             selected_col: None,
             selected_cell: None,
             resizing_col: None,
@@ -1109,6 +1111,7 @@ where
         _: &mut Context<Self>,
     ) {
         self.right_clicked_row = Some(row_ix);
+        self.right_clicked_col = None;
     }
 
     fn on_row_left_click(
@@ -2647,6 +2650,7 @@ where
         } else {
             col_ix
         };
+        let delegate_col_ix_menu = delegate_col_ix;
 
         h_flex()
             .h_full()
@@ -2656,6 +2660,14 @@ where
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, _, _| {
+                            this.right_clicked_col =
+                                (!is_row_number_col).then_some(delegate_col_ix_menu);
+                            this.right_clicked_row = None;
+                        }),
+                    )
                     .child(
                         h_flex()
                             .size_full()
@@ -3226,12 +3238,19 @@ where
             .context_menu({
                 let view = cx.entity().clone();
                 move |this, window: &mut Window, cx: &mut Context<PopupMenu>| {
-                    if let Some(row_ix) = view.read(cx).right_clicked_row {
-                        view.update(cx, |menu, cx| {
+                    let (right_clicked_row, right_clicked_col) = {
+                        let state = view.read(cx);
+                        (state.right_clicked_row, state.right_clicked_col)
+                    };
+                    match (right_clicked_row, right_clicked_col) {
+                        (Some(row_ix), _) => view.update(cx, |menu, cx| {
                             menu.delegate_mut().context_menu(row_ix, this, window, cx)
-                        })
-                    } else {
-                        this
+                        }),
+                        (None, Some(col_ix)) => view.update(cx, |menu, cx| {
+                            menu.delegate_mut()
+                                .header_context_menu(col_ix, this, window, cx)
+                        }),
+                        (None, None) => this,
                     }
                 }
             })

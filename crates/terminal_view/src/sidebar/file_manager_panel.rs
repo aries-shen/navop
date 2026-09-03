@@ -4,8 +4,8 @@
 //! UI 参考 `sftp_view` 的 `FileListPanel`，但为侧边栏场景做了精简和适配。
 //! 支持文件传输（上传/下载/拖拽），使用独立的传输连接避免阻塞浏览。
 
-use crate::theme::TerminalColors;
 use super::remote_path::{join_remote_path, normalize_remote_path, resolve_remote_path};
+use crate::theme::TerminalColors;
 use chrono::{DateTime, Local};
 use gpui::{
     Anchor, App, ClipboardItem, ColorExt as _, Context, Entity, EventEmitter, ExternalPaths,
@@ -66,7 +66,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 
-actions!(terminal_file_manager, [PasteUpload]);
+actions!(terminal_file_manager, [PasteUpload, NavigateParent]);
 
 pub const FILE_MANAGER_CONTEXT: &str = "TerminalFileManager";
 
@@ -76,11 +76,14 @@ const MODIFIED_COLUMN_WIDTH: gpui::Pixels = px(70.);
 const CONFLICT_NAME_PREVIEW_LIMIT: usize = 3;
 
 pub fn init_keybindings() -> Vec<KeyBinding> {
-    vec![KeyBinding::new(
-        file_manager_paste_shortcut(),
-        PasteUpload,
-        Some(FILE_MANAGER_CONTEXT),
-    )]
+    vec![
+        KeyBinding::new(
+            file_manager_paste_shortcut(),
+            PasteUpload,
+            Some(FILE_MANAGER_CONTEXT),
+        ),
+        KeyBinding::new("backspace", NavigateParent, Some(FILE_MANAGER_CONTEXT)),
+    ]
 }
 
 fn file_manager_paste_shortcut() -> &'static str {
@@ -4368,10 +4371,7 @@ impl FileManagerPanel {
                     })
                     .child(
                         Button::new("fm-toggle-favorite")
-                            .custom(
-                                self.colors
-                                    .icon_button_variant(muted_foreground, cx),
-                            )
+                            .custom(self.colors.icon_button_variant(muted_foreground, cx))
                             .small()
                             .icon(if is_favorite {
                                 IconName::StarFill
@@ -5668,6 +5668,11 @@ impl Render for FileManagerPanel {
             .key_context(FILE_MANAGER_CONTEXT)
             .on_action(cx.listener(|this, _: &PasteUpload, window, cx| {
                 this.paste_upload_from_clipboard(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NavigateParent, _, cx| {
+                if this.connection_state == ConnectionState::Connected {
+                    this.go_parent(cx);
+                }
             }))
             .bg(background)
             .text_color(foreground)
@@ -6984,5 +6989,24 @@ mod tests {
         )
         .unwrap();
         assert!(tar_command.contains("tar -tf '/tmp/release.tar.gz'"));
+    }
+
+    #[test]
+    fn file_manager_keybindings_bind_backspace_to_navigate_parent() {
+        let bindings = super::init_keybindings();
+
+        let backspace = bindings
+            .iter()
+            .find(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .any(|keystroke| keystroke.key() == "backspace")
+            })
+            .expect("Backspace 绑定应存在");
+        assert_eq!(
+            "terminal_file_manager::NavigateParent",
+            backspace.action().name()
+        );
     }
 }

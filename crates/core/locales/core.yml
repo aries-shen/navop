@@ -153,6 +153,14 @@ TabContextMenu:
     en: "Rename Tab"
     zh-CN: "重命名标签页"
     zh-HK: "重命名標籤頁"
+  copy_label:
+    en: "Copy \"{{label}}\""
+    zh-CN: "复制 \"{{label}}\""
+    zh-HK: "複製 \"{{label}}\""
+  copy_label_success:
+    en: "Copied to clipboard"
+    zh-CN: "已复制到剪贴板"
+    zh-HK: "已複製到剪貼簿"
   duplicate_tab:
     en: "Duplicate Tab"
     zh-CN: "复制标签页"

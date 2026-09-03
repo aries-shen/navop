@@ -46,12 +46,7 @@ impl CellEditor {
                         .w_full()
                         .h(window.line_height())
                         .overflow_hidden()
-                        .child(
-                            Input::new(input)
-                                .w_full()
-                                .h_full()
-                                .appearance(false),
-                        ),
+                        .child(Input::new(input).w_full().h_full().appearance(false)),
                 )
                 .into_any_element(),
             CellEditor::DatePicker(picker) => DatePicker::new(picker)
@@ -77,12 +72,7 @@ impl CellEditor {
                     .h_full()
                     .items_center()
                     .gap_1()
-                    .child(
-                        Input::new(input)
-                            .flex_1()
-                            .h_full()
-                            .appearance(false),
-                    )
+                    .child(Input::new(input).flex_1().h_full().appearance(false))
                     .child(
                         div()
                             .id(SharedString::from("date-picker-popup"))
@@ -124,12 +114,7 @@ impl CellEditor {
                     .h_full()
                     .items_center()
                     .gap_1()
-                    .child(
-                        Input::new(input)
-                            .flex_1()
-                            .h_full()
-                            .appearance(false),
-                    )
+                    .child(Input::new(input).flex_1().h_full().appearance(false))
                     .child(
                         div()
                             .id(SharedString::from("date-time-picker-popup"))
@@ -170,12 +155,7 @@ impl CellEditor {
                     .h_full()
                     .items_center()
                     .gap_1()
-                    .child(
-                        Input::new(input)
-                            .flex_1()
-                            .h_full()
-                            .appearance(false),
-                    )
+                    .child(Input::new(input).flex_1().h_full().appearance(false))
                     .child(
                         div()
                             .id(SharedString::from("time-picker-popup"))
@@ -300,6 +280,18 @@ pub trait EditTableDelegate: Sized + 'static {
     fn context_menu(
         &mut self,
         row_ix: usize,
+        menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut Context<EditTableState<Self>>,
+    ) -> PopupMenu {
+        menu
+    }
+
+    /// Context menu for the column header at `col_ix`. The default returns the
+    /// menu unchanged (no header-specific items).
+    fn header_context_menu(
+        &mut self,
+        col_ix: usize,
         menu: PopupMenu,
         window: &mut Window,
         cx: &mut Context<EditTableState<Self>>,

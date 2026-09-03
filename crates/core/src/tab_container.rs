@@ -456,6 +456,12 @@ pub trait TabContent: EventEmitter<TabContentEvent> + Render + Focusable {
         false
     }
 
+    /// Text offered by the tab bar context menu's copy action (for example a
+    /// table-qualified name for table data tabs). `None` hides the item.
+    fn copy_label(&self, cx: &App) -> Option<String> {
+        None
+    }
+
     /// Build a new content view for a duplicated tab.
     fn duplicate(
         &mut self,
@@ -557,6 +563,7 @@ pub trait TabContentView: 'static + Send + Sync {
     fn apply_title(&self, title: &str, window: &mut Window, cx: &mut App);
     fn can_duplicate(&self, cx: &App) -> bool;
     fn duplicate(&self, window: &mut Window, cx: &mut App) -> Option<Arc<dyn TabContentView>>;
+    fn copy_label(&self, cx: &App) -> Option<String>;
     fn on_activate(&self, window: &mut Window, cx: &mut App);
     fn on_deactivate(&self, window: &mut Window, cx: &mut App);
     fn set_presentation_obscured(&self, obscured: bool, cx: &mut App);
@@ -636,6 +643,10 @@ impl<T: TabContent> TabContentView for Entity<T> {
 
     fn can_duplicate(&self, cx: &App) -> bool {
         self.read(cx).can_duplicate(cx)
+    }
+
+    fn copy_label(&self, cx: &App) -> Option<String> {
+        self.read(cx).copy_label(cx)
     }
 
     fn duplicate(&self, window: &mut Window, cx: &mut App) -> Option<Arc<dyn TabContentView>> {
@@ -4357,6 +4368,11 @@ impl TabContainer {
                                     .tabs
                                     .iter()
                                     .any(|tab| tab.content().is_disconnected(cx));
+                                let copy_label = view_for_menu
+                                    .read(cx)
+                                    .tabs
+                                    .get(idx)
+                                    .and_then(|tab| tab.content().copy_label(cx));
 
                                 menu.item(
                                     PopupMenuItem::new(t!("TabContextMenu.rename_tab").to_string())
@@ -4382,6 +4398,23 @@ impl TabContainer {
                                         ),
                                     ),
                                 )
+                                .map(|menu| match copy_label {
+                                    Some(label) => menu.item(
+                                        PopupMenuItem::new(t!("TabContextMenu.copy_label", label = label.as_str()).to_string())
+                                            .icon(IconName::Copy)
+                                            .on_click(move |_, window, cx| {
+                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(label.clone()));
+                                                window.push_notification(
+                                                    gpui_component::notification::Notification::success(
+                                                        t!("TabContextMenu.copy_label_success").to_string(),
+                                                    )
+                                                    .autohide(true),
+                                                    cx,
+                                                );
+                                            }),
+                                    ),
+                                    None => menu,
+                                })
                                 .map(|menu| {
                                     if !lockable {
                                         return menu;
@@ -5263,6 +5296,18 @@ mod tests {
         // never take the macOS title-bar indent and drift right.
         assert!(implementation.contains("macos_titlebar_inset: false"));
         assert!(implementation.contains("&& macos_titlebar_inset"));
+    }
+
+    #[test]
+    fn tab_context_menu_offers_copy_label_when_content_provides_one() {
+        let source = include_str!("tab_container.rs");
+        let implementation = source.split("mod tests").next().unwrap();
+        // TabContent::copy_label drives the tab context menu copy item; the
+        // menu must consume it only when Some, keeping other tabs unchanged.
+        assert!(implementation.contains("fn copy_label(&self, cx: &App) -> Option<String>"));
+        assert!(implementation.contains("tab.content().copy_label(cx)"));
+        assert!(implementation.contains("TabContextMenu.copy_label"));
+        assert!(implementation.contains("None => menu"));
     }
 
     #[test]

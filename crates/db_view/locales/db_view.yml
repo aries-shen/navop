@@ -2458,6 +2458,14 @@ TableData:
     en: Copy Column Name
     zh-CN: 复制字段名称
     zh-HK: 複製欄位名稱
+  copy_column_comment:
+    en: Copy Column Comment
+    zh-CN: 复制字段注释
+    zh-HK: 複製欄位註釋
+  copy_column_success:
+    en: Copied to clipboard
+    zh-CN: 已复制到剪贴板
+    zh-HK: 已複製到剪貼簿
   copy_as:
     en: Copy As
     zh-CN: 复制为
