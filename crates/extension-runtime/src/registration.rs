@@ -73,6 +73,15 @@ fn validate_resource_connection(
                 "connection shell view requires context and resource modules",
             );
         }
+        if !view
+            .backends
+            .values()
+            .any(|runtime_id| runtime_id == &connection.runtime_id)
+        {
+            return invalid_connection(
+                "connection shell view must expose the connection runtime as a backend",
+            );
+        }
     }
     validate_connection_icon(connection)?;
     validate_connection_form(connection)?;
@@ -125,25 +134,34 @@ fn validate_connection_icon(
 fn validate_connection_form(
     connection: &crate::extension::manifest::ResourceConnectionContrib,
 ) -> Result<(), ExtensionRuntimeError> {
+    const RESERVED_FIELDS: &[&str] = &["name", "workspace", "remark", "sync_enabled", "team_id"];
     let mut fields = HashSet::new();
     let mut tabs = HashSet::new();
     for tab in &connection.form.tabs {
-        if tab.id.trim().is_empty() || !tabs.insert(tab.id.clone()) {
+        if tab.id.trim().is_empty() || tab.label.trim().is_empty() || !tabs.insert(tab.id.clone()) {
             return invalid_connection(format!("duplicate or empty connection tab `{}`", tab.id));
         }
     }
     for field in connection.form.tabs.iter().flat_map(|tab| &tab.fields) {
         if field.id.trim().is_empty()
+            || field.label.trim().is_empty()
             || invalid_connection_identifier(&field.id)
             || !fields.insert(field.id.clone())
         {
             return invalid_connection(format!("duplicate connection field `{}`", field.id));
+        }
+        if RESERVED_FIELDS.contains(&field.id.as_str()) {
+            return invalid_connection(format!(
+                "connection field `{}` is reserved by the host",
+                field.id
+            ));
         }
         if field.secret
             && field.field_type != crate::extension::manifest::ResourceConnectionFieldType::Password
         {
             return invalid_connection(format!("secret field `{}` must use Password", field.id));
         }
+        validate_field_options(field)?;
         if field.field_type == crate::extension::manifest::ResourceConnectionFieldType::Password
             && !field.secret
         {
@@ -173,6 +191,63 @@ fn validate_connection_form(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_field_options(
+    field: &crate::extension::manifest::ResourceConnectionFormField,
+) -> Result<(), ExtensionRuntimeError> {
+    use crate::extension::manifest::ResourceConnectionFieldType;
+    match field.field_type {
+        ResourceConnectionFieldType::Select => {
+            let values = field
+                .options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<HashSet<_>>();
+            if values.is_empty() || values.len() != field.options.len() {
+                return invalid_connection(format!(
+                    "select field `{}` requires unique options",
+                    field.id
+                ));
+            }
+            if field
+                .default_value
+                .as_deref()
+                .is_some_and(|value| !values.contains(value))
+            {
+                return invalid_connection(format!(
+                    "select field `{}` has an unknown default value",
+                    field.id
+                ));
+            }
+        }
+        ResourceConnectionFieldType::Number => {
+            if field
+                .default_value
+                .as_deref()
+                .is_some_and(|value| value.parse::<i64>().is_err())
+            {
+                return invalid_connection(format!(
+                    "number field `{}` has an invalid default value",
+                    field.id
+                ));
+            }
+        }
+        ResourceConnectionFieldType::Checkbox => {
+            if field
+                .default_value
+                .as_deref()
+                .is_some_and(|value| value.parse::<bool>().is_err())
+            {
+                return invalid_connection(format!(
+                    "checkbox field `{}` has an invalid default value",
+                    field.id
+                ));
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

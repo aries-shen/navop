@@ -3,10 +3,11 @@ use gpui::{
     App, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, Styled, Window, px,
 };
 use gpui_component::{
+    button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     form::{field, v_form},
     h_flex,
-    input::Input,
+    input::{Input, Textarea},
     select::Select,
     tab::{Tab, TabBar},
     v_flex,
@@ -61,7 +62,9 @@ impl DeclarativeForm {
                     .when(
                         !matches!(
                             field_info.field_type,
-                            DeclarativeFieldType::Select | DeclarativeFieldType::Checkbox
+                            DeclarativeFieldType::Select
+                                | DeclarativeFieldType::Checkbox
+                                | DeclarativeFieldType::TextArea
                         ),
                         |el| {
                             if let Some(state) = self.inputs.get(&id) {
@@ -77,7 +80,28 @@ impl DeclarativeForm {
                                 el
                             }
                         },
-                    ),
+                    )
+                    .when(
+                        field_info.field_type == DeclarativeFieldType::TextArea,
+                        |el| {
+                            if let Some(state) = self.textareas.get(&id) {
+                                el.child(Textarea::new(state).w_full())
+                            } else {
+                                el
+                            }
+                        },
+                    )
+                    .when(field_info.secret, |el| {
+                        let field_id = id.clone();
+                        el.child(
+                            Button::new(format!("{id}-clear-secret"))
+                                .ghost()
+                                .label("Clear")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.clear_secret(&field_id, window, cx);
+                                })),
+                        )
+                    }),
             )
     }
 }

@@ -70,8 +70,22 @@ impl HomePage {
                 self.show_remote_desktop_form(protocol, window, cx);
             }
             ConnectionType::Extension => {
-                self.editing_connection_id = Some(connection_id);
-                self.show_extension_form(window, cx);
+                if cx.global::<ActiveConnections>().is_active(connection_id) {
+                    let name = connection.name;
+                    window.open_dialog(cx, move |dialog, _window, _cx| {
+                        dialog
+                            .title(t!("Connection.in_use_title").to_string().into_any_element())
+                            .child(
+                                t!("Connection.in_use_cannot_edit", conn_name = name)
+                                    .to_string()
+                                    .into_any_element(),
+                            )
+                            .alert()
+                    });
+                } else {
+                    self.editing_connection_id = Some(connection_id);
+                    self.show_extension_form(window, cx);
+                }
             }
             _ => {}
         }

@@ -1,3 +1,4 @@
+mod fields;
 mod render;
 mod schema;
 mod storage;
@@ -11,13 +12,15 @@ use gpui_component::{
     select::{SelectItem, SelectState},
 };
 use one_core::{
+    cloud_sync::TeamOption,
     connection_notifier::emit_connection_event,
     storage::{ConnectionRepository, GlobalStorageState, StoredConnection, Workspace},
 };
 
 use self::{
+    fields::{create_input, create_name_input, create_workspace_select, optional_input_text},
     schema::declarative_config,
-    storage::{build_connection, persist_connection},
+    storage::{ExtensionConnectionDraft, build_connection, persist_connection},
 };
 use crate::universal_plugins::GlobalUniversalPluginService;
 
@@ -25,6 +28,7 @@ pub(crate) struct ExtensionConnectionFormConfig {
     pub contribution: extension_runtime::RegisteredResourceConnectionContribution,
     pub editing_connection: Option<StoredConnection>,
     pub workspaces: Vec<Workspace>,
+    pub teams: Vec<TeamOption>,
 }
 
 #[derive(Clone)]
@@ -51,6 +55,9 @@ pub(crate) struct ExtensionConnectionForm {
     pub(super) name: Entity<InputState>,
     pub(super) fields: Entity<DeclarativeForm>,
     pub(super) workspace: Entity<SelectState<Vec<WorkspaceItem>>>,
+    pub(super) team: Entity<SelectState<Vec<connection_form::team::TeamSelectItem>>>,
+    pub(super) remark: Entity<InputState>,
+    pub(super) sync_enabled: Entity<bool>,
     pub(super) test_result: Entity<Option<Result<(), String>>>,
     pub(super) is_testing: Entity<bool>,
     pub(super) focus_handle: FocusHandle,
@@ -83,12 +90,39 @@ impl ExtensionConnectionForm {
             .as_ref()
             .and_then(|connection| connection.workspace_id);
         let workspace = create_workspace_select(&config.workspaces, selected_workspace, window, cx);
+        let team = connection_form::team::create_team_select(
+            &config.teams,
+            config
+                .editing_connection
+                .as_ref()
+                .and_then(|connection| connection.team_id.as_deref()),
+            window,
+            cx,
+        );
+        let remark = create_input(
+            config
+                .editing_connection
+                .as_ref()
+                .and_then(|connection| connection.remark.clone())
+                .unwrap_or_default(),
+            "Optional note",
+            window,
+            cx,
+        );
+        let sync_enabled = config
+            .editing_connection
+            .as_ref()
+            .map(|connection| connection.sync_enabled)
+            .unwrap_or(true);
         Self {
             contribution: config.contribution,
             editing_connection: config.editing_connection,
             name,
             fields,
             workspace,
+            team,
+            remark,
+            sync_enabled: cx.new(|_| sync_enabled),
             test_result: cx.new(|_| None),
             is_testing: cx.new(|_| false),
             focus_handle: cx.focus_handle(),
@@ -111,7 +145,12 @@ impl ExtensionConnectionForm {
             .and_then(|connection| connection.to_extension_params().ok())
             .map(|params| params.secrets)
             .unwrap_or_default();
-        let preserved = existing.keys().cloned().collect();
+        let cleared = self.fields.read(cx).cleared_secret_ids();
+        let preserved = existing
+            .keys()
+            .filter(|field| !cleared.contains(*field))
+            .cloned()
+            .collect();
         self.fields
             .read(cx)
             .collect_with_preserved_secrets(cx, &preserved)
@@ -129,6 +168,7 @@ impl ExtensionConnectionForm {
     > {
         let (config, mut secrets) = self.draft(cx)?;
         let visible = self.fields.read(cx).visible_secret_ids(cx);
+        let cleared = self.fields.read(cx).cleared_secret_ids();
         let existing = self
             .editing_connection
             .as_ref()
@@ -136,7 +176,7 @@ impl ExtensionConnectionForm {
             .map(|params| params.secrets)
             .unwrap_or_default();
         for (field, value) in existing {
-            if visible.contains(&field) {
+            if visible.contains(&field) && !cleared.contains(&field) {
                 secrets.entry(field).or_insert(value);
             }
         }
@@ -194,15 +234,38 @@ impl ExtensionConnectionForm {
             }
         };
         let declared = self.fields.read(cx).visible_secret_ids(cx);
+        let cleared = self.fields.read(cx).cleared_secret_ids();
         let workspace_id = self.workspace.read(cx).selected_value().cloned().flatten();
+        let team_id = connection_form::team::selected_team_id(&self.team, cx);
+        let assignment = match connection_form::team::resolve_team_assignment(
+            team_id,
+            self.editing_connection.is_some(),
+            self.editing_connection
+                .as_ref()
+                .and_then(|connection| connection.owner_id.clone()),
+            cx,
+        ) {
+            Ok(assignment) => assignment,
+            Err(error) => {
+                self.set_error(error.to_string(), cx);
+                return;
+            }
+        };
         let mut connection = match build_connection(
             self.editing_connection.as_ref(),
             &self.contribution,
-            name,
-            config,
-            updates,
-            &declared,
-            workspace_id,
+            ExtensionConnectionDraft {
+                name,
+                config,
+                secret_updates: updates,
+                visible_secrets: declared,
+                cleared_secrets: cleared,
+                workspace_id,
+                team_id: assignment.team_id,
+                owner_id: assignment.owner_id,
+                remark: optional_input_text(&self.remark, cx),
+                sync_enabled: *self.sync_enabled.read(cx),
+            },
         ) {
             Ok(connection) => connection,
             Err(error) => {
@@ -231,38 +294,4 @@ impl ExtensionConnectionForm {
             cx.notify();
         });
     }
-}
-
-fn create_name_input(
-    value: String,
-    window: &mut Window,
-    cx: &mut Context<ExtensionConnectionForm>,
-) -> Entity<InputState> {
-    cx.new(|cx| {
-        let mut input = InputState::new(window, cx).placeholder("Connection name");
-        input.set_value(value, window, cx);
-        input
-    })
-}
-
-fn create_workspace_select(
-    workspaces: &[Workspace],
-    selected: Option<i64>,
-    window: &mut Window,
-    cx: &mut Context<ExtensionConnectionForm>,
-) -> Entity<SelectState<Vec<WorkspaceItem>>> {
-    let items = std::iter::once(WorkspaceItem {
-        id: None,
-        label: "None".into(),
-    })
-    .chain(workspaces.iter().map(|workspace| WorkspaceItem {
-        id: workspace.id,
-        label: workspace.name.clone(),
-    }))
-    .collect();
-    cx.new(|cx| {
-        let mut select = SelectState::new(items, Some(Default::default()), window, cx);
-        select.set_selected_value(&selected, window, cx);
-        select
-    })
 }

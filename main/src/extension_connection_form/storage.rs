@@ -7,31 +7,46 @@ use one_core::{
     },
 };
 
+pub(super) struct ExtensionConnectionDraft {
+    pub name: String,
+    pub config: serde_json::Map<String, serde_json::Value>,
+    pub secret_updates: HashMap<String, String>,
+    pub visible_secrets: HashSet<String>,
+    pub cleared_secrets: HashSet<String>,
+    pub workspace_id: Option<i64>,
+    pub team_id: Option<String>,
+    pub owner_id: Option<String>,
+    pub remark: Option<String>,
+    pub sync_enabled: bool,
+}
+
 pub(super) fn build_connection(
     existing: Option<&StoredConnection>,
     contribution: &extension_runtime::RegisteredResourceConnectionContribution,
-    name: String,
-    config: serde_json::Map<String, serde_json::Value>,
-    updates: HashMap<String, String>,
-    declared: &HashSet<String>,
-    workspace_id: Option<i64>,
+    draft: ExtensionConnectionDraft,
 ) -> anyhow::Result<StoredConnection> {
     let mut secrets = existing
         .and_then(|connection| connection.to_extension_params().ok())
         .map(|params| params.secrets)
         .unwrap_or_default();
-    secrets.retain(|field, _| declared.contains(field));
-    secrets.extend(updates);
+    secrets.retain(|field, _| {
+        draft.visible_secrets.contains(field) && !draft.cleared_secrets.contains(field)
+    });
+    secrets.extend(draft.secret_updates);
     let params = ExtensionConnectionParams::new(
         contribution.extension_id.clone(),
         contribution.id.clone(),
-        config,
+        draft.config,
         secrets,
     )?;
-    let mut connection = StoredConnection::new_extension(name, params, workspace_id);
+    let mut connection = StoredConnection::new_extension(draft.name, params, draft.workspace_id);
     if let Some(existing) = existing {
         copy_metadata(existing, &mut connection);
     }
+    connection.team_id = draft.team_id;
+    connection.owner_id = draft.owner_id;
+    connection.remark = draft.remark;
+    connection.sync_enabled = draft.sync_enabled;
     Ok(connection)
 }
 
@@ -93,11 +108,18 @@ mod tests {
         let connection = build_connection(
             Some(&existing),
             &contribution,
-            "Search".into(),
-            serde_json::Map::new(),
-            HashMap::from([("password".into(), "new-password".into())]),
-            &HashSet::from(["password".into()]),
-            Some(7),
+            ExtensionConnectionDraft {
+                name: "Search".into(),
+                config: serde_json::Map::new(),
+                secret_updates: HashMap::from([("password".into(), "new-password".into())]),
+                visible_secrets: HashSet::from(["password".into()]),
+                cleared_secrets: HashSet::new(),
+                workspace_id: Some(7),
+                team_id: Some("team-1".into()),
+                owner_id: Some("owner-1".into()),
+                remark: Some("Production".into()),
+                sync_enabled: false,
+            },
         )
         .unwrap();
 
@@ -107,6 +129,41 @@ mod tests {
             params.secrets
         );
         assert_eq!(Some(7), connection.workspace_id);
+        assert_eq!(Some("team-1"), connection.team_id.as_deref());
+        assert_eq!(Some("owner-1"), connection.owner_id.as_deref());
+        assert_eq!(Some("Production"), connection.remark.as_deref());
+        assert!(!connection.sync_enabled);
+    }
+
+    #[test]
+    fn build_connection_removes_explicitly_cleared_secret() {
+        let params = ExtensionConnectionParams::new(
+            "com.example.search",
+            "search",
+            serde_json::Map::new(),
+            BTreeMap::from([("api_key".into(), "old-key".into())]),
+        )
+        .unwrap();
+        let existing = StoredConnection::new_extension("Search".into(), params, None);
+        let connection = build_connection(
+            Some(&existing),
+            &contribution(),
+            ExtensionConnectionDraft {
+                name: "Search".into(),
+                config: serde_json::Map::new(),
+                secret_updates: HashMap::new(),
+                visible_secrets: HashSet::from(["api_key".into()]),
+                cleared_secrets: HashSet::from(["api_key".into()]),
+                workspace_id: None,
+                team_id: None,
+                owner_id: None,
+                remark: None,
+                sync_enabled: true,
+            },
+        )
+        .unwrap();
+
+        assert!(connection.to_extension_params().unwrap().secrets.is_empty());
     }
 
     fn contribution() -> extension_runtime::RegisteredResourceConnectionContribution {

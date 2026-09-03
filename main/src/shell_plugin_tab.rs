@@ -5,13 +5,11 @@ use std::sync::{
 
 use extension_host::CancellationToken;
 use extension_plugin_adapter::ActivationHandle;
-use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, SharedString, Styled, Task, Window, div,
-};
-use one_core::tab_container::{TabContent, TabContentEvent};
+use gpui::{App, AppContext, Context, Entity, FocusHandle, SharedString, Task, Window};
+use one_core::tab_container::TabContentEvent;
 
-use crate::shell_plugin_host::{PreparedShellView, ShellConnectionContext, ShellPluginHost};
+use crate::shell_plugin_host::connection::ShellConnectionLaunch;
+use crate::shell_plugin_host::{LoadedShellView, PreparedShellView, ShellPluginHost};
 
 struct PreparationCompletion {
     cancel: CancellationToken,
@@ -84,7 +82,7 @@ impl PreparationCompletion {
 
 enum ShellPluginTabState {
     Loading,
-    Ready(gpui_shell::LoadedScriptView),
+    Ready(LoadedShellView),
     Failed(String),
 }
 
@@ -104,7 +102,7 @@ pub(crate) struct ShellPluginTab {
 pub(crate) struct ShellPluginLoad {
     pub(crate) host: ShellPluginHost,
     pub(crate) contribution: extension_runtime::RegisteredShellViewContribution,
-    pub(crate) connection: Option<ShellConnectionContext>,
+    pub(crate) connection: Option<ShellConnectionLaunch>,
     pub(crate) title_override: Option<String>,
 }
 
@@ -126,7 +124,7 @@ impl ShellPluginTab {
         let runtime_ids = contribution.backends.values().cloned().collect();
         let connection_id = connection
             .as_ref()
-            .map(|connection| connection.connection_id);
+            .map(ShellConnectionLaunch::connection_id);
         let connection_lease = connection_id.map(|connection_id| {
             cx.default_global::<one_core::storage::ActiveConnections>()
                 .lease(connection_id)
@@ -198,28 +196,43 @@ impl ShellPluginTab {
                 self.state = ShellPluginTabState::Ready(loaded);
             }
             Err(error) => {
-                if let Some(task) = self.host.release_task(activations) {
+                if let Some(task) = self
+                    .host
+                    .release_after_session_task(Some(error.session), activations)
+                {
                     self.preparation.push_release_task(task);
                 }
-                self.state = ShellPluginTabState::Failed(error.to_string());
+                self.state = ShellPluginTabState::Failed(error.error.to_string());
             }
         }
         cx.notify();
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) -> Vec<ActivationHandle> {
+    fn close(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (
+        Vec<ActivationHandle>,
+        Option<Arc<crate::shell_plugin_host::session::ShellMountSession>>,
+    ) {
         self.closing = true;
         self.preparation.cancel.cancel();
-        if let ShellPluginTabState::Ready(loaded) = &mut self.state {
-            loaded.unload(cx);
-        }
+        let state = std::mem::replace(
+            &mut self.state,
+            ShellPluginTabState::Failed("Extension closing".into()),
+        );
+        let session = match state {
+            ShellPluginTabState::Ready(mut loaded) => {
+                loaded.unload(cx);
+                Some(loaded.session())
+            }
+            _ => None,
+        };
         self.connection_lease.take();
-        std::mem::take(&mut self.activations)
+        (std::mem::take(&mut self.activations), session)
     }
 
     pub(crate) fn close_for_extension(&mut self, cx: &mut Context<Self>) -> Task<bool> {
-        self.state = ShellPluginTabState::Failed("Extension closed".to_string());
-        cx.notify();
         self.close_task(true, cx)
     }
 
@@ -232,24 +245,38 @@ impl ShellPluginTab {
         {
             return;
         }
-        if let ShellPluginTabState::Ready(loaded) = &self.state {
-            loaded.view().update(cx, |view, cx| view.refresh(cx));
+        let state = std::mem::replace(
+            &mut self.state,
+            ShellPluginTabState::Failed(
+                "Provider restarted. Close and reopen this connection.".into(),
+            ),
+        );
+        if let ShellPluginTabState::Ready(mut loaded) = state {
+            loaded.unload(cx);
+            let activations = std::mem::take(&mut self.activations);
+            self.host
+                .release_after_session(Some(loaded.session()), activations);
         }
+        self.connection_lease.take();
+        cx.notify();
     }
 
     fn close_task(&mut self, request_removal: bool, cx: &mut Context<Self>) -> Task<bool> {
-        let activations = self.close(cx);
+        let (activations, session) = self.close(cx);
         let preparation = Arc::clone(&self.preparation);
         let service = self.host.service();
         let release = one_core::gpui_tokio::Tokio::spawn_result(cx, async move {
             preparation.wait().await;
+            if let Some(session) = session {
+                session.close_all().await;
+            }
+            for task in preparation.take_release_tasks() {
+                let _ = task.await;
+            }
             let mut activations = activations;
             activations.extend(preparation.take_late());
             for activation in activations {
                 let _ = service.deactivate_activation(&activation).await;
-            }
-            for task in preparation.take_release_tasks() {
-                let _ = task.await;
             }
             Ok(())
         });
@@ -263,64 +290,4 @@ impl ShellPluginTab {
     }
 }
 
-impl Drop for ShellPluginTab {
-    fn drop(&mut self) {
-        self.preparation.cancel.cancel();
-        let mut activations = std::mem::take(&mut self.activations);
-        activations.extend(self.preparation.take_late());
-        self.host.release(activations);
-    }
-}
-
-impl EventEmitter<TabContentEvent> for ShellPluginTab {}
-
-impl Focusable for ShellPluginTab {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl Render for ShellPluginTab {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .overflow_hidden()
-            .child(match &self.state {
-                ShellPluginTabState::Loading => div().p_4().child("Loading extension..."),
-                ShellPluginTabState::Failed(error) => {
-                    div().p_4().child(format!("Extension failed: {error}"))
-                }
-                ShellPluginTabState::Ready(loaded) => {
-                    div().size_full().child(loaded.view().clone())
-                }
-            })
-    }
-}
-
-impl TabContent for ShellPluginTab {
-    fn content_key(&self) -> &'static str {
-        "ShellPlugin"
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        self.title.clone()
-    }
-
-    fn can_rename(&self, _cx: &App) -> bool {
-        false
-    }
-
-    fn try_close(
-        &mut self,
-        _tab_id: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Task<bool> {
-        if self.closing {
-            return Task::ready(true);
-        }
-        self.close_task(false, cx)
-    }
-}
+mod render;

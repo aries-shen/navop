@@ -1820,6 +1820,10 @@ Connection:
       en: VNC
       zh-CN: VNC
       zh-HK: VNC
+    type_extension:
+      en: Extension
+      zh-CN: 扩展
+      zh-HK: 擴展
     database_type_external:
       en: External Driver
       zh-CN: 外部驱动

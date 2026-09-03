@@ -411,11 +411,6 @@ impl extension_plugin_adapter::SecretResolver for ExtensionSecretResolver {
                 ),
             ));
         }
-        let repository = self.repository.clone().ok_or_else(|| {
-            extension_host::HostError::NotImplemented(
-                "extension connection secret storage is unavailable".into(),
-            )
-        })?;
         let extension_id = self.extension_id.clone();
         let key = key.to_string();
         if let Some(secret) = self
@@ -426,6 +421,11 @@ impl extension_plugin_adapter::SecretResolver for ExtensionSecretResolver {
         {
             return Ok(secret);
         }
+        let repository = self.repository.clone().ok_or_else(|| {
+            extension_host::HostError::NotImplemented(
+                "extension connection secret storage is unavailable".into(),
+            )
+        })?;
         tokio::task::spawn_blocking(move || {
             repository.resolve_extension_secret(&extension_id, &key)
         })
@@ -570,5 +570,25 @@ mod tests {
         assert!(first.same_owner(&second));
         runtime.block_on(first.shutdown());
         runtime.block_on(second.shutdown());
+    }
+
+    #[tokio::test]
+    async fn transient_extension_secret_does_not_require_connection_repository() {
+        let store = Arc::new(Mutex::new(HashMap::from([(
+            ("com.example.search".into(), "test-1:api_key".into()),
+            b"secret-value".to_vec(),
+        )])));
+        let resolver = ExtensionSecretResolver {
+            extension_id: "com.example.search".into(),
+            repository: None,
+            transient_secrets: store,
+        };
+
+        let secret =
+            extension_plugin_adapter::SecretResolver::resolve(&resolver, "self", "test-1:api_key")
+                .await
+                .unwrap();
+
+        assert_eq!(b"secret-value", secret.as_slice());
     }
 }

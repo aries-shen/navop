@@ -6,8 +6,7 @@ pub(crate) struct ShellConnectionContext {
     pub name: String,
     pub contribution_id: String,
     pub resource_type: String,
-    pub config: serde_json::Map<String, serde_json::Value>,
-    pub credential_refs: serde_json::Map<String, serde_json::Value>,
+    pub resource: HostValue,
 }
 
 pub(super) fn context_module(
@@ -18,21 +17,19 @@ pub(super) fn context_module(
     let view_id = contribution.id.clone();
     let backends = contribution.backends.keys().cloned().collect::<Vec<_>>();
     let connection = connection
-        .and_then(|connection| {
-            super::value::json_to_host(&serde_json::json!({
-                "id": connection.connection_id,
-                "name": connection.name,
-                "contributionId": connection.contribution_id,
-                "resourceType": connection.resource_type,
-                "config": connection.config,
-                "credentialRefs": connection.credential_refs,
-            }))
-            .ok()
+        .map(|connection| {
+            HostObject::new()
+                .field("id", connection.connection_id)
+                .field("name", connection.name)
+                .field("contributionId", connection.contribution_id)
+                .field("resourceType", connection.resource_type)
+                .field("resource", connection.resource)
+                .into()
         })
         .unwrap_or(HostValue::Null);
     HostModule::new("navop.context")
         .declarations(
-            "export function current(): { extensionId: string; viewId: string; backends: string[]; connection: unknown | null };",
+            "export function current(): { extensionId: string; viewId: string; backends: string[]; connection: { id: number; name: string; contributionId: string; resourceType: string; resource: { handle: string; capabilities: string[]; metadata: unknown } } | null };",
         )
         .function("current", move |_| {
             Ok(HostObject::new()

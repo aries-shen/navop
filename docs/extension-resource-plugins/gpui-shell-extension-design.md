@@ -749,8 +749,9 @@ domain method 继续使用 `elasticsearch/search`、`kafka/topic/list` 等 names
 公共 Rust protocol 不新增领域 enum。
 
 保存连接由 Host 从标准 `StoredConnection` 生成公开 config、secret reference 和 endpoint
-descriptor，并通过 `navop.context.current().connection` 注入 connection-scoped shell view；
-script 不获得保存过的 secret。未保存表单的测试连接使用瞬态 secret reference。Host 将标准 endpoint descriptors 放入现有
+descriptor，在加载 connection-scoped shell view 前完成 `resource/open`，再通过
+`navop.context.current().connection.resource` 注入 mount-scoped opaque handle；script 不获得
+保存过的 config 或 secret。未保存表单的测试连接使用瞬态 secret reference。Host 将标准 endpoint descriptors 放入现有
 `ResourceOpenParams.metadata`，不改变 provider wire struct。
 
 现有 `ResourceOpenAuthorizer` 对 `url/server/brokers/host+port` 的硬编码提取只作为 legacy
@@ -905,7 +906,7 @@ ExtensionHostServices
 
 - Navop connection/secret HostModule 从不返回保存过的 secret 明文。
 - manifest 表单由 Host 渲染并保存到标准 `ConnectionRepository`。
-- shell view 只收到公开字段和 Host 生成的 secret reference。
+- shell view 只收到连接 identity 和 Host 已打开的 mount-scoped resource handle。
 - provider config 携带 secret reference；provider 通过现有 `host/secret/resolve` 获取。
 - extension/provider 对外只使用虚拟 namespace `self`。Host 以
   `ext_<lowercase-hex(extension-id)>` 生成全局唯一内部 namespace，不接受脚本指定任意
@@ -1019,9 +1020,9 @@ MVP 的开发模式也使用 close/reopen，不额外公开只接受 `ShellRoot`
 provider restart 后 activation lease 仍有效，但 generation-bound handle 全部失效：
 
 1. `RuntimeMonitorEvent` 通知 `ShellPluginHost`。
-2. mount session 更新 backend 的 current generation。
-3. 旧 resource/event/blob handle 标记 stale。
-4. view 被 `refresh()`，脚本读取 `navop.runtime` 后决定重新 open resource。
+2. mount session 将旧 resource/event/blob handle 视为 stale。
+3. Host 卸载当前 shell view，显式 close mount resources 并释放 activation。
+4. 页面提示用户关闭并重新打开连接，Host 在新 mount 上重新执行 `resource/open`。
 5. HostModule 对旧 handle 返回结构化 `STALE_HANDLE`，不自动重放写操作。
 
 只允许显式声明为安全、幂等的 read operation 由 SDK 提供可选 retry helper。Host 不根据
@@ -1133,8 +1134,8 @@ Reference implementation lives in
 headless and uses the official Rust `elasticsearch` SDK; the shell view only does:
 
 1. 通过 Navop 标准新建连接窗口创建或编辑 `StoredConnection`。
-2. shell view 从 `navop.context` 读取公开 config 和 secret references，并通过 backend alias
-   `search` 打开 `elasticsearch` resource。
+2. Host 通过 backend alias `search` 打开 `elasticsearch` resource，shell view 从
+   `navop.context` 读取 opaque handle。
 3. 调用现有 `elasticsearch/cluster/info`、index 和 search domain method。
 4. 大结果使用 blob，async search 使用 job，持续结果使用 event stream。
 5. provider crash/restart 后提示重新连接并重建 resource handle。
@@ -1208,7 +1209,7 @@ install extension
 -> publish catalog
 -> open ShellPluginTab
 -> provider activate/init
--> profile + secret reference
+-> StoredConnection + secret reference
 -> resource/open
 -> cluster info/search
 -> job/event/blob

@@ -80,7 +80,11 @@ fn build_extension_form(
     window: &mut Window,
     cx: &mut Context<NewConnectionWindow>,
 ) -> NewConnectionFormResult {
+    let teams = get_cached_team_options(cx);
     let Some(config) = parent.update(cx, |home, _| {
+        if home.editing_connection_id.is_none() && !home.is_master_key_ready_for_new_connection() {
+            return None;
+        }
         let editing_connection = home.editing_connection_id.and_then(|id| {
             home.connections
                 .iter()
@@ -95,6 +99,7 @@ fn build_extension_form(
             contribution,
             editing_connection,
             workspaces: home.workspaces.clone(),
+            teams,
         })
     }) else {
         return NewConnectionFormResult::Blocked;

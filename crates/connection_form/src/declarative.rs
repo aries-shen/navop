@@ -1,11 +1,11 @@
 mod render;
 mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{App, AppContext, Context, Entity, FocusHandle, Window};
 use gpui_component::{
-    input::{InputEvent, InputState},
+    input::{InputEvent, InputState, TextareaState},
     select::{SelectEvent, SelectState},
 };
 use serde_json::{Map, Value};
@@ -18,7 +18,9 @@ pub struct DeclarativeForm {
     pub(super) focus_handle: FocusHandle,
     pub(super) values: HashMap<String, Entity<String>>,
     pub(super) inputs: HashMap<String, Entity<InputState>>,
+    pub(super) textareas: HashMap<String, Entity<TextareaState>>,
     pub(super) selects: HashMap<String, Entity<SelectState<Vec<FormSelectItem>>>>,
+    pub(super) cleared_secrets: HashSet<String>,
 }
 
 impl DeclarativeForm {
@@ -30,6 +32,7 @@ impl DeclarativeForm {
     ) -> Self {
         let mut values = HashMap::new();
         let mut inputs = HashMap::new();
+        let mut textareas = HashMap::new();
         let mut selects = HashMap::new();
         for field in config.tabs.iter().flat_map(|tab| &tab.fields) {
             let initial_value = initial
@@ -68,6 +71,27 @@ impl DeclarativeForm {
                     selects.insert(field.id.clone(), select);
                 }
                 DeclarativeFieldType::Checkbox => {}
+                DeclarativeFieldType::TextArea => {
+                    let placeholder = field.placeholder.clone().unwrap_or_default();
+                    let input = cx.new(|cx| {
+                        let mut state = TextareaState::new(window, cx)
+                            .placeholder(placeholder)
+                            .auto_grow(4, 12);
+                        state.set_value(initial_value, window, cx);
+                        state
+                    });
+                    cx.subscribe_in(&input, window, move |_, input, event, _, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let text = input.read(cx).text().to_string();
+                            value.update(cx, |value, _| {
+                                *value = text;
+                            });
+                            cx.notify();
+                        }
+                    })
+                    .detach();
+                    textareas.insert(field.id.clone(), input);
+                }
                 _ => {
                     let placeholder = field.placeholder.clone().unwrap_or_default();
                     let masked = field.field_type == DeclarativeFieldType::Password;
@@ -97,7 +121,9 @@ impl DeclarativeForm {
             focus_handle: cx.focus_handle(),
             values,
             inputs,
+            textareas,
             selects,
+            cleared_secrets: HashSet::new(),
         }
     }
 
@@ -147,6 +173,21 @@ impl DeclarativeForm {
             .collect()
     }
 
+    pub fn cleared_secret_ids(&self) -> HashSet<String> {
+        self.cleared_secrets.clone()
+    }
+
+    pub(super) fn clear_secret(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.cleared_secrets.insert(id.to_string());
+        if let Some(input) = self.inputs.get(id) {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        if let Some(input) = self.textareas.get(id) {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
     pub(super) fn value(&self, id: &str, cx: &App) -> String {
         self.values
             .get(id)
@@ -174,10 +215,14 @@ fn value_text(value: &Value) -> String {
 
 fn typed_value(field_type: DeclarativeFieldType, value: String) -> Result<Value, String> {
     match field_type {
-        DeclarativeFieldType::Number => value
-            .parse::<i64>()
-            .map(Value::from)
-            .map_err(|_| "number field is invalid".to_string()),
+        DeclarativeFieldType::Number => value.parse::<i64>().map(Value::from).or_else(|_| {
+            value
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number)
+                .ok_or_else(|| "number field is invalid".to_string())
+        }),
         DeclarativeFieldType::Checkbox => Ok(Value::Bool(value.parse().unwrap_or(false))),
         _ => Ok(Value::String(value)),
     }

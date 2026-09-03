@@ -1,5 +1,6 @@
 use crate::home_tab::HomePage;
 use gpui::{Context, Window};
+use gpui_component::WindowExt;
 use one_core::storage::{ConnectionType, StoredConnection, Workspace};
 use one_core::tab_container::{TabItem, TabOpenMode};
 use remote_desktop::RemoteDesktopProtocol;
@@ -61,38 +62,38 @@ impl ConnectionOpenStrategy for ExtensionOpenStrategy {
         cx: &mut Context<HomePage>,
     ) {
         let Ok(params) = self.connection.to_extension_params() else {
-            tracing::warn!("invalid extension connection params");
+            window.push_notification("Extension connection data is invalid", cx);
             return;
         };
         let Some(host) = cx
             .try_global::<crate::shell_plugin_host::ShellPluginHost>()
             .cloned()
         else {
-            tracing::warn!("shell plugin host is unavailable");
+            window.push_notification("Extension runtime is unavailable", cx);
             return;
         };
         let Some(contribution) =
             host.resource_connection(&params.extension_id, &params.contribution_id)
         else {
-            tracing::warn!(
-                extension_id = %params.extension_id,
-                contribution_id = %params.contribution_id,
-                "extension connection contribution is unavailable"
+            window.push_notification(
+                format!(
+                    "Extension {} is missing or no longer provides connection {}",
+                    params.extension_id, params.contribution_id
+                ),
+                cx,
             );
             return;
         };
         if contribution.shell_view_id.is_none() {
             let connection_id = self.connection.id.expect("saved extension connection");
-            let title = self.connection.name.clone();
+            let connection = self.connection;
+            let title = connection.name.clone();
             let service = cx
                 .global::<crate::universal_plugins::GlobalUniversalPluginService>()
                 .service();
-            let tab = crate::extension_connection_tab::ExtensionConnectionTab::load(
-                service,
-                self.connection,
-                contribution,
-                cx,
-            );
+            let extension_id = contribution.extension_id.clone();
+            let runtime_id = contribution.runtime_id.clone();
+            let registry = host.clone();
             let tabs = cx
                 .global::<crate::onetcli_app::GlobalTabContainer>()
                 .primary_pane();
@@ -101,7 +102,16 @@ impl ConnectionOpenStrategy for ExtensionOpenStrategy {
                 tabs.activate_or_add_tab_lazy_with_mode(
                     tab_id.clone(),
                     mode,
-                    move |_, _| TabItem::new(tab_id, title, tab),
+                    move |_, cx| {
+                        let tab = crate::extension_connection_tab::ExtensionConnectionTab::load(
+                            service,
+                            connection,
+                            contribution,
+                            cx,
+                        );
+                        registry.register_headless_tab(extension_id, runtime_id, tab.downgrade());
+                        TabItem::new(tab_id, title, tab)
+                    },
                     window,
                     cx,
                 );
@@ -115,7 +125,7 @@ impl ConnectionOpenStrategy for ExtensionOpenStrategy {
             window,
             cx,
         ) {
-            tracing::warn!(%error, "failed to open extension connection");
+            window.push_notification(format!("Failed to open extension connection: {error}"), cx);
         }
     }
 }

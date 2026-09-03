@@ -1,5 +1,9 @@
 use super::*;
 
+pub(super) fn new_handle(kind: &str) -> String {
+    format!("{kind}-{}", uuid::Uuid::new_v4())
+}
+
 pub(super) fn invalid_handle(kind: &str, handle: &str) -> HostError {
     HostError::new(format!("invalid {kind} handle `{handle}`"))
 }
@@ -24,35 +28,66 @@ pub(super) fn remove_matching(
     }
 }
 
+impl ShellMountSession {
+    pub(crate) async fn close_all(&self) {
+        close_all(
+            &self.service,
+            take_provider_handles(&self.resources),
+            take_provider_handles(&self.blobs),
+            take_provider_handles(&self.events),
+            take_jobs(&self.jobs),
+        )
+        .await;
+    }
+}
+
 impl Drop for ShellMountSession {
     fn drop(&mut self) {
-        let resources = drain(&mut self.resources);
-        let blobs = drain(&mut self.blobs);
-        let events = drain(&mut self.events);
-        let jobs = self
-            .jobs
-            .get_mut()
-            .map(std::mem::take)
-            .unwrap_or_default()
-            .into_values()
-            .collect::<Vec<_>>();
+        let resources = take_provider_handles(&self.resources);
+        let blobs = take_provider_handles(&self.blobs);
+        let events = take_provider_handles(&self.events);
+        let jobs = take_jobs(&self.jobs);
+        if resources.is_empty() && blobs.is_empty() && events.is_empty() && jobs.is_empty() {
+            return;
+        }
         let service = self.service.clone();
         self.tokio.spawn(async move {
-            close_jobs(&service, jobs).await;
-            close_events(&service, events).await;
-            close_blobs(&service, blobs).await;
-            close_resources(&service, resources).await;
+            close_all(&service, resources, blobs, events, jobs).await;
         });
     }
 }
 
-fn drain(registry: &mut Mutex<HashMap<String, ProviderHandle>>) -> Vec<ProviderHandle> {
+pub(super) fn take_provider_handles(
+    registry: &Mutex<HashMap<String, ProviderHandle>>,
+) -> Vec<ProviderHandle> {
     registry
-        .get_mut()
-        .map(std::mem::take)
+        .lock()
+        .map(|mut records| std::mem::take(&mut *records))
         .unwrap_or_default()
         .into_values()
         .collect()
+}
+
+pub(super) fn take_jobs(registry: &Mutex<HashMap<String, JobHandle>>) -> Vec<JobHandle> {
+    registry
+        .lock()
+        .map(|mut records| std::mem::take(&mut *records))
+        .unwrap_or_default()
+        .into_values()
+        .collect()
+}
+
+pub(super) async fn close_all(
+    service: &UniversalPluginService,
+    resources: Vec<ProviderHandle>,
+    blobs: Vec<ProviderHandle>,
+    events: Vec<ProviderHandle>,
+    jobs: Vec<JobHandle>,
+) {
+    close_jobs(service, jobs).await;
+    close_events(service, events).await;
+    close_blobs(service, blobs).await;
+    close_resources(service, resources).await;
 }
 
 async fn close_jobs(service: &UniversalPluginService, jobs: Vec<JobHandle>) {

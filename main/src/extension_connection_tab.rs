@@ -1,5 +1,5 @@
+use extension_host::CancellationToken;
 use extension_plugin_adapter::ActivationHandle;
-use extension_protocol::resource::{ResourceCloseParams, ResourceOpenParams};
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement, Render, SharedString, Styled, Task, Window, div,
@@ -9,14 +9,14 @@ use one_core::{
     tab_container::{TabContent, TabContentEvent},
 };
 
+use crate::shell_plugin_host::connection::{ExtensionResourceLaunch, OpenedExtensionResource};
 use crate::universal_plugins::UniversalPluginService;
 
 enum State {
     Connecting,
     Connected {
         activation: ActivationHandle,
-        resource_id: String,
-        capabilities: Vec<String>,
+        resource: OpenedExtensionResource,
     },
     Failed(String),
 }
@@ -26,9 +26,11 @@ pub(crate) struct ExtensionConnectionTab {
     title: SharedString,
     focus_handle: FocusHandle,
     service: UniversalPluginService,
+    #[cfg(not(test))]
     runtime_id: String,
     state: State,
     closing: bool,
+    tokio: tokio::runtime::Handle,
 }
 
 impl ExtensionConnectionTab {
@@ -43,96 +45,54 @@ impl ExtensionConnectionTab {
             .default_global::<ActiveConnections>()
             .lease(connection_id);
         let runtime_id = contribution.runtime_id.clone();
+        let title = connection.name.clone().into();
+        let launch = ExtensionResourceLaunch::new(&connection, &contribution);
         let view = cx.new(|cx| Self {
             connection_lease: Some(connection_lease),
-            title: connection.name.clone().into(),
+            title,
             focus_handle: cx.focus_handle(),
             service: service.clone(),
+            #[cfg(not(test))]
             runtime_id: runtime_id.clone(),
             state: State::Connecting,
             closing: false,
+            tokio: one_core::gpui_tokio::Tokio::handle(cx),
         });
-        let params = connection.to_extension_params();
         view.update(cx, |_, cx| {
             cx.spawn(async move |this, cx| {
-                let result: anyhow::Result<_> = async {
-                    let params = params?;
-                    let activation = service.activate_runtime(&runtime_id).await?;
-                    let client = match service.universal_plugin_client(&runtime_id) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            let _ = service.deactivate_activation(&activation).await;
-                            return Err(error.into());
-                        }
-                    };
-                    let mut config = params.config;
-                    config.insert(
-                        "credential_refs".into(),
-                        serde_json::Value::Object(
-                            params
-                                .secrets
-                                .keys()
-                                .map(|field| {
-                                    (
-                                        field.clone(),
-                                        serde_json::Value::String(format!(
-                                            "secret://self/{connection_id}:{field}"
-                                        )),
-                                    )
-                                })
-                                .collect(),
-                        ),
-                    );
-                    let opened = client
-                        .client()
-                        .open_resource(&ResourceOpenParams {
-                            resource_type: contribution.resource_type,
-                            config: serde_json::Value::Object(config),
-                            metadata: None,
-                        })
-                        .await;
-                    match opened {
-                        Ok(opened) => Ok((activation, opened)),
-                        Err(error) => {
-                            let _ = service.deactivate_activation(&activation).await;
-                            Err(error.into())
-                        }
-                    }
-                }
-                .await;
+                let result = connect_resource(service, runtime_id, launch).await;
                 let _ = this.update(cx, |this, cx| {
-                    this.state = match result {
-                        Ok((activation, opened)) if !this.closing => State::Connected {
-                            activation,
-                            resource_id: opened.resource_id,
-                            capabilities: opened.capabilities,
-                        },
-                        Ok((activation, opened)) => {
-                            let service = this.service.clone();
-                            let resource_id = opened.resource_id;
-                            one_core::gpui_tokio::Tokio::spawn_result(cx, async move {
-                                if let Ok(client) =
-                                    service.universal_plugin_client(&activation.runtime_id)
-                                {
-                                    let _ = client
-                                        .client()
-                                        .close_resource(&ResourceCloseParams { resource_id })
-                                        .await;
-                                }
-                                let _ = service.deactivate_activation(&activation).await;
-                                Ok(())
-                            })
-                            .detach();
-                            State::Failed("Connection closed".into())
-                        }
-                        Err(error) => State::Failed(error.to_string()),
-                    };
-                    cx.notify();
+                    this.apply_connect_result(result, cx);
                 });
             })
             .detach();
         });
         view
+    }
+
+    fn apply_connect_result(
+        &mut self,
+        result: anyhow::Result<(ActivationHandle, OpenedExtensionResource)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state = match result {
+            Ok((activation, resource)) if !self.closing => State::Connected {
+                activation,
+                resource,
+            },
+            Ok((activation, mut resource)) => {
+                let service = self.service.clone();
+                one_core::gpui_tokio::Tokio::spawn_result(cx, async move {
+                    resource.close().await;
+                    let _ = service.deactivate_activation(&activation).await;
+                    Ok(())
+                })
+                .detach();
+                State::Failed("Connection closed".into())
+            }
+            Err(error) => State::Failed(error.to_string()),
+        };
+        cx.notify();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) -> Task<bool> {
@@ -141,25 +101,67 @@ impl ExtensionConnectionTab {
         self.connection_lease.take();
         let State::Connected {
             activation,
-            resource_id,
-            ..
+            mut resource,
         } = state
         else {
             return Task::ready(true);
         };
         let service = self.service.clone();
-        let runtime_id = self.runtime_id.clone();
         let task = one_core::gpui_tokio::Tokio::spawn_result(cx, async move {
-            if let Ok(client) = service.universal_plugin_client(&runtime_id) {
-                let _ = client
-                    .client()
-                    .close_resource(&ResourceCloseParams { resource_id })
-                    .await;
-            }
+            resource.close().await;
             let _ = service.deactivate_activation(&activation).await;
             Ok(())
         });
         cx.spawn(async move |_, _| task.await.is_ok())
+    }
+
+    pub(crate) fn close_for_extension(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        self.close(cx)
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn runtime_changed(&mut self, runtime_id: &str, cx: &mut Context<Self>) {
+        if runtime_id != self.runtime_id {
+            return;
+        }
+        self.close(cx).detach();
+        self.state = State::Failed("Provider restarted. Close and reopen this connection.".into());
+        cx.notify();
+    }
+}
+
+async fn connect_resource(
+    service: UniversalPluginService,
+    runtime_id: String,
+    launch: anyhow::Result<ExtensionResourceLaunch>,
+) -> anyhow::Result<(ActivationHandle, OpenedExtensionResource)> {
+    let launch = launch?;
+    let activation = service.activate_runtime(&runtime_id).await?;
+    match launch.open(&service, &CancellationToken::new()).await {
+        Ok(resource) => Ok((activation, resource)),
+        Err(error) => {
+            let _ = service.deactivate_activation(&activation).await;
+            Err(error)
+        }
+    }
+}
+
+impl Drop for ExtensionConnectionTab {
+    fn drop(&mut self) {
+        self.connection_lease.take();
+        let state = std::mem::replace(&mut self.state, State::Failed("Connection dropped".into()));
+        let State::Connected {
+            activation,
+            mut resource,
+        } = state
+        else {
+            return;
+        };
+        let service = self.service.clone();
+        self.tokio.spawn(async move {
+            resource.close().await;
+            let _ = service.deactivate_activation(&activation).await;
+        });
     }
 }
 
@@ -175,8 +177,11 @@ impl Render for ExtensionConnectionTab {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().p_4().child(match &self.state {
             State::Connecting => "Connecting extension...".to_string(),
-            State::Connected { capabilities, .. } => {
-                format!("Connected\n\nCapabilities:\n{}", capabilities.join("\n"))
+            State::Connected { resource, .. } => {
+                format!(
+                    "Connected\n\nCapabilities:\n{}",
+                    resource.capabilities().join("\n")
+                )
             }
             State::Failed(error) => format!("Extension connection failed: {error}"),
         })
@@ -187,12 +192,15 @@ impl TabContent for ExtensionConnectionTab {
     fn content_key(&self) -> &'static str {
         "ExtensionConnection"
     }
+
     fn title(&self, _cx: &App) -> SharedString {
         self.title.clone()
     }
+
     fn can_rename(&self, _cx: &App) -> bool {
         false
     }
+
     fn try_close(&mut self, _id: &str, _window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
         self.close(cx)
     }

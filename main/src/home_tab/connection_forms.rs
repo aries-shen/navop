@@ -17,6 +17,7 @@ impl HomePage {
             return;
         };
         let Ok(params) = connection.to_extension_params() else {
+            window.push_notification("Extension connection data is invalid", cx);
             return;
         };
         let Some(contribution) = cx
@@ -28,12 +29,20 @@ impl HomePage {
                     .cloned()
             })
         else {
+            window.push_notification(
+                format!(
+                    "Extension {} is missing or no longer provides connection {}",
+                    params.extension_id, params.contribution_id
+                ),
+                cx,
+            );
             return;
         };
         let config = crate::extension_connection_form::ExtensionConnectionFormConfig {
             contribution,
             editing_connection: Some(connection.clone()),
             workspaces: self.workspaces.clone(),
+            teams: get_cached_team_options(cx),
         };
         self.editing_connection_id = None;
         open_popup_window(

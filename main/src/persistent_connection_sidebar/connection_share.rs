@@ -358,7 +358,7 @@ fn connection_type_key(connection_type: ConnectionType) -> &'static str {
         ConnectionType::PortForwarding => "Connection.Share.type_port_forwarding",
         ConnectionType::Rdp => "Connection.Share.type_rdp",
         ConnectionType::Vnc => "Connection.Share.type_vnc",
-        ConnectionType::Extension => "Connection.Share.type_all",
+        ConnectionType::Extension => "Connection.Share.type_extension",
     }
 }
 

@@ -284,6 +284,32 @@ fn runtime_catalog_rejects_singleton_connection_shell_view() {
 }
 
 #[test]
+fn runtime_catalog_rejects_connection_view_without_connection_runtime() {
+    let mut manifest = shell_manifest();
+    let mut view = shell_view("ui/explorer.js");
+    view.backends.insert("search".into(), "other".into());
+    manifest.runtime.ipc.push(IpcRuntime {
+        id: "other".into(),
+        entry: IpcEntry {
+            command: "./bin/provider".into(),
+            args: Vec::new(),
+            working_dir: None,
+            env: Default::default(),
+        },
+        transport: IpcTransport::default(),
+        auto_restart: true,
+        max_restart_attempts: 3,
+        shutdown_grace_ms: 1_000,
+    });
+    manifest.contributes.shell_views.push(view);
+    manifest.contributes.connections.push(resource_connection());
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("connection runtime"), "{error}");
+}
+
+#[test]
 fn runtime_catalog_rejects_unknown_visibility_field() {
     let mut manifest = shell_manifest();
     let mut connection = resource_connection();

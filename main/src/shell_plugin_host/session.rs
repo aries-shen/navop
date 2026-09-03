@@ -29,7 +29,7 @@ struct JobHandle {
     provider: JobActivationHandle,
 }
 
-pub(super) struct ShellMountSession {
+pub(crate) struct ShellMountSession {
     service: UniversalPluginService,
     backends: BTreeMap<String, String>,
     resources: Mutex<HashMap<String, ProviderHandle>>,
@@ -290,9 +290,5 @@ impl ShellMountSession {
     }
 }
 
-fn new_handle(kind: &str) -> String {
-    format!("{kind}-{}", uuid::Uuid::new_v4())
-}
-
-use cleanup::{invalid_handle, remove_matching, stale_handle};
+use cleanup::{invalid_handle, new_handle, remove_matching, stale_handle};
 mod cleanup;

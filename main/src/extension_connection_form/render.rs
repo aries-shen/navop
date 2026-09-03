@@ -5,6 +5,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     form::{field, v_form},
     h_flex,
     input::Input,
@@ -42,6 +43,41 @@ impl Render for ExtensionConnectionForm {
                     field()
                         .label("Workspace")
                         .child(Select::new(&self.workspace).w_full()),
+                ),
+            )
+            .when(connection_form::team::team_management_enabled(cx), |this| {
+                this.child(
+                    v_form().columns(1).child(
+                        field()
+                            .label(connection_form::team::team_label())
+                            .child(Select::new(&self.team).w_full()),
+                    ),
+                )
+            })
+            .when(
+                connection_form::team::connection_sync_controls_visible_in(cx),
+                |this| {
+                    this.child(
+                        v_form().columns(1).child(
+                            field()
+                                .label("Remark")
+                                .child(Input::new(&self.remark).w_full()),
+                        ),
+                    )
+                },
+            )
+            .child(
+                v_form().columns(1).child(
+                    field().label("Sync").child(
+                        Checkbox::new("extension-connection-sync")
+                            .checked(*self.sync_enabled.read(cx))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sync_enabled.update(cx, |enabled, cx| {
+                                    *enabled = !*enabled;
+                                    cx.notify();
+                                });
+                            })),
+                    ),
                 ),
             )
             .when_some(status, |el, status| el.child(status_message(status, cx)))
