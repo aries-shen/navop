@@ -2851,6 +2851,7 @@ fn render_sql_gutter_marker(marker: &GutterMarker) -> gpui::AnyElement {
         .flex()
         .items_center()
         .justify_center()
+        .when(marker.is_enabled(), |this| this.cursor_pointer())
         .when(!marker.is_enabled(), |this| this.opacity(0.5))
         .child(icon)
         .when_some(tooltip, |this, tooltip| {
