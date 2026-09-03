@@ -3443,7 +3443,11 @@ mod tests {
             .expect("Oracle form should contain the role field");
 
         assert_eq!(field.field_type, FormFieldType::Select);
-        let values: Vec<&str> = field.options.iter().map(|(value, _)| value.as_str()).collect();
+        let values: Vec<&str> = field
+            .options
+            .iter()
+            .map(|(value, _)| value.as_str())
+            .collect();
         assert_eq!(values, vec!["default", "sysdba", "sysoper"]);
         assert_eq!(field.default_value, "default");
     }

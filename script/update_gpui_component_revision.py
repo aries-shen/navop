@@ -17,7 +17,6 @@ DEPENDENCIES = {
 }
 
 SHELL_VERSION_FILES = (
-    "docs/extension-resource-plugins/examples/elasticsearch/extension.json",
     "docs/extension-resource-plugins/gpui-shell-extension-design.md",
     "crates/extension-runtime/src/extension/manifest/parser_tests.rs",
     "crates/extension-runtime/src/extension_runtime_contract_tests.rs",

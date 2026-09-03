@@ -33,8 +33,8 @@ mod rdp_settings_tests;
 #[path = "master_key_rotation_tests.rs"]
 mod master_key_rotation_tests;
 
-pub use credential_vault::*;
 use anyhow::Result;
+pub use credential_vault::*;
 use gpui::App;
 pub use manager::*;
 pub use master_key_rotation::*;

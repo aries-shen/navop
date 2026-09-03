@@ -94,6 +94,7 @@ impl Render for CredentialVaultView {
                     .child(
                         div()
                             .id("credential-vault-content")
+                            .debug_selector(|| "credential-vault-content".to_string())
                             .w_full()
                             .min_h_0()
                             .flex_1()
@@ -172,9 +173,10 @@ fn credential_list(
     cx: &gpui::Context<CredentialVaultView>,
 ) -> impl IntoElement {
     v_flex()
+        .debug_selector(|| "credential-list-root".to_string())
         .w_full()
+        .h_full()
         .min_h_0()
-        .flex_1()
         .overflow_hidden()
         .child(
             div()
@@ -197,6 +199,7 @@ fn credential_list(
         .child(
             div()
                 .id("credential-vault-list")
+                .debug_selector(|| "credential-vault-list".to_string())
                 .w_full()
                 .min_h_0()
                 .flex_1()
@@ -528,5 +531,63 @@ mod tests {
         assert!(source.contains("CredentialVault.no_matches"));
         assert!(source.contains("Button::new(\"credential-vault-empty-add\")"));
         assert!(source.contains("Button::new(\"credential-vault-retry\")"));
+    }
+
+    #[gpui::test]
+    fn credential_vault_list_renders_non_empty_bounds_with_data(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            AppContext as _, IntoElement as _, ParentElement as _, Render as _, Styled as _,
+            VisualTestContext,
+        };
+        use gpui_component::Theme;
+        use one_core::storage::connection::SqliteConnection;
+        use one_core::storage::migration::run_migrations;
+        use one_core::storage::traits::Repository as _;
+        use one_core::storage::{
+            CredentialEntry, CredentialRepository, GlobalStorageState, StorageManager,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = SqliteConnection::open(temp.path().join("vault.db")).expect("sqlite");
+        conn.with_connection(|conn| run_migrations(conn))
+            .expect("migrations");
+        let storage = StorageManager::new_with_connection(conn);
+        let repo = CredentialRepository::new(storage.connection());
+        storage.register(repo.clone());
+        let mut entry = CredentialEntry::new("V8服务器用户名密码");
+        entry.username = Some("root".to_string());
+        repo.insert(&mut entry).expect("credential inserted");
+
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            cx.set_global(GlobalStorageState { storage });
+            gpui_component::init(cx);
+        });
+
+        let (_vault, cx) =
+            cx.add_window_view(|window, cx| super::super::CredentialVaultView::new(window, cx));
+        let mut cx: &mut VisualTestContext = cx;
+
+        let content = cx
+            .debug_bounds("credential-vault-content")
+            .expect("content area should render");
+        assert!(
+            content.size.height > gpui::px(0.0),
+            "content area must have height, got {content:?}"
+        );
+        let list = cx
+            .debug_bounds("credential-vault-list")
+            .expect("list area should render");
+        assert!(
+            list.size.height > gpui::px(0.0),
+            "list area must have height, got {list:?}"
+        );
+        let root = cx
+            .debug_bounds("credential-list-root")
+            .expect("list root should render");
+        assert!(
+            root.size.height >= list.size.height,
+            "list root must not collapse below the list, root={root:?}, list={list:?}"
+        );
     }
 }

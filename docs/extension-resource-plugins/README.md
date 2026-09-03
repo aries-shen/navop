@@ -1,5 +1,7 @@
 # Universal Resource Plugins
 
+- [通用资源扩展开发指南](development-guide.zh-CN.md)
+
 当前底层机制保持 headless；MVP 已在其上接入一个最小 gpui-shell embedded UI：
 
 - extension.json 声明 native IPC runtime；

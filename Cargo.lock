@@ -9333,6 +9333,7 @@ dependencies = [
  "one-ui",
  "parking_lot",
  "plist",
+ "process-util",
  "rand 0.8.6",
  "rusqlite",
  "rust-i18n",

@@ -458,8 +458,7 @@ impl DbConnection for OracleDbConnection {
         let conn_result = timeout(
             Duration::from_secs(connect_timeout_secs),
             tokio::task::spawn_blocking(move || {
-                let mut connector =
-                    oracle::Connector::new(&username, &password, &connect_string);
+                let mut connector = oracle::Connector::new(&username, &password, &connect_string);
                 if let Some(privilege) = privilege {
                     connector.privilege(privilege);
                 }

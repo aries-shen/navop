@@ -1,7 +1,10 @@
 use std::ops::Range;
 
 use gpui::prelude::FluentBuilder as _;
-use gpui::{AnyElement, ColorExt as _, IntoElement, ListSizingBehavior, ParentElement, Styled, div, uniform_list};
+use gpui::{
+    AnyElement, ColorExt as _, IntoElement, ListSizingBehavior, ParentElement, Styled, div,
+    uniform_list,
+};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, IconSize, Sizable, StyledExt, h_flex, input::Input, v_flex,
 };

@@ -10,9 +10,7 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::StyledExt as _;
-use gpui_component::input::{
-    Editor, EditorState, Escape, GutterMarkerRenderer, InputEvent, Rope,
-};
+use gpui_component::input::{Editor, EditorState, Escape, GutterMarkerRenderer, InputEvent, Rope};
 use lsp_types::SignatureHelp;
 
 use lifecycle::{SignatureHelpLifecycle, cycle_overload, inserted_text, should_refresh_for_edit};
