@@ -69,6 +69,10 @@ impl HomePage {
                 self.editing_connection_id = Some(connection_id);
                 self.show_remote_desktop_form(protocol, window, cx);
             }
+            ConnectionType::Extension => {
+                self.editing_connection_id = Some(connection_id);
+                self.show_extension_form(window, cx);
+            }
             _ => {}
         }
     }

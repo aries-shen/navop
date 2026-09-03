@@ -56,6 +56,7 @@ const fn connection_type_icon_name(kind: ConnectionType) -> IconName {
         ConnectionType::PortForwarding => IconName::PortForwardingColor,
         ConnectionType::Rdp => IconName::Rdp,
         ConnectionType::Vnc => IconName::Vnc,
+        ConnectionType::Extension => IconName::ExtensionsColor,
     }
 }
 
@@ -71,6 +72,7 @@ const fn connection_type_navigation_icon_name(kind: ConnectionType) -> IconName 
         ConnectionType::PortForwarding => IconName::PortForwardingLine,
         ConnectionType::Rdp => IconName::RdpLine,
         ConnectionType::Vnc => IconName::VncLine,
+        ConnectionType::Extension => IconName::ExtensionsLine,
     }
 }
 

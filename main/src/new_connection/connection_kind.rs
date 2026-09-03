@@ -17,16 +17,18 @@ pub(super) enum NewConnectionCategory {
     DomesticDatabase,
     NoSql,
     Terminal,
+    Extensions,
 }
 
 impl NewConnectionCategory {
-    pub(super) fn all() -> [Self; 5] {
+    pub(super) fn all() -> [Self; 6] {
         [
             Self::All,
             Self::Database,
             Self::DomesticDatabase,
             Self::NoSql,
             Self::Terminal,
+            Self::Extensions,
         ]
     }
 
@@ -37,6 +39,7 @@ impl NewConnectionCategory {
             Self::DomesticDatabase => t!("NewConnection.category_domestic_database").to_string(),
             Self::NoSql => "NoSQL".to_string(),
             Self::Terminal => t!("NewConnection.category_terminal").to_string(),
+            Self::Extensions => "Extensions".to_string(),
         }
     }
 
@@ -46,6 +49,7 @@ impl NewConnectionCategory {
             Self::Database | Self::DomesticDatabase => IconName::DatabaseLine,
             Self::NoSql => IconName::Server,
             Self::Terminal => IconName::Terminal,
+            Self::Extensions => IconName::ExtensionsLine,
         }
     }
 }
@@ -70,6 +74,7 @@ pub(super) enum NewConnectionKind {
         icon_asset_path: Option<String>,
         icon_file_path: Option<PathBuf>,
     },
+    Extension(extension_runtime::RegisteredResourceConnectionContribution),
 }
 
 impl NewConnectionKind {
@@ -108,6 +113,7 @@ impl NewConnectionKind {
             Self::MoreConnections => t!("NewConnection.more_connections").to_string(),
             Self::Database(db_type) => db_type.as_str().to_string(),
             Self::ExternalDatabase { name, .. } => name.clone(),
+            Self::Extension(connection) => connection.label.clone(),
         }
     }
 
@@ -124,6 +130,7 @@ impl NewConnectionKind {
             Self::MoreConnections => t!("NewConnection.description_more_connections").to_string(),
             Self::Database(_) => t!("NewConnection.description_database").to_string(),
             Self::ExternalDatabase { description, .. } => description.clone(),
+            Self::Extension(connection) => connection.description.clone().unwrap_or_default(),
         }
     }
 
@@ -145,6 +152,7 @@ impl NewConnectionKind {
                     NewConnectionCategory::Database
                 }
             }
+            Self::Extension(_) => NewConnectionCategory::Extensions,
         }
     }
 
@@ -181,6 +189,14 @@ impl NewConnectionKind {
             )
             .unwrap_or_else(|| {
                 connection_type_icon(ConnectionType::Database, ConnectionVisualSize::Hero)
+            }),
+            Self::Extension(connection) => external_driver_icon_from_sources(
+                None,
+                connection.icon_path.as_deref(),
+                ConnectionVisualSize::Hero,
+            )
+            .unwrap_or_else(|| {
+                connection_type_icon(ConnectionType::Extension, ConnectionVisualSize::Hero)
             }),
         }
     }
@@ -274,6 +290,7 @@ mod tests {
                 NewConnectionCategory::DomesticDatabase,
                 NewConnectionCategory::NoSql,
                 NewConnectionCategory::Terminal,
+                NewConnectionCategory::Extensions,
             ]
         );
         assert_eq!(

@@ -9,7 +9,7 @@
   },
   "permissions": [
     "net:tcp:nacos.example.com:8848",
-    "secrets:read:nacos.*",
+    "secrets:read:self.*",
     "spawn:./bin/nacos-provider"
   ],
   "runtime": {
@@ -29,9 +29,13 @@
   "contributes": {
     "connections": [
       {
-        "kind": "nacos",
+        "id": "nacos",
         "label": "Nacos",
-        "secretNamespace": "nacos"
+        "runtimeId": "main",
+        "resourceType": "nacos",
+        "form": { "tabs": [{ "id": "general", "label": "General", "fields": [
+          { "id": "server", "label": "Server", "fieldType": "Text", "required": true }
+        ] }] }
       }
     ]
   }

@@ -17,11 +17,171 @@ use super::types::{
     ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
     RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredIpcRuntimeBinding,
     RegisteredKeybindingContribution, RegisteredRemoteFileEditorCommand,
-    RegisteredRemoteFileEditorContribution, RegisteredShellViewContribution, WasmRuntimeBinding,
-    command_descriptor, runtime_key, slot_item_from_menu,
+    RegisteredRemoteFileEditorContribution, RegisteredResourceConnectionContribution,
+    RegisteredShellViewContribution, WasmRuntimeBinding, command_descriptor, runtime_key,
+    slot_item_from_menu,
 };
 
 static WASM_REGISTRATION_LOG_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn validate_resource_connection(
+    manifest: &Manifest,
+    connection: &crate::extension::manifest::ResourceConnectionContrib,
+    ids: &mut HashSet<String>,
+) -> Result<(), ExtensionRuntimeError> {
+    let connection_id = connection.id.trim();
+    if connection_id.is_empty() {
+        return invalid_connection("connection id must not be empty");
+    }
+    if invalid_connection_identifier(connection_id) {
+        return invalid_connection("connection id contains reserved path characters");
+    }
+    if connection.runtime_id.trim().is_empty() || connection.resource_type.trim().is_empty() {
+        return invalid_connection("runtimeId and resourceType must not be empty");
+    }
+    if !ids.insert(connection_id.to_string()) {
+        return invalid_connection(format!("duplicate connection id `{connection_id}`"));
+    }
+    if !manifest
+        .runtime
+        .ipc
+        .iter()
+        .any(|runtime| runtime.id == connection.runtime_id)
+    {
+        return invalid_connection(format!("unknown IPC runtime `{}`", connection.runtime_id));
+    }
+    if let Some(view_id) = connection.shell_view_id.as_deref() {
+        let Some(view) = manifest
+            .contributes
+            .shell_views
+            .iter()
+            .find(|view| view.id == view_id)
+        else {
+            return invalid_connection(format!("unknown shell view `{view_id}`"));
+        };
+        if view.singleton {
+            return invalid_connection("connection shell view must not be singleton");
+        }
+        if !view
+            .modules
+            .contains(&crate::extension::manifest::ShellHostModule::Context)
+            || !view
+                .modules
+                .contains(&crate::extension::manifest::ShellHostModule::Resource)
+        {
+            return invalid_connection(
+                "connection shell view requires context and resource modules",
+            );
+        }
+    }
+    validate_connection_icon(connection)?;
+    validate_connection_form(connection)?;
+    let has_secrets = connection
+        .form
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.fields)
+        .any(|field| field.secret);
+    if has_secrets
+        && !manifest
+            .permissions
+            .iter()
+            .any(|permission| permission == "secrets:read:self.*")
+    {
+        return invalid_connection("secret fields require secrets:read:self.* permission");
+    }
+    Ok(())
+}
+
+fn invalid_connection_identifier(value: &str) -> bool {
+    value.contains([':', '/', '\\'])
+}
+
+fn validate_connection_icon(
+    connection: &crate::extension::manifest::ResourceConnectionContrib,
+) -> Result<(), ExtensionRuntimeError> {
+    let Some(icon) = connection.icon.as_deref() else {
+        return Ok(());
+    };
+    let path = std::path::Path::new(icon);
+    if path.is_absolute()
+        || icon.starts_with("\\\\")
+        || icon.starts_with("//")
+        || icon.as_bytes().get(1) == Some(&b':')
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return invalid_connection("connection icon must stay within the extension root");
+    }
+    Ok(())
+}
+
+fn validate_connection_form(
+    connection: &crate::extension::manifest::ResourceConnectionContrib,
+) -> Result<(), ExtensionRuntimeError> {
+    let mut fields = HashSet::new();
+    let mut tabs = HashSet::new();
+    for tab in &connection.form.tabs {
+        if tab.id.trim().is_empty() || !tabs.insert(tab.id.clone()) {
+            return invalid_connection(format!("duplicate or empty connection tab `{}`", tab.id));
+        }
+    }
+    for field in connection.form.tabs.iter().flat_map(|tab| &tab.fields) {
+        if field.id.trim().is_empty()
+            || invalid_connection_identifier(&field.id)
+            || !fields.insert(field.id.clone())
+        {
+            return invalid_connection(format!("duplicate connection field `{}`", field.id));
+        }
+        if field.secret
+            && field.field_type != crate::extension::manifest::ResourceConnectionFieldType::Password
+        {
+            return invalid_connection(format!("secret field `{}` must use Password", field.id));
+        }
+        if field.field_type == crate::extension::manifest::ResourceConnectionFieldType::Password
+            && !field.secret
+        {
+            return invalid_connection(format!(
+                "password field `{}` must declare secret=true",
+                field.id
+            ));
+        }
+        if field.secret
+            && field
+                .default_value
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return invalid_connection(format!(
+                "secret field `{}` cannot declare a default value",
+                field.id
+            ));
+        }
+    }
+    for field in connection.form.tabs.iter().flat_map(|tab| &tab.fields) {
+        for rule in &field.visible_when {
+            if !fields.contains(&rule.field) {
+                return invalid_connection(format!(
+                    "connection field `{}` references unknown visibility field `{}`",
+                    field.id, rule.field
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn invalid_connection<T>(reason: impl Into<String>) -> Result<T, ExtensionRuntimeError> {
+    Err(ExtensionRuntimeError::InvalidResourceConnection(
+        reason.into(),
+    ))
+}
 
 impl ExtensionRuntimeCatalog {
     pub(super) fn register_manifest(
@@ -31,6 +191,7 @@ impl ExtensionRuntimeCatalog {
         self.register_wasm_runtimes(&manifest)?;
         self.register_ipc_runtimes(&manifest)?;
         self.register_shell_views(&manifest)?;
+        self.register_resource_connections(&manifest)?;
         self.register_html_preview_transforms(&manifest)?;
         self.register_document_renderers(&manifest)?;
         self.register_document_exporters(&manifest)?;
@@ -119,6 +280,37 @@ impl ExtensionRuntimeCatalog {
                     permissions: manifest.permissions.clone(),
                     shell_api_version: manifest.api.shell.clone(),
                     required_gpui_shell_version: manifest.engines.gpui_shell.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn register_resource_connections(
+        &mut self,
+        manifest: &Manifest,
+    ) -> Result<(), ExtensionRuntimeError> {
+        let mut ids = HashSet::new();
+        for connection in &manifest.contributes.connections {
+            validate_resource_connection(manifest, connection, &mut ids)?;
+            let id = connection.id.trim().to_string();
+            let key = runtime_key(&manifest.id, &id);
+            self.resource_connections.insert(
+                key,
+                RegisteredResourceConnectionContribution {
+                    extension_id: manifest.id.clone(),
+                    extension_root: manifest.manifest_dir.clone(),
+                    id,
+                    label: connection.label.clone(),
+                    description: connection.description.clone(),
+                    icon_path: connection
+                        .icon
+                        .as_deref()
+                        .map(|icon| resolve_extension_path(&manifest.manifest_dir, icon)),
+                    runtime_id: runtime_key(&manifest.id, &connection.runtime_id),
+                    resource_type: connection.resource_type.clone(),
+                    shell_view_id: connection.shell_view_id.clone(),
+                    form: connection.form.clone(),
                 },
             );
         }

@@ -8,6 +8,9 @@ use super::menus::{MenuCommandRef, MenuContrib};
 #[path = "contributes/shell.rs"]
 mod shell;
 pub use shell::{ShellHostModule, ShellSurface, ShellViewContrib};
+#[path = "contributes/connection.rs"]
+mod connection;
+pub use connection::*;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ContributesManifest {
@@ -18,7 +21,7 @@ pub struct ContributesManifest {
     #[serde(default)]
     pub drivers: Vec<Value>,
     #[serde(default)]
-    pub connections: Vec<Value>,
+    pub connections: Vec<ResourceConnectionContrib>,
     #[serde(default)]
     pub commands: Vec<CommandContrib>,
     #[serde(default)]

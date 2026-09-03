@@ -314,6 +314,16 @@ fn connection_type_to_resource_kind(conn_type: &ConnectionType, params: &str) ->
         ConnectionType::PortForwarding => ResourceKind::Other("port-forwarding".into()),
         ConnectionType::Rdp => ResourceKind::Other("rdp".into()),
         ConnectionType::Vnc => ResourceKind::Other("vnc".into()),
+        ConnectionType::Extension => {
+            serde_json::from_str::<one_core::storage::ExtensionConnectionParams>(params)
+                .map(|params| {
+                    ResourceKind::Other(format!(
+                        "extension:{}:{}",
+                        params.extension_id, params.contribution_id
+                    ))
+                })
+                .unwrap_or_else(|_| ResourceKind::Other("extension".into()))
+        }
         ConnectionType::All => ResourceKind::Other("all".into()),
     }
 }

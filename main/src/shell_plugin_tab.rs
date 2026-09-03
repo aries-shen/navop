@@ -11,7 +11,7 @@ use gpui::{
 };
 use one_core::tab_container::{TabContent, TabContentEvent};
 
-use crate::shell_plugin_host::{PreparedShellView, ShellPluginHost};
+use crate::shell_plugin_host::{PreparedShellView, ShellConnectionContext, ShellPluginHost};
 
 struct PreparationCompletion {
     cancel: CancellationToken,
@@ -96,18 +96,41 @@ pub(crate) struct ShellPluginTab {
     activations: Vec<ActivationHandle>,
     preparation: Arc<PreparationCompletion>,
     closing: bool,
+    #[cfg(not(test))]
     runtime_ids: Vec<String>,
+    connection_lease: Option<one_core::storage::ActiveConnectionLease>,
+}
+
+pub(crate) struct ShellPluginLoad {
+    pub(crate) host: ShellPluginHost,
+    pub(crate) contribution: extension_runtime::RegisteredShellViewContribution,
+    pub(crate) connection: Option<ShellConnectionContext>,
+    pub(crate) title_override: Option<String>,
 }
 
 impl ShellPluginTab {
     pub(crate) fn load(
-        host: ShellPluginHost,
-        contribution: extension_runtime::RegisteredShellViewContribution,
+        request: ShellPluginLoad,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
-        let title = SharedString::from(contribution.title.clone());
+        let ShellPluginLoad {
+            host,
+            contribution,
+            connection,
+            title_override,
+        } = request;
+        let title =
+            SharedString::from(title_override.unwrap_or_else(|| contribution.title.clone()));
+        #[cfg(not(test))]
         let runtime_ids = contribution.backends.values().cloned().collect();
+        let connection_id = connection
+            .as_ref()
+            .map(|connection| connection.connection_id);
+        let connection_lease = connection_id.map(|connection_id| {
+            cx.default_global::<one_core::storage::ActiveConnections>()
+                .lease(connection_id)
+        });
         let preparation = PreparationCompletion::new();
         let view = cx.new(|cx| Self {
             title,
@@ -117,9 +140,12 @@ impl ShellPluginTab {
             activations: Vec::new(),
             preparation: Arc::clone(&preparation),
             closing: false,
+            #[cfg(not(test))]
             runtime_ids,
+            connection_lease,
         });
-        let activation_task = host.start_prepare(contribution, preparation.cancel.clone());
+        let activation_task =
+            host.start_prepare(contribution, connection, preparation.cancel.clone());
         let cleanup_host = host.clone();
         let task_completion = Arc::clone(&preparation);
         view.update(cx, |_, cx| {
@@ -187,6 +213,7 @@ impl ShellPluginTab {
         if let ShellPluginTabState::Ready(loaded) = &mut self.state {
             loaded.unload(cx);
         }
+        self.connection_lease.take();
         std::mem::take(&mut self.activations)
     }
 
@@ -196,6 +223,7 @@ impl ShellPluginTab {
         self.close_task(true, cx)
     }
 
+    #[cfg(not(test))]
     pub(crate) fn runtime_changed(&mut self, runtime_id: &str, cx: &mut Context<Self>) {
         if !self
             .runtime_ids

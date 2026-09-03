@@ -2274,6 +2274,7 @@ dependencies = [
  "gpui_ce_components",
  "one-core",
  "rust-i18n",
+ "serde_json",
 ]
 
 [[package]]
@@ -3687,25 +3688,6 @@ name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
-
-[[package]]
-name = "elasticsearch-provider"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "extension-host",
- "extension-plugin-adapter",
- "extension-protocol",
- "extension-runtime",
- "futures",
- "interprocess",
- "serde_json",
- "tempfile",
- "tokio",
- "url",
- "uuid",
- "zed-reqwest 0.12.15-zed (git+https://github.com/zed-industries/reqwest.git?rev=c15662463bda39148ba154100dd44d3fba5873a4)",
-]
 
 [[package]]
 name = "elliptic-curve"
@@ -7885,6 +7867,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "connection-form",
  "connection-import-protocol",
  "db",
  "db_view",
@@ -7942,6 +7925,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "url",
+ "uuid",
  "windows 0.62.2",
  "winresource",
  "zed-font-kit 0.14.1-zed (git+https://github.com/zed-industries/font-kit?rev=110523127440aefb11ce0cf280ae7c5071337ec5)",

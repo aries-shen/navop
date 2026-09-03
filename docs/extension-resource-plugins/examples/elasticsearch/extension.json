@@ -15,7 +15,7 @@
   "permissions": [
     "shell:exec",
     "net:tcp:elasticsearch.example.com:9200",
-    "secrets:read:elasticsearch.*",
+    "secrets:read:self.*",
     "spawn:./bin/elasticsearch-provider"
   ],
   "runtime": {
@@ -35,9 +35,18 @@
   "contributes": {
     "connections": [
       {
-        "kind": "elasticsearch",
+        "id": "elasticsearch",
         "label": "Elasticsearch",
-        "secretNamespace": "elasticsearch"
+        "runtimeId": "main",
+        "resourceType": "elasticsearch",
+        "shellViewId": "explorer",
+        "form": {
+          "tabs": [{
+            "id": "general",
+            "label": "General",
+            "fields": [{ "id": "url", "label": "URL", "fieldType": "Text", "required": true }]
+          }]
+        }
       }
     ],
     "shellViews": [

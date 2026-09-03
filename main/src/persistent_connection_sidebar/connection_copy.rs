@@ -156,7 +156,7 @@ pub(super) fn connection_copy_actions(
                 actions.push(ConnectionCopyAction::Username);
             }
         }
-        ConnectionType::All => {}
+        ConnectionType::All | ConnectionType::Extension => {}
     }
     actions
 }
@@ -285,7 +285,7 @@ fn connection_address(connection: &StoredConnection) -> Option<String> {
                         )
                     })
             }),
-        ConnectionType::Serial | ConnectionType::PortForwarding => None,
+        ConnectionType::Serial | ConnectionType::PortForwarding | ConnectionType::Extension => None,
         ConnectionType::Telnet => connection
             .to_telnet_params()
             .ok()

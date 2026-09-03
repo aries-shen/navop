@@ -28,6 +28,7 @@ pub(super) fn connection_share_text_for_locale(
         ConnectionType::Rdp | ConnectionType::Vnc => {
             remote_desktop_fields(locale, connection.to_remote_desktop_params().ok()?)
         }
+        ConnectionType::Extension => extension_fields(connection),
         ConnectionType::All => return None,
     };
     Some(render_share_template(connection, fields, locale))
@@ -357,7 +358,19 @@ fn connection_type_key(connection_type: ConnectionType) -> &'static str {
         ConnectionType::PortForwarding => "Connection.Share.type_port_forwarding",
         ConnectionType::Rdp => "Connection.Share.type_rdp",
         ConnectionType::Vnc => "Connection.Share.type_vnc",
+        ConnectionType::Extension => "Connection.Share.type_all",
     }
+}
+
+fn extension_fields(connection: &StoredConnection) -> Vec<(&'static str, String)> {
+    let Ok(params) = connection.to_extension_params() else {
+        return Vec::new();
+    };
+    vec![
+        ("Extension", params.extension_id),
+        ("Connection Type", params.contribution_id),
+        ("Configuration", Value::Object(params.config).to_string()),
+    ]
 }
 
 fn database_type_label(locale: &str, database_type: &one_core::storage::DatabaseType) -> String {

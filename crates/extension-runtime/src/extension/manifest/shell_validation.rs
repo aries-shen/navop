@@ -148,7 +148,16 @@ fn validate_backends(
 fn validate_modules(view: &ShellViewContrib) -> Result<(), ShellViewValidationError> {
     let mut modules = HashSet::new();
     for module in &view.modules {
-        if !matches!(module, ShellHostModule::Context | ShellHostModule::Resource) {
+        if !matches!(
+            module,
+            ShellHostModule::Context
+                | ShellHostModule::Resource
+                | ShellHostModule::Job
+                | ShellHostModule::Event
+                | ShellHostModule::Blob
+                | ShellHostModule::Log
+                | ShellHostModule::Runtime
+        ) {
             return Err(error(
                 shell_field(view, "modules"),
                 format!("shell host module `{module:?}` is not supported by this host"),

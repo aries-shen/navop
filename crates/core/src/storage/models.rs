@@ -8,15 +8,21 @@ use gpui_component::Size::Large;
 use gpui_component::{Icon, IconName, Sizable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use super::rdp_settings::RdpSettings;
 
 /// 活跃连接状态 - 用于跟踪哪些连接当前已打开
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ActiveConnections {
-    active_ids: HashSet<i64>,
+    active_ids: Arc<Mutex<HashSet<i64>>>,
+}
+
+pub struct ActiveConnectionLease {
+    active_ids: Arc<Mutex<HashSet<i64>>>,
+    conn_id: i64,
 }
 
 impl Global for ActiveConnections {}
@@ -24,24 +30,52 @@ impl Global for ActiveConnections {}
 impl ActiveConnections {
     pub fn new() -> Self {
         Self {
-            active_ids: HashSet::new(),
+            active_ids: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn add(&mut self, conn_id: i64) {
-        self.active_ids.insert(conn_id);
+        self.active_ids
+            .lock()
+            .expect("active connections poisoned")
+            .insert(conn_id);
     }
 
     pub fn remove(&mut self, conn_id: i64) {
-        self.active_ids.remove(&conn_id);
+        self.active_ids
+            .lock()
+            .expect("active connections poisoned")
+            .remove(&conn_id);
     }
 
     pub fn is_active(&self, conn_id: i64) -> bool {
-        self.active_ids.contains(&conn_id)
+        self.active_ids
+            .lock()
+            .expect("active connections poisoned")
+            .contains(&conn_id)
     }
 
     pub fn active_count(&self) -> usize {
-        self.active_ids.len()
+        self.active_ids
+            .lock()
+            .expect("active connections poisoned")
+            .len()
+    }
+
+    pub fn lease(&mut self, conn_id: i64) -> ActiveConnectionLease {
+        self.add(conn_id);
+        ActiveConnectionLease {
+            active_ids: Arc::clone(&self.active_ids),
+            conn_id,
+        }
+    }
+}
+
+impl Drop for ActiveConnectionLease {
+    fn drop(&mut self) {
+        if let Ok(mut active_ids) = self.active_ids.lock() {
+            active_ids.remove(&self.conn_id);
+        }
     }
 }
 
@@ -57,6 +91,7 @@ pub enum ConnectionType {
     PortForwarding,
     Rdp,
     Vnc,
+    Extension,
 }
 
 impl fmt::Display for ConnectionType {
@@ -72,6 +107,7 @@ impl fmt::Display for ConnectionType {
             ConnectionType::PortForwarding => "PortForwarding",
             ConnectionType::Rdp => "Rdp",
             ConnectionType::Vnc => "Vnc",
+            ConnectionType::Extension => "Extension",
         };
         write!(f, "{}", s)
     }
@@ -90,6 +126,7 @@ impl ConnectionType {
             ConnectionType::PortForwarding,
             ConnectionType::Rdp,
             ConnectionType::Vnc,
+            ConnectionType::Extension,
         ]
     }
     pub fn from_str(s: &str) -> Self {
@@ -103,6 +140,7 @@ impl ConnectionType {
             "PortForwarding" => ConnectionType::PortForwarding,
             "Rdp" => ConnectionType::Rdp,
             "Vnc" => ConnectionType::Vnc,
+            "Extension" => ConnectionType::Extension,
             _ => ConnectionType::Database,
         }
     }
@@ -119,6 +157,7 @@ impl ConnectionType {
             ConnectionType::PortForwarding => "Port Forwarding",
             ConnectionType::Rdp => "RDP",
             ConnectionType::Vnc => "VNC",
+            ConnectionType::Extension => "Extension",
         }
     }
 
@@ -134,6 +173,7 @@ impl ConnectionType {
             ConnectionType::PortForwarding => IconName::PortForwardingColor,
             ConnectionType::Rdp => IconName::Rdp,
             ConnectionType::Vnc => IconName::Vnc,
+            ConnectionType::Extension => IconName::ExtensionsColor,
         }
     }
 }
@@ -1640,6 +1680,61 @@ pub struct StoredConnection {
     pub owner_id: Option<String>,
 }
 
+pub const EXTENSION_CONNECTION_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionConnectionParams {
+    pub schema_version: u32,
+    pub extension_id: String,
+    pub contribution_id: String,
+    #[serde(default)]
+    pub config: serde_json::Map<String, Value>,
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
+}
+
+impl ExtensionConnectionParams {
+    pub fn new(
+        extension_id: impl Into<String>,
+        contribution_id: impl Into<String>,
+        config: serde_json::Map<String, Value>,
+        secrets: BTreeMap<String, String>,
+    ) -> anyhow::Result<Self> {
+        let params = Self {
+            schema_version: EXTENSION_CONNECTION_SCHEMA_VERSION,
+            extension_id: extension_id.into(),
+            contribution_id: contribution_id.into(),
+            config,
+            secrets,
+        };
+        params.validate()?;
+        Ok(params)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.schema_version == EXTENSION_CONNECTION_SCHEMA_VERSION,
+            "unsupported extension connection schema version {}",
+            self.schema_version
+        );
+        anyhow::ensure!(
+            !self.extension_id.trim().is_empty(),
+            "extension id is empty"
+        );
+        anyhow::ensure!(
+            !self.contribution_id.trim().is_empty(),
+            "connection contribution id is empty"
+        );
+        anyhow::ensure!(
+            self.secrets
+                .keys()
+                .all(|key| !self.config.contains_key(key)),
+            "extension connection config and secrets must not share keys"
+        );
+        Ok(())
+    }
+}
+
 fn default_sync_enabled() -> bool {
     true
 }
@@ -1781,6 +1876,44 @@ fn default_port_forwarding_name(name: String, params: &PortForwardingParams) -> 
 }
 
 impl StoredConnection {
+    pub fn new_extension(
+        name: String,
+        params: ExtensionConnectionParams,
+        workspace_id: Option<i64>,
+    ) -> Self {
+        let name = trimmed_or_default(name, params.contribution_id.clone());
+        Self {
+            id: None,
+            credential_revision: None,
+            name,
+            connection_type: ConnectionType::Extension,
+            params: serde_json::to_string(&params)
+                .expect("ExtensionConnectionParams serialization must succeed"),
+            workspace_id,
+            selected_databases: None,
+            remark: None,
+            sync_enabled: true,
+            cloud_id: None,
+            last_synced_at: None,
+            last_used_at: None,
+            sort_order: None,
+            created_at: None,
+            updated_at: None,
+            team_id: None,
+            owner_id: None,
+        }
+    }
+
+    pub fn to_extension_params(&self) -> anyhow::Result<ExtensionConnectionParams> {
+        anyhow::ensure!(
+            self.connection_type == ConnectionType::Extension,
+            "connection is not an extension connection"
+        );
+        let params: ExtensionConnectionParams = serde_json::from_str(&self.params)?;
+        params.validate()?;
+        Ok(params)
+    }
+
     pub fn new_database(
         name: String,
         params: DbConnectionConfig,
@@ -2043,8 +2176,27 @@ impl StoredConnection {
     ///
     /// 敏感字段包括：password、passphrase、private_key、private_key_content、
     /// Telnet 登录脚本的 send 值，以及嵌套结构中的同类字段。
-    pub fn encrypt_params(&self) -> String {
-        encrypt_json_passwords(&self.params_for_storage())
+    pub fn try_encrypt_params(&self) -> anyhow::Result<String> {
+        if self.connection_type != ConnectionType::Extension {
+            return Ok(encrypt_json_passwords(&self.params_for_storage()));
+        }
+        let mut params = self.to_extension_params()?;
+        for secret in params.secrets.values_mut() {
+            if secret.is_empty() || crypto::is_encrypted(secret) {
+                continue;
+            }
+            anyhow::ensure!(
+                crypto::has_master_key(),
+                "Cannot persist extension connection secrets without a master key"
+            );
+            let encrypted = crypto::encrypt_password(secret);
+            anyhow::ensure!(
+                encrypted != *secret && crypto::is_encrypted(&encrypted),
+                "extension connection secret encryption failed"
+            );
+            *secret = encrypted;
+        }
+        Ok(serde_json::to_string(&params)?)
     }
 
     /// 返回适合持久化、同步、分享或导出的参数 JSON。
@@ -2065,6 +2217,17 @@ impl StoredConnection {
 
     /// 对 params 中的加密字段进行解密，返回解密后的 params 字符串。
     pub fn decrypt_params(&self) -> String {
+        if self.connection_type == ConnectionType::Extension {
+            let Ok(mut params) = self.to_extension_params() else {
+                return self.params.clone();
+            };
+            for secret in params.secrets.values_mut() {
+                if crypto::is_encrypted(secret) {
+                    *secret = crypto::decrypt_password(secret);
+                }
+            }
+            return serde_json::to_string(&params).unwrap_or_else(|_| self.params.clone());
+        }
         decrypt_json_passwords(&self.params)
     }
 
@@ -2076,10 +2239,51 @@ impl StoredConnection {
     }
 }
 
+pub fn has_connection_decrypt_failure(connection_type: ConnectionType, params: &str) -> bool {
+    if connection_type != ConnectionType::Extension {
+        return has_decrypt_failure_in_sensitive_fields(params);
+    }
+    let Ok(params) = serde_json::from_str::<ExtensionConnectionParams>(params) else {
+        return true;
+    };
+    params.validate().is_err()
+        || params.secrets.values().any(|secret| {
+            crypto::is_encrypted(secret) && crypto::decrypt_password(secret).is_empty()
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn active_connection_lease_cleans_up_on_drop() {
+        let mut active = ActiveConnections::new();
+        let lease = active.lease(42);
+
+        assert!(active.is_active(42));
+        drop(lease);
+        assert!(!active.is_active(42));
+    }
+
+    #[test]
+    fn extension_connection_encrypts_arbitrary_secret_fields() {
+        crypto::set_master_key_for_session("extension-connection-test-key").unwrap();
+        let params = ExtensionConnectionParams::new(
+            "com.example.search",
+            "search",
+            serde_json::Map::from_iter([("url".into(), Value::String("https://example".into()))]),
+            BTreeMap::from([("api_key".into(), "secret-value".into())]),
+        )
+        .unwrap();
+        let connection = StoredConnection::new_extension("Search".into(), params, Some(7));
+
+        let encrypted = connection.try_encrypt_params().unwrap();
+        assert!(!encrypted.contains("secret-value"));
+        let encrypted: ExtensionConnectionParams = serde_json::from_str(&encrypted).unwrap();
+        assert!(crypto::is_encrypted(&encrypted.secrets["api_key"]));
+    }
 
     fn ssh_connection_with_id(id: i64, auth_method: SshAuthMethod) -> StoredConnection {
         let mut connection = StoredConnection::new_ssh(
@@ -2688,7 +2892,19 @@ pub(crate) fn re_encrypt_sensitive_json(
     new_key: &str,
 ) -> anyhow::Result<String> {
     let mut value: Value = serde_json::from_str(json_str)?;
-    re_encrypt_value(&mut value, old_key, new_key)?;
+    if value.get("schema_version").and_then(Value::as_u64)
+        == Some(u64::from(EXTENSION_CONNECTION_SCHEMA_VERSION))
+        && value.get("extension_id").is_some()
+        && value.get("contribution_id").is_some()
+    {
+        if let Some(secrets) = value.get_mut("secrets").and_then(Value::as_object_mut) {
+            for secret in secrets.values_mut() {
+                re_encrypt_string(secret, old_key, new_key)?;
+            }
+        }
+    } else {
+        re_encrypt_value(&mut value, old_key, new_key)?;
+    }
     Ok(serde_json::to_string(&value)?)
 }
 
@@ -3853,7 +4069,7 @@ mod serial_tests {
 
     #[test]
     fn telnet_login_script_send_is_a_sensitive_field() {
-        // encrypt_params/decrypt_params 依赖该字段名识别 Telnet 登录脚本中的
+        // 参数加解密依赖该字段名识别 Telnet 登录脚本中的
         // 自动发送凭据；不要退回到只识别 password/passphrase/private_key。
         assert!(is_sensitive_field("send"));
         assert!(is_sensitive_field("password"));

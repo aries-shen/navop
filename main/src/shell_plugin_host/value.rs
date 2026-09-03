@@ -1,20 +1,5 @@
 use anyhow::Result;
-use extension_protocol::result_ref::ResultRef;
 use gpui_shell::{HostError, HostObject, HostValue};
-
-pub(super) fn result_ref_to_host(result: &ResultRef) -> Result<HostValue, HostError> {
-    match result {
-        ResultRef::Inline { value } => json_to_host(value),
-        ResultRef::Blob { id } => Ok(HostObject::new()
-            .field("kind", "blob")
-            .field("id", id.clone())
-            .into()),
-        ResultRef::EventStream { id } => Ok(HostObject::new()
-            .field("kind", "event_stream")
-            .field("id", id.clone())
-            .into()),
-    }
-}
 
 pub(super) fn host_to_json(value: &HostValue) -> Result<serde_json::Value, HostError> {
     if let Some(tagged) = tagged_number_to_json(value)? {
@@ -120,17 +105,6 @@ mod tests {
         let json = host_to_json(&value).unwrap();
 
         assert_eq!(value, json_to_host(&json).unwrap());
-    }
-
-    #[test]
-    fn result_ref_keeps_explicit_blob_kind() {
-        let value = result_ref_to_host(&ResultRef::Blob {
-            id: "blob-1".into(),
-        })
-        .unwrap();
-
-        assert_eq!(Some("blob"), value.get("kind").and_then(HostValue::as_str));
-        assert_eq!(Some("blob-1"), value.get("id").and_then(HostValue::as_str));
     }
 
     #[test]

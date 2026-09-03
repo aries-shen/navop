@@ -9,7 +9,7 @@
   },
   "permissions": [
     "net:tcp:kafka.example.com:9092",
-    "secrets:read:kafka.*",
+    "secrets:read:self.*",
     "spawn:./bin/kafka-provider"
   ],
   "runtime": {
@@ -29,9 +29,13 @@
   "contributes": {
     "connections": [
       {
-        "kind": "kafka",
+        "id": "kafka",
         "label": "Kafka",
-        "secretNamespace": "kafka"
+        "runtimeId": "main",
+        "resourceType": "kafka",
+        "form": { "tabs": [{ "id": "general", "label": "General", "fields": [
+          { "id": "bootstrap_servers", "label": "Bootstrap servers", "fieldType": "Text", "required": true }
+        ] }] }
       }
     ]
   }

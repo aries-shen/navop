@@ -13,6 +13,9 @@ use crate::extension::manifest::{CommandContrib, RemoteFileEditorLaunchMode, Was
 #[path = "types/shell.rs"]
 mod shell;
 pub use shell::RegisteredShellViewContribution;
+#[path = "types/resource_connection.rs"]
+mod resource_connection;
+pub use resource_connection::RegisteredResourceConnectionContribution;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredRemoteFileEditorContribution {
@@ -144,6 +147,8 @@ pub enum ExtensionRuntimeError {
     InvalidShellView { field: String, reason: String },
     #[error("duplicate shell view key: {view_key}")]
     DuplicateShellView { view_key: String },
+    #[error("invalid resource connection: {0}")]
+    InvalidResourceConnection(String),
     #[error("invalid declarative layout: {reason}")]
     InvalidLayout { reason: String },
 }

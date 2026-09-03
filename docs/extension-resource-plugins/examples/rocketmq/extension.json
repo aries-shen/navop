@@ -9,7 +9,7 @@
   },
   "permissions": [
     "net:tcp:rocketmq.example.com:9876",
-    "secrets:read:rocketmq.*",
+    "secrets:read:self.*",
     "spawn:./bin/rocketmq-provider"
   ],
   "runtime": {
@@ -29,9 +29,13 @@
   "contributes": {
     "connections": [
       {
-        "kind": "rocketmq",
+        "id": "rocketmq",
         "label": "RocketMQ",
-        "secretNamespace": "rocketmq"
+        "runtimeId": "main",
+        "resourceType": "rocketmq",
+        "form": { "tabs": [{ "id": "general", "label": "General", "fields": [
+          { "id": "name_server", "label": "Name server", "fieldType": "Text", "required": true }
+        ] }] }
       }
     ]
   }

@@ -19,7 +19,7 @@ use super::types::{
     ExtensionRuntimeError, RegisteredDbTreeMenuContribution, RegisteredDocumentExporter,
     RegisteredDocumentRenderer, RegisteredHtmlPreviewTransform, RegisteredIpcRuntimeBinding,
     RegisteredKeybindingContribution, RegisteredRemoteFileEditorContribution,
-    RegisteredShellViewContribution, WasmRuntimeBinding,
+    RegisteredResourceConnectionContribution, RegisteredShellViewContribution, WasmRuntimeBinding,
 };
 
 static WASM_CATALOG_LOG_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -44,6 +44,7 @@ pub struct ExtensionRuntimeCatalog {
         Mutex<HashMap<String, Arc<extension_wasm::DocumentExporterRuntime>>>,
     pub(super) remote_file_editors: Vec<RegisteredRemoteFileEditorContribution>,
     pub(super) shell_views: BTreeMap<String, RegisteredShellViewContribution>,
+    pub(super) resource_connections: BTreeMap<String, RegisteredResourceConnectionContribution>,
 }
 
 #[derive(Debug)]
@@ -80,6 +81,7 @@ impl ExtensionRuntimeCatalog {
             document_exporter_runtimes: Mutex::new(HashMap::new()),
             remote_file_editors: Vec::new(),
             shell_views: BTreeMap::new(),
+            resource_connections: BTreeMap::new(),
         }
     }
 
@@ -171,6 +173,21 @@ impl ExtensionRuntimeCatalog {
         view_id: &str,
     ) -> Option<&RegisteredShellViewContribution> {
         self.shell_views.get(&format!("{extension_id}::{view_id}"))
+    }
+
+    pub fn resource_connections(
+        &self,
+    ) -> impl Iterator<Item = &RegisteredResourceConnectionContribution> {
+        self.resource_connections.values()
+    }
+
+    pub fn resource_connection(
+        &self,
+        extension_id: &str,
+        connection_id: &str,
+    ) -> Option<&RegisteredResourceConnectionContribution> {
+        self.resource_connections
+            .get(&format!("{extension_id}::{connection_id}"))
     }
 
     pub fn document_renderer_for_kind(

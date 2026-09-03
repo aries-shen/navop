@@ -431,7 +431,7 @@ fn manifest_rejects_removed_ui_host_module() {
 }
 
 #[test]
-fn manifest_rejects_shell_modules_not_yet_registered_by_the_host() {
+fn manifest_accepts_registered_shell_lifecycle_modules() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_shell_entry(tmp.path(), "ui/explorer.js");
     write_shell_manifest(
@@ -441,17 +441,13 @@ fn manifest_rejects_shell_modules_not_yet_registered_by_the_host() {
             "title": "Resources",
             "entry": "ui/explorer.js",
             "surface": "tab",
-            "modules": ["job"]
+            "backends": { "main": "provider" },
+            "modules": ["job", "event", "blob", "runtime", "log"]
         }),
     );
 
-    let error = load_from_dir(tmp.path()).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("shell host module `Job` is not supported"),
-        "{error}"
-    );
+    let manifest = load_from_dir(tmp.path()).expect("registered shell modules");
+    assert_eq!(5, manifest.contributes.shell_views[0].modules.len());
 }
 
 #[cfg(unix)]

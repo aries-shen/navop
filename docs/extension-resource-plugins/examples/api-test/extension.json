@@ -9,7 +9,7 @@
   },
   "permissions": [
     "net:tcp:api.example.com:443",
-    "secrets:read:api-test.*",
+    "secrets:read:self.*",
     "spawn:./bin/api-test-provider"
   ],
   "runtime": {
@@ -29,10 +29,13 @@
   "contributes": {
     "connections": [
       {
-        "kind": "api-test",
+        "id": "api-test",
         "label": "API Test",
-        "secretNamespace": "api-test",
-        "supportsCollections": true
+        "runtimeId": "main",
+        "resourceType": "api-test",
+        "form": { "tabs": [{ "id": "general", "label": "General", "fields": [
+          { "id": "base_url", "label": "Base URL", "fieldType": "Text", "required": true }
+        ] }] }
       }
     ]
   }

@@ -14,6 +14,8 @@ mod connection_sort;
 mod connection_visuals;
 mod credential_vault;
 mod env_file;
+mod extension_connection_form;
+mod extension_connection_tab;
 mod extension_update;
 mod file_association;
 mod file_open;

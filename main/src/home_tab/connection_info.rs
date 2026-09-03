@@ -26,6 +26,10 @@ pub(super) fn card_connection_info(conn: &StoredConnection) -> Option<String> {
             .to_port_forwarding_params()
             .ok()
             .map(|params| port_forwarding_connection_info(&params)),
+        ConnectionType::Extension => conn
+            .to_extension_params()
+            .ok()
+            .map(|params| format!("{} / {}", params.extension_id, params.contribution_id)),
         _ => None,
     }
 }
@@ -43,6 +47,7 @@ pub(super) fn screenshot_safe_connection_info(
         ConnectionType::PortForwarding => Some("localhost:8080 -> localhost:80"),
         ConnectionType::Rdp => Some("user@localhost:3389"),
         ConnectionType::Vnc => Some("user@localhost:5900"),
+        ConnectionType::Extension => Some("Local Extension"),
         ConnectionType::All => None,
     }
 }
@@ -62,6 +67,7 @@ pub(super) fn connection_display_name(conn: &StoredConnection) -> String {
         ConnectionType::PortForwarding => "Local Port Forwarding",
         ConnectionType::Rdp => "Local RDP",
         ConnectionType::Vnc => "Local VNC",
+        ConnectionType::Extension => "Local Extension",
         ConnectionType::All => "Local Connection",
     }
     .to_owned()

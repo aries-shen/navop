@@ -9,7 +9,9 @@ pub mod versioning;
 
 pub use contributes::{
     CommandContrib, DocumentExporterContrib, DocumentRendererContrib, RemoteFileEditorLaunchMode,
-    ShellHostModule, ShellSurface, ShellViewContrib,
+    ResourceConnectionContrib, ResourceConnectionFieldType, ResourceConnectionForm,
+    ResourceConnectionFormField, ResourceConnectionFormTab, ResourceConnectionSelectOption,
+    ResourceConnectionVisibilityRule, ShellHostModule, ShellSurface, ShellViewContrib,
 };
 #[cfg(test)]
 pub use contributes::{CommandHandlerContrib, ContributesManifest, HtmlPreviewTransformContrib};

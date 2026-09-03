@@ -388,7 +388,7 @@ contribution 请求的 modules
 
 - `connection` 保存 secret 需要精确 extension namespace。
 - `database` 读取 Navop 连接需要 `db:connections:list` 和对应 `db:read:*`。
-- backend resource 的 endpoint descriptor 由 connection profile 或标准 metadata 提供，
+- backend resource 的 endpoint descriptor 由 `StoredConnection` 或标准 metadata 提供，
   provider permission authorizer 进行 defense-in-depth preflight。
 
 不新增“每个函数一个 permission string”。模块是粗粒度 capability，具体调用继续由
@@ -570,7 +570,7 @@ size_full + min_w_0 + min_h_0 + overflow_hidden
 
 - singleton view：`shell:<view_key>`。
 - multi-instance view：`shell:<view_key>:<context-key>:<nonce>`。
-- `context-key` 由宿主根据 connection profile、resource target 或调用入口生成，脚本不能
+- `context-key` 由宿主根据 `StoredConnection`、resource target 或调用入口生成，脚本不能
   用任意字符串覆盖另一个扩展的 tab identity。
 
 ## 10. Backend 激活与 lease
@@ -674,7 +674,6 @@ job 默认属于 mount。view 关闭时 cancel/close job；最终 lease 清理�
 | specifier | 主要职责 |
 |---|---|
 | `navop.context` | extension/view/mount、locale、theme、backend alias 和启动 context |
-| `navop.connection` | 连接 profile、非明文 secret 写入和 profile 选择 |
 | `navop.runtime` | backend health、generation 和 capability introspection |
 | `navop.resource` | open、ping、invoke、close |
 | `navop.job` | start、status、cancel、result、close |
@@ -730,7 +729,6 @@ export function open(
   backend: string,
   resourceType: string,
   request: {
-    profileId?: string;
     config?: unknown;
     endpoints?: EndpointDescriptor[];
     metadata?: unknown;
@@ -750,9 +748,9 @@ export function close(handle: string): Promise<void>;
 domain method 继续使用 `elasticsearch/search`、`kafka/topic/list` 等 namespaced string，
 公共 Rust protocol 不新增领域 enum。
 
-`profileId` 路径由 Host 读取公开配置、生成 secret reference 和 endpoint descriptor；
-script 不获得保存过的 secret。`config` 路径用于未保存的临时连接，endpoint descriptor
-必须和 config 一起提供。Host 将标准 endpoint descriptors 放入现有
+保存连接由 Host 从标准 `StoredConnection` 生成公开 config、secret reference 和 endpoint
+descriptor，并通过 `navop.context.current().connection` 注入 connection-scoped shell view；
+script 不获得保存过的 secret。未保存表单的测试连接使用瞬态 secret reference。Host 将标准 endpoint descriptors 放入现有
 `ResourceOpenParams.metadata`，不改变 provider wire struct。
 
 现有 `ResourceOpenAuthorizer` 对 `url/server/brokers/host+port` 的硬编码提取只作为 legacy
@@ -897,7 +895,6 @@ ExtensionHostServices
   storage
   notifier
   logger
-  connection_profiles
   blob_store
   optional database facade
 ```
@@ -907,8 +904,8 @@ ExtensionHostServices
 ### 13.2 secret 原则
 
 - Navop connection/secret HostModule 从不返回保存过的 secret 明文。
-- shell form 首次接收用户输入后调用 `connection.save`，宿主立即写入凭据库。
-- profile 对外只返回非 secret 字段和 `secretPresent` 标记。
+- manifest 表单由 Host 渲染并保存到标准 `ConnectionRepository`。
+- shell view 只收到公开字段和 Host 生成的 secret reference。
 - provider config 携带 secret reference；provider 通过现有 `host/secret/resolve` 获取。
 - extension/provider 对外只使用虚拟 namespace `self`。Host 以
   `ext_<lowercase-hex(extension-id)>` 生成全局唯一内部 namespace，不接受脚本指定任意
@@ -920,21 +917,12 @@ UI 和 provider 是同一扩展安全主体。恶意 provider 可以有意把 se
 inline/blob/event，通用宿主无法从任意业务数据中恢复 taint。因此安全承诺是“Navop API
 不直接泄漏保存 secret”，不是“同包 provider 永远无法把 secret 送回脚本”。
 
-### 13.3 connection profile
+### 13.3 统一连接持久化
 
-建议 shell API：
-
-```ts
-list(type: string): Promise<ConnectionSummary[]>;
-load(id: string): Promise<PublicConnectionProfile>;
-save(input: ConnectionProfileInput): Promise<{ id: string }>;
-remove(id: string): Promise<void>;
-```
-
-`PublicConnectionProfile` 不含 secret value。打开 resource 时脚本传 profile id，宿主读取
-公开配置并注入 secret references，再调用 provider `resource/open`。
-
-这样 UI 可以完全自定义表单和交互，而 credential ownership 始终在宿主。
+扩展不建立独立 profile repository。所有连接统一保存为 `StoredConnection`，类型为
+`ConnectionType::Extension`；`params` 保存 extension/contribution identity、公开 config 和
+加密 secret map。工作区、同步、编辑、复制、删除、最近使用和活跃连接保护全部复用宿主
+现有连接机制。manifest 的 `shellViewId` 可选，不影响连接持久化模型。
 
 ### 13.4 补齐已有 reverse Host API
 
@@ -1140,10 +1128,13 @@ request uninstall
 
 ## 19. Elasticsearch 验证扩展
 
-`elasticsearch-provider` 保持纯 headless，不重新加入 UI branch。新增 shell view 只做：
+Reference implementation lives in
+`../navop-extensions/extensions/composite/elasticsearch`. Its provider remains
+headless and uses the official Rust `elasticsearch` SDK; the shell view only does:
 
-1. 通过 `navop.connection` 选择或创建 profile。
-2. 通过 backend alias `search` 打开 `elasticsearch` resource。
+1. 通过 Navop 标准新建连接窗口创建或编辑 `StoredConnection`。
+2. shell view 从 `navop.context` 读取公开 config 和 secret references，并通过 backend alias
+   `search` 打开 `elasticsearch` resource。
 3. 调用现有 `elasticsearch/cluster/info`、index 和 search domain method。
 4. 大结果使用 blob，async search 使用 job，持续结果使用 event stream。
 5. provider crash/restart 后提示重新连接并重建 resource handle。
@@ -1275,7 +1266,7 @@ install extension
 - 实现版本目录 staging、Retiring gate 和严格 drain 后切换。
 - 增加 active mount、reopen 和错误状态展示。
 
-### Phase 6：Elasticsearch reference extension
+### Phase 6：Elasticsearch reference extension（已迁移到 navop-extensions）
 
 - provider 保持 headless。
 - 增加 shell explorer UI 和 fake-server E2E。

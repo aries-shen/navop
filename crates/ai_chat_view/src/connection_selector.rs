@@ -129,6 +129,7 @@ fn connection_type_icon(conn_type: &ConnectionType) -> Icon {
         ConnectionType::Serial => IconName::SquareTerminal.mono(),
         ConnectionType::Telnet => IconName::SquareTerminal.mono(),
         ConnectionType::PortForwarding => IconName::Network.mono(),
+        ConnectionType::Extension => IconName::ExtensionsLine.mono(),
         ConnectionType::All => IconName::GalleryVerticalEnd.mono(),
     }
 }

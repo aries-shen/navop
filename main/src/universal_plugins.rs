@@ -7,7 +7,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::{collections::HashSet, sync::RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Mutex, RwLock},
+};
 
 use extension_plugin_adapter::{
     ActivationError, ActivationHandle, ActivationManager, EventActivationManager, HostApiFactory,
@@ -16,6 +19,7 @@ use extension_plugin_adapter::{
 };
 use extension_runtime::{ExtensionRuntimeCatalog, GlobalExtensionRuntimeCatalog};
 use one_core::gpui_tokio::Tokio;
+use one_core::storage::{ConnectionRepository, GlobalStorageState};
 
 /// A global wrapper that gives the service exactly one application owner.
 #[derive(Clone)]
@@ -47,20 +51,25 @@ pub(crate) struct UniversalPluginService {
     stopped: Arc<AtomicBool>,
     retiring_extensions: Arc<RwLock<HashSet<String>>>,
     activation_lock: Arc<tokio::sync::Mutex<()>>,
+    transient_secrets: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
 }
 
 impl UniversalPluginService {
-    fn from_catalog_source(catalog_source: GlobalExtensionRuntimeCatalog) -> Self {
+    fn from_catalog_source(
+        catalog_source: GlobalExtensionRuntimeCatalog,
+        secrets: Option<Arc<ConnectionRepository>>,
+    ) -> Self {
         let (catalog_revision, catalog) = catalog_source.snapshot();
         let catalog = catalog.unwrap_or_else(|| Arc::new(ExtensionRuntimeCatalog::empty()));
         let events = Arc::new(EventActivationManager::new());
         let jobs = Arc::new(extension_plugin_adapter::JobActivationManager::new());
         let blobs = extension_plugin_adapter::BlobStore::default();
+        let transient_secrets = Arc::new(Mutex::new(HashMap::new()));
         let manager = Arc::new(
             ActivationManager::from_shared_catalog(
                 catalog,
                 production_session_factory(),
-                production_host_api_factory(blobs.clone()),
+                production_host_api_factory(blobs.clone(), secrets, Arc::clone(&transient_secrets)),
             )
             .with_blob_store(blobs)
             .with_job_activation(jobs)
@@ -80,6 +89,7 @@ impl UniversalPluginService {
             stopped: Arc::new(AtomicBool::new(false)),
             retiring_extensions: Arc::new(RwLock::new(HashSet::new())),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            transient_secrets,
         }
     }
 
@@ -170,6 +180,18 @@ impl UniversalPluginService {
             .cloned()
     }
 
+    pub(crate) fn resource_connection(
+        &self,
+        extension_id: &str,
+        contribution_id: &str,
+    ) -> Option<extension_runtime::RegisteredResourceConnectionContribution> {
+        self.sync_catalog();
+        self.catalog_source
+            .get()?
+            .resource_connection(extension_id, contribution_id)
+            .cloned()
+    }
+
     pub(crate) async fn deactivate_extension(&self, extension_id: &str) {
         let _activation_guard = self.activation_lock.lock().await;
         self.sync_catalog();
@@ -189,6 +211,61 @@ impl UniversalPluginService {
             let _ = self.manager.deactivate_runtime(&runtime_id).await;
             self.monitor.untrack(&runtime_id);
         }
+    }
+
+    pub(crate) async fn test_extension_connection(
+        &self,
+        contribution: extension_runtime::RegisteredResourceConnectionContribution,
+        mut config: serde_json::Map<String, serde_json::Value>,
+        secrets: HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let prefix = format!("test-{}", uuid::Uuid::new_v4());
+        let _guard = TransientSecretGuard::new(
+            contribution.extension_id.clone(),
+            prefix.clone(),
+            secrets,
+            Arc::clone(&self.transient_secrets),
+        );
+        config.insert(
+            "credential_refs".into(),
+            serde_json::Value::Object(
+                _guard
+                    .fields()
+                    .map(|field| {
+                        (
+                            field.to_string(),
+                            serde_json::Value::String(format!("secret://self/{prefix}:{field}")),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        let activation = self.activate_runtime(&contribution.runtime_id).await?;
+        let client = match self.universal_plugin_client(&contribution.runtime_id) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = self.deactivate_activation(&activation).await;
+                return Err(error.into());
+            }
+        };
+        let opened = client
+            .client()
+            .open_resource(&extension_protocol::resource::ResourceOpenParams {
+                resource_type: contribution.resource_type,
+                config: serde_json::Value::Object(config),
+                metadata: None,
+            })
+            .await;
+        if let Ok(opened) = &opened {
+            let _ = client
+                .client()
+                .close_resource(&extension_protocol::resource::ResourceCloseParams {
+                    resource_id: opened.resource_id.clone(),
+                })
+                .await;
+        }
+        let _ = self.deactivate_activation(&activation).await;
+        opened.map(|_| ()).map_err(Into::into)
     }
 
     pub(crate) fn begin_extension_retire(&self, extension_id: &str) {
@@ -287,11 +364,20 @@ fn production_session_factory() -> SessionFactory {
     extension_plugin_adapter::process_session_factory()
 }
 
-fn production_host_api_factory(blobs: extension_plugin_adapter::BlobStore) -> HostApiFactory {
+fn production_host_api_factory(
+    blobs: extension_plugin_adapter::BlobStore,
+    secrets: Option<Arc<ConnectionRepository>>,
+    transient_secrets: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+) -> HostApiFactory {
     Arc::new(move |binding, generation| {
+        let secret_resolver = ExtensionSecretResolver {
+            extension_id: binding.extension_id.clone(),
+            repository: secrets.clone(),
+            transient_secrets: Arc::clone(&transient_secrets),
+        };
         let host = UniversalProviderHost::new(
             binding.permissions.iter().cloned(),
-            Arc::new(extension_plugin_adapter::MapSecretResolver::default()),
+            Arc::new(secret_resolver),
         )
         .with_blob_store(
             blobs.clone(),
@@ -304,6 +390,107 @@ fn production_host_api_factory(blobs: extension_plugin_adapter::BlobStore) -> Ho
     })
 }
 
+struct ExtensionSecretResolver {
+    extension_id: String,
+    repository: Option<Arc<ConnectionRepository>>,
+    transient_secrets: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+}
+
+#[async_trait::async_trait]
+impl extension_plugin_adapter::SecretResolver for ExtensionSecretResolver {
+    async fn resolve(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Vec<u8>, extension_host::HostError> {
+        if namespace != "self" {
+            return Err(extension_host::HostError::protocol(
+                extension_protocol::ProtocolError::new(
+                    extension_protocol::error_codes::PERMISSION_DENIED,
+                    "extension secrets must use the self namespace",
+                ),
+            ));
+        }
+        let repository = self.repository.clone().ok_or_else(|| {
+            extension_host::HostError::NotImplemented(
+                "extension connection secret storage is unavailable".into(),
+            )
+        })?;
+        let extension_id = self.extension_id.clone();
+        let key = key.to_string();
+        if let Some(secret) = self
+            .transient_secrets
+            .lock()
+            .ok()
+            .and_then(|secrets| secrets.get(&(extension_id.clone(), key.clone())).cloned())
+        {
+            return Ok(secret);
+        }
+        tokio::task::spawn_blocking(move || {
+            repository.resolve_extension_secret(&extension_id, &key)
+        })
+        .await
+        .map_err(|error| extension_host::HostError::ProcessExited(error.to_string()))?
+        .map_err(|error| {
+            extension_host::HostError::protocol(extension_protocol::ProtocolError::new(
+                extension_protocol::error_codes::SECRET_NOT_FOUND,
+                error.to_string(),
+            ))
+        })
+    }
+}
+
+struct TransientSecretGuard {
+    extension_id: String,
+    prefix: String,
+    fields: Vec<String>,
+    store: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+}
+
+impl TransientSecretGuard {
+    fn new(
+        extension_id: String,
+        prefix: String,
+        secrets: HashMap<String, String>,
+        store: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+    ) -> Self {
+        let fields = secrets.keys().cloned().collect::<Vec<_>>();
+        if let Ok(mut values) = store.lock() {
+            for (field, value) in secrets {
+                values.insert(
+                    (extension_id.clone(), format!("{prefix}:{field}")),
+                    value.into_bytes(),
+                );
+            }
+        }
+        Self {
+            extension_id,
+            prefix,
+            fields,
+            store,
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &str> {
+        self.fields.iter().map(String::as_str)
+    }
+}
+
+impl Drop for TransientSecretGuard {
+    fn drop(&mut self) {
+        if let Ok(mut values) = self.store.lock() {
+            for field in &self.fields {
+                if let Some(mut value) = values.remove(&(
+                    self.extension_id.clone(),
+                    format!("{}:{field}", self.prefix),
+                )) {
+                    value.fill(0);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn init(cx: &mut gpui::App) {
     assert!(
         cx.try_global::<GlobalUniversalPluginService>().is_none(),
@@ -311,8 +498,12 @@ pub(crate) fn init(cx: &mut gpui::App) {
     );
 
     let catalog_source = cx.default_global::<GlobalExtensionRuntimeCatalog>().clone();
+    let secrets = cx
+        .try_global::<GlobalStorageState>()
+        .and_then(|storage| storage.storage.get::<ConnectionRepository>());
     let global = GlobalUniversalPluginService::new(UniversalPluginService::from_catalog_source(
         catalog_source,
+        secrets,
     ));
     let service = global.service();
     let startup_service = service.clone();
@@ -321,6 +512,7 @@ pub(crate) fn init(cx: &mut gpui::App) {
     gpui_shell::init_embedded(cx);
     match crate::shell_plugin_host::ShellPluginHost::new(service, cx) {
         Ok(host) => {
+            #[cfg(not(test))]
             host.start_monitor_bridge(cx);
             extension_view::register_shell_view_opener(std::rc::Rc::new(host.clone()), cx);
             cx.set_global(host);

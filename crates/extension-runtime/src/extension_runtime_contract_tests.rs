@@ -7,8 +7,10 @@ use crate::{
     extension::manifest::{
         ApiVersions, CommandContrib, CommandHandlerContrib, ContributesManifest,
         DocumentExporterContrib, Engines, HtmlPreviewTransformContrib, IpcEntry, IpcRuntime,
-        IpcTransport, Manifest, MenuCommandRef, MenuContrib, RuntimeSection, ShellHostModule,
-        ShellSurface, ShellViewContrib, WasmRuntime, WasmRuntimeKind,
+        IpcTransport, Manifest, MenuCommandRef, MenuContrib, ResourceConnectionContrib,
+        ResourceConnectionFieldType, ResourceConnectionForm, ResourceConnectionFormField,
+        ResourceConnectionFormTab, RuntimeSection, ShellHostModule, ShellSurface, ShellViewContrib,
+        WasmRuntime, WasmRuntimeKind,
         contributes::{
             RemoteFileEditorCommandContrib, RemoteFileEditorContrib, RemoteFileEditorLaunchMode,
         },
@@ -207,9 +209,141 @@ fn runtime_catalog_registers_shell_view_with_resolved_backend() {
         contribution.modules.iter().copied().collect::<Vec<_>>()
     );
     assert_eq!(
-        vec!["shell:exec", "spawn:./bin/provider"],
+        vec!["shell:exec", "spawn:./bin/provider", "secrets:read:self.*"],
         contribution.permissions
     );
+}
+
+#[test]
+fn runtime_catalog_registers_extension_connection_with_optional_shell_view() {
+    let mut manifest = shell_manifest();
+    manifest
+        .contributes
+        .shell_views
+        .push(shell_view("ui/explorer.js"));
+    manifest.contributes.connections.push(resource_connection());
+
+    let catalog = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap();
+    let connection = catalog
+        .resource_connection("com.example.tools", "search")
+        .unwrap();
+
+    assert_eq!("com.example.tools::provider", connection.runtime_id);
+    assert_eq!("elasticsearch", connection.resource_type);
+    assert_eq!(Some("explorer"), connection.shell_view_id.as_deref());
+    assert_eq!(2, connection.form.tabs[0].fields.len());
+}
+
+#[test]
+fn runtime_catalog_registers_headless_extension_connection() {
+    let mut manifest = shell_manifest();
+    let mut connection = resource_connection();
+    connection.shell_view_id = None;
+    manifest.contributes.connections.push(connection);
+
+    let catalog = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap();
+
+    assert!(
+        catalog
+            .resource_connection("com.example.tools", "search")
+            .unwrap()
+            .shell_view_id
+            .is_none()
+    );
+}
+
+#[test]
+fn runtime_catalog_rejects_connection_secret_without_self_permission() {
+    let mut manifest = shell_manifest();
+    manifest
+        .permissions
+        .retain(|permission| permission != "secrets:read:self.*");
+    let mut connection = resource_connection();
+    connection.shell_view_id = None;
+    manifest.contributes.connections.push(connection);
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(error.to_string().contains("secrets:read:self.*"), "{error}");
+}
+
+#[test]
+fn runtime_catalog_rejects_singleton_connection_shell_view() {
+    let mut manifest = shell_manifest();
+    let mut view = shell_view("ui/explorer.js");
+    view.singleton = true;
+    manifest.contributes.shell_views.push(view);
+    manifest.contributes.connections.push(resource_connection());
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(
+        error.to_string().contains("must not be singleton"),
+        "{error}"
+    );
+}
+
+#[test]
+fn runtime_catalog_rejects_unknown_visibility_field() {
+    let mut manifest = shell_manifest();
+    let mut connection = resource_connection();
+    connection.shell_view_id = None;
+    connection.form.tabs[0].fields[0].visible_when.push(
+        crate::extension::manifest::ResourceConnectionVisibilityRule {
+            field: "missing".into(),
+            equals: "true".into(),
+        },
+    );
+    manifest.contributes.connections.push(connection);
+
+    let error = ExtensionRuntimeCatalog::from_manifests(vec![manifest]).unwrap_err();
+
+    assert!(
+        error.to_string().contains("unknown visibility field"),
+        "{error}"
+    );
+}
+
+fn resource_connection() -> ResourceConnectionContrib {
+    ResourceConnectionContrib {
+        id: "search".into(),
+        label: "Search Cluster".into(),
+        description: None,
+        icon: None,
+        runtime_id: "provider".into(),
+        resource_type: "elasticsearch".into(),
+        shell_view_id: Some("explorer".into()),
+        form: ResourceConnectionForm {
+            tabs: vec![ResourceConnectionFormTab {
+                id: "general".into(),
+                label: "General".into(),
+                fields: vec![
+                    ResourceConnectionFormField {
+                        id: "url".into(),
+                        label: "URL".into(),
+                        field_type: ResourceConnectionFieldType::Text,
+                        required: true,
+                        default_value: None,
+                        placeholder: None,
+                        secret: false,
+                        options: Vec::new(),
+                        visible_when: Vec::new(),
+                    },
+                    ResourceConnectionFormField {
+                        id: "api_key".into(),
+                        label: "API key".into(),
+                        field_type: ResourceConnectionFieldType::Password,
+                        required: false,
+                        default_value: None,
+                        placeholder: None,
+                        secret: true,
+                        options: Vec::new(),
+                        visible_when: Vec::new(),
+                    },
+                ],
+            }],
+        },
+    }
 }
 
 #[test]
@@ -521,7 +655,11 @@ fn runtime_catalog_rebuild_after_uninstall_drops_db_tree_menu() {
 
 fn shell_manifest() -> Manifest {
     let mut manifest = base_manifest();
-    manifest.permissions = vec!["shell:exec".to_string(), "spawn:./bin/provider".to_string()];
+    manifest.permissions = vec![
+        "shell:exec".to_string(),
+        "spawn:./bin/provider".to_string(),
+        "secrets:read:self.*".to_string(),
+    ];
     manifest.runtime.ipc.push(IpcRuntime {
         id: "provider".to_string(),
         entry: IpcEntry {

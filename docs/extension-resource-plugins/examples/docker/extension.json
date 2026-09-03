@@ -10,7 +10,6 @@
   "permissions": [
     "fs:read:/var/run/docker.sock",
     "fs:write:/var/run/docker.sock",
-    "secrets:read:docker.*",
     "spawn:./bin/docker-provider"
   ],
   "runtime": {
@@ -30,9 +29,13 @@
   "contributes": {
     "connections": [
       {
-        "kind": "docker",
+        "id": "docker",
         "label": "Docker",
-        "secretNamespace": "docker"
+        "runtimeId": "main",
+        "resourceType": "docker",
+        "form": { "tabs": [{ "id": "general", "label": "General", "fields": [
+          { "id": "socket", "label": "Socket", "fieldType": "Text", "required": true, "defaultValue": "/var/run/docker.sock" }
+        ] }] }
       }
     ]
   }

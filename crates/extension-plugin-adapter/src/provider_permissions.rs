@@ -164,7 +164,8 @@ impl ProviderPermissionSet {
     pub fn allows_endpoint(&self, endpoint: &NetworkEndpoint) -> bool {
         matches!(endpoint.scheme.as_str(), "http" | "https" | "tcp")
             && self.tcp_endpoints.iter().any(|(host, ports)| {
-                host.eq_ignore_ascii_case(&endpoint.host) && ports.contains(&endpoint.port)
+                (host == "*" || host.eq_ignore_ascii_case(&endpoint.host))
+                    && ports.contains(&endpoint.port)
             })
     }
 
@@ -331,6 +332,14 @@ mod tests {
         );
         assert!(NetworkEndpoint::parse("ftp://example.com:21").is_err());
         assert!(NetworkEndpoint::parse("http://user@example.com:9200").is_err());
+    }
+
+    #[test]
+    fn wildcard_network_permission_matches_any_host_on_the_declared_port() {
+        let set = ProviderPermissionSet::new(["net:tcp:*:9200"]);
+
+        assert!(set.allows_endpoint(&NetworkEndpoint::parse("cluster.example:9200").unwrap()));
+        assert!(!set.allows_endpoint(&NetworkEndpoint::parse("cluster.example:9201").unwrap()));
     }
 
     #[test]

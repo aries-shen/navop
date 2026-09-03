@@ -1,7 +1,15 @@
+mod blob;
 mod components;
 mod context;
+mod event;
+mod job;
+mod log;
 mod resource;
+mod runtime;
+mod session;
 mod value;
+
+pub(crate) use context::ShellConnectionContext;
 
 use std::{
     cell::RefCell,
@@ -17,13 +25,13 @@ use anyhow::{Context as _, Result, anyhow};
 use extension_host::CancellationToken;
 use extension_plugin_adapter::ActivationHandle;
 use gpui::{App, WeakEntity, Window};
-use gpui_shell::{LoadedScriptView, ShellRuntime, ViewLoadOptions, policy::Policy};
+use gpui_shell::{Capabilities, LoadedScriptView, ShellRuntime, ViewLoadOptions, policy::Policy};
 use one_core::tab_container::TabItem;
 
 use self::{
-    components::component_registry,
-    context::context_module,
-    resource::{ShellResourceSession, resource_module},
+    blob::blob_module, components::component_registry, context::context_module,
+    event::event_module, job::job_module, log::log_module, resource::resource_module,
+    runtime::runtime_module, session::ShellMountSession,
 };
 use crate::{
     onetcli_app::GlobalTabContainer, shell_plugin_tab::ShellPluginTab,
@@ -52,6 +60,13 @@ impl gpui::Global for ShellPluginHost {}
 pub(crate) struct PreparedShellView {
     pub(crate) contribution: extension_runtime::RegisteredShellViewContribution,
     pub(crate) activations: Vec<ActivationHandle>,
+    pub(crate) connection: Option<ShellConnectionContext>,
+}
+
+pub(crate) struct ConnectionShellOpen {
+    pub(crate) connection: one_core::storage::StoredConnection,
+    pub(crate) contribution: extension_runtime::RegisteredResourceConnectionContribution,
+    pub(crate) mode: one_core::tab_container::TabOpenMode,
 }
 
 impl ShellPluginHost {
@@ -75,9 +90,91 @@ impl ShellPluginHost {
         self.service.shell_view(extension_id, view_id)
     }
 
+    pub(crate) fn resource_connection(
+        &self,
+        extension_id: &str,
+        contribution_id: &str,
+    ) -> Option<extension_runtime::RegisteredResourceConnectionContribution> {
+        self.service
+            .resource_connection(extension_id, contribution_id)
+    }
+
+    pub(crate) fn open_connection(
+        &self,
+        request: ConnectionShellOpen,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        let ConnectionShellOpen {
+            connection,
+            contribution,
+            mode,
+        } = request;
+        let connection_id = connection
+            .id
+            .ok_or_else(|| anyhow!("extension connection must be saved before opening"))?;
+        let shell_view_id = contribution
+            .shell_view_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("extension connection has no shell view"))?;
+        let view = self
+            .contribution(&contribution.extension_id, shell_view_id)
+            .ok_or_else(|| anyhow!("extension shell view was not found"))?;
+        let params = connection.to_extension_params()?;
+        let credential_refs = params
+            .secrets
+            .keys()
+            .map(|field| {
+                (
+                    field.clone(),
+                    serde_json::Value::String(format!("secret://self/{connection_id}:{field}")),
+                )
+            })
+            .collect();
+        let context = ShellConnectionContext {
+            connection_id,
+            name: connection.name.clone(),
+            contribution_id: contribution.id,
+            resource_type: contribution.resource_type,
+            config: params.config,
+            credential_refs,
+        };
+        let host = self.clone();
+        let extension_id = contribution.extension_id;
+        let view_key = view.view_key.clone();
+        let title = connection.name;
+        let tab_id = format!("extension-connection:{connection_id}");
+        let tab_container = cx.global::<GlobalTabContainer>().primary_pane();
+        tab_container.update(cx, |tabs, cx| {
+            tabs.activate_or_add_tab_lazy_with_mode(
+                tab_id.clone(),
+                mode,
+                move |window, cx| {
+                    let registry_host = host.clone();
+                    let tab = ShellPluginTab::load(
+                        crate::shell_plugin_tab::ShellPluginLoad {
+                            host,
+                            contribution: view,
+                            connection: Some(context),
+                            title_override: Some(title),
+                        },
+                        window,
+                        cx,
+                    );
+                    registry_host.register_tab(extension_id, view_key, tab.downgrade());
+                    TabItem::new(tab_id, "extension-connection", tab)
+                },
+                window,
+                cx,
+            );
+        });
+        Ok(())
+    }
+
     async fn prepare_with_service(
         service: UniversalPluginService,
         contribution: extension_runtime::RegisteredShellViewContribution,
+        connection: Option<ShellConnectionContext>,
         cancel: CancellationToken,
     ) -> Result<PreparedShellView> {
         let mut activations = Vec::new();
@@ -100,18 +197,21 @@ impl ShellPluginHost {
         Ok(PreparedShellView {
             contribution,
             activations,
+            connection,
         })
     }
 
     pub(crate) fn start_prepare(
         &self,
         contribution: extension_runtime::RegisteredShellViewContribution,
+        connection: Option<ShellConnectionContext>,
         cancel: CancellationToken,
     ) -> tokio::sync::oneshot::Receiver<Result<PreparedShellView>> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let service = self.service.clone();
         self.tokio.spawn(async move {
-            let result = Self::prepare_with_service(service.clone(), contribution, cancel).await;
+            let result =
+                Self::prepare_with_service(service.clone(), contribution, connection, cancel).await;
             if let Err(result) = sender.send(result)
                 && let Ok(prepared) = result
             {
@@ -128,25 +228,68 @@ impl ShellPluginHost {
         cx: &mut App,
     ) -> Result<LoadedScriptView> {
         validate_entry_path(&prepared.contribution)?;
-        let session = Arc::new(ShellResourceSession::new(
+        let session = Arc::new(ShellMountSession::new(
             self.service.clone(),
             prepared.contribution.backends.clone(),
             self.tokio.clone(),
         ));
-        let mut policy = Policy::new().with_application(&prepared.contribution.view_key);
+        let mut policy = Policy::new()
+            .with_application(&prepared.contribution.view_key)
+            .with_capabilities(Capabilities::new().storage(prepared.contribution.singleton));
+        if prepared.contribution.singleton {
+            policy = policy.with_storage_path(shell_storage_path(&prepared.contribution)?);
+        }
         if prepared
             .contribution
             .modules
             .contains(&extension_runtime::extension::manifest::ShellHostModule::Context)
         {
-            policy = policy.with_host_module(context_module(&prepared.contribution))?;
+            policy = policy.with_host_module(context_module(
+                &prepared.contribution,
+                prepared.connection.clone(),
+            ))?;
         }
         if prepared
             .contribution
             .modules
             .contains(&extension_runtime::extension::manifest::ShellHostModule::Resource)
         {
-            policy = policy.with_host_module(resource_module(session))?;
+            policy = policy.with_host_module(resource_module(Arc::clone(&session)))?;
+        }
+        if prepared
+            .contribution
+            .modules
+            .contains(&extension_runtime::extension::manifest::ShellHostModule::Blob)
+        {
+            policy = policy.with_host_module(blob_module(Arc::clone(&session)))?;
+        }
+        if prepared
+            .contribution
+            .modules
+            .contains(&extension_runtime::extension::manifest::ShellHostModule::Job)
+        {
+            policy = policy.with_host_module(job_module(Arc::clone(&session)))?;
+        }
+        if prepared
+            .contribution
+            .modules
+            .contains(&extension_runtime::extension::manifest::ShellHostModule::Event)
+        {
+            policy = policy.with_host_module(event_module(Arc::clone(&session)))?;
+        }
+        if prepared
+            .contribution
+            .modules
+            .contains(&extension_runtime::extension::manifest::ShellHostModule::Runtime)
+        {
+            policy = policy.with_host_module(runtime_module(Arc::clone(&session)))?;
+        }
+        if prepared
+            .contribution
+            .modules
+            .contains(&extension_runtime::extension::manifest::ShellHostModule::Log)
+        {
+            policy = policy.with_host_module(log_module(&prepared.contribution))?;
         }
         let options = ViewLoadOptions::new(
             &prepared.contribution.extension_root,
@@ -183,6 +326,7 @@ impl ShellPluginHost {
         self.service.clone()
     }
 
+    #[cfg(not(test))]
     pub(crate) fn start_monitor_bridge(&self, cx: &mut App) {
         let (sender, receiver) = smol::channel::bounded::<String>(32);
         let mut events = self.service.subscribe();
@@ -286,7 +430,16 @@ impl extension_view::ShellViewOpener for ShellPluginHost {
                 tab_id.clone(),
                 move |window, cx| {
                     let registry_host = host.clone();
-                    let view = ShellPluginTab::load(host, contribution, window, cx);
+                    let view = ShellPluginTab::load(
+                        crate::shell_plugin_tab::ShellPluginLoad {
+                            host,
+                            contribution,
+                            connection: None,
+                            title_override: None,
+                        },
+                        window,
+                        cx,
+                    );
                     registry_host.register_tab(extension_key, view_key, view.downgrade());
                     TabItem::new(tab_id, format!("shell:{extension_id}"), view)
                 },
@@ -370,4 +523,19 @@ fn entry_relative_path(
         .strip_prefix(&contribution.extension_root)?
         .to_str()
         .ok_or_else(|| anyhow!("shell entry path is not UTF-8"))
+}
+
+fn shell_storage_path(
+    contribution: &extension_runtime::RegisteredShellViewContribution,
+) -> Result<std::path::PathBuf> {
+    let root = one_core::app_dirs::data_dir()
+        .map(Ok)
+        .unwrap_or_else(one_core::app_dirs::config_dir)?;
+    let directory = root
+        .join("extensions")
+        .join("shell")
+        .join(&contribution.extension_id)
+        .join(&contribution.id);
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory.join("store.json"))
 }

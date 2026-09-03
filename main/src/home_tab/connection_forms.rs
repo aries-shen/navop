@@ -3,6 +3,53 @@ use super::*;
 const ORACLE_GO_DRIVER_ID: &str = "oracle-go";
 
 impl HomePage {
+    pub(crate) fn show_extension_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = self.editing_connection_id.and_then(|id| {
+            self.connections
+                .iter()
+                .find(|connection| {
+                    connection.id == Some(id)
+                        && connection.connection_type == ConnectionType::Extension
+                })
+                .cloned()
+        });
+        let Some(connection) = editing else {
+            return;
+        };
+        let Ok(params) = connection.to_extension_params() else {
+            return;
+        };
+        let Some(contribution) = cx
+            .try_global::<extension_runtime::GlobalExtensionRuntimeCatalog>()
+            .and_then(|catalog| catalog.get())
+            .and_then(|catalog| {
+                catalog
+                    .resource_connection(&params.extension_id, &params.contribution_id)
+                    .cloned()
+            })
+        else {
+            return;
+        };
+        let config = crate::extension_connection_form::ExtensionConnectionFormConfig {
+            contribution,
+            editing_connection: Some(connection.clone()),
+            workspaces: self.workspaces.clone(),
+        };
+        self.editing_connection_id = None;
+        open_popup_window(
+            PopupWindowOptions::new(format!("Edit {}", connection.name)).size(700.0, 650.0),
+            move |window, cx| {
+                cx.new(|cx| {
+                    crate::extension_connection_form::ExtensionConnectionForm::new(
+                        config, window, cx,
+                    )
+                })
+            },
+            Some(window),
+            cx,
+        );
+    }
+
     pub(super) fn external_driver_name_for_title(
         driver_id: Option<&str>,
         registry: &IpcDriverRegistry,

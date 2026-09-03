@@ -11,6 +11,7 @@ use terminal_view::{
     TelnetFormWindowConfig,
 };
 
+use crate::extension_connection_form::{ExtensionConnectionForm, ExtensionConnectionFormConfig};
 use crate::home_tab::HomePage;
 use crate::new_connection::NewConnectionWindow;
 use crate::new_connection::connection_kind::NewConnectionKind;
@@ -68,8 +69,40 @@ impl NewConnectionFormPage for NewConnectionKind {
                     cx,
                 )
             }
+            Self::Extension(contribution) => build_extension_form(parent, contribution, window, cx),
         }
     }
+}
+
+fn build_extension_form(
+    parent: Entity<HomePage>,
+    contribution: extension_runtime::RegisteredResourceConnectionContribution,
+    window: &mut Window,
+    cx: &mut Context<NewConnectionWindow>,
+) -> NewConnectionFormResult {
+    let Some(config) = parent.update(cx, |home, _| {
+        let editing_connection = home.editing_connection_id.and_then(|id| {
+            home.connections
+                .iter()
+                .find(|connection| {
+                    connection.id == Some(id)
+                        && connection.connection_type == ConnectionType::Extension
+                })
+                .cloned()
+        });
+        home.editing_connection_id = None;
+        Some(ExtensionConnectionFormConfig {
+            contribution,
+            editing_connection,
+            workspaces: home.workspaces.clone(),
+        })
+    }) else {
+        return NewConnectionFormResult::Blocked;
+    };
+    NewConnectionFormResult::Form(
+        cx.new(|cx| ExtensionConnectionForm::new(config, window, cx))
+            .into(),
+    )
 }
 
 fn build_port_forwarding_form(

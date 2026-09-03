@@ -13,7 +13,6 @@ pub enum ShellSurface {
 #[serde(rename_all = "snake_case")]
 pub enum ShellHostModule {
     Context,
-    Connection,
     Resource,
     Job,
     Event,
