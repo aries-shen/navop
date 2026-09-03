@@ -14,7 +14,7 @@ use db::sql_editor::execution::{
     SqlDocumentSnapshot, SqlExecutionRequest, SqlExecutionResultSource, SqlExecutionTarget,
     SqlMetadataScope, SqlTransactionMode as SqlExecutionTransactionMode,
 };
-use db::sql_editor::insert_hints::{SqlInsertValueHint, insert_value_hints};
+use db::sql_editor::insert_hints::insert_value_hints;
 use db::sql_editor::sql_tokenizer::{SqlKeyword, SqlTokenKind, SqlTokenizer};
 use db::sql_editor::statement_ranges::{
     SqlDialect, SqlStatementRange, SqlStatementSnapshot, SqlTextRange, StatementIndex,
@@ -34,8 +34,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{
-    GutterMarker, InlineWidget, Input, InputEvent, InputState, RangeDecoration,
-    RangeDecorationStyle,
+    GutterMarker, Input, InputEvent, InputState, RangeDecoration, RangeDecorationStyle,
 };
 use gpui_component::notification::Notification;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
@@ -1411,19 +1410,15 @@ pub struct SqlEditorTab {
     statement_run_id: Arc<AtomicU64>,
     /// 在途的语句快照后台分析任务（防抖的 onChange 生效路径）。
     _statement_task: Option<Task<()>>,
-    /// 最新元数据快照，供 INSERT 值提示等本地消费（与 completion source 同步更新）。
+    /// 最新元数据快照，供 INSERT 值区域等本地消费（与 completion source 同步更新）。
     schema_snapshot: Arc<RwLock<SqlSchema>>,
     /// 最近一次加载的数据库特定补全信息（合并外部 qualifier 元数据时复用）。
     db_completion_info: Arc<RwLock<Option<SqlCompletionInfo>>>,
     /// 在途的外部 qualifier 元数据懒加载任务（按 metadata scope + qualifier 隔离）。
     foreign_prefetch_inflight: Arc<Mutex<HashSet<(SqlMetadataScope, String)>>>,
-    /// 当前语句的 INSERT 值槽提示（相对语句文本的字节偏移），用于安装内联控件。
-    insert_hints: Vec<SqlInsertValueHint>,
-    /// `insert_hints` 所基于的语句在文档中的起始字节偏移。
-    insert_hints_statement_start: usize,
-    /// 值提示区域在文档中的字节范围，用于 Fill 装饰。
+    /// INSERT values 区域在文档中的字节范围，用于 Fill 装饰。
     insert_values_highlight: Option<Range<usize>>,
-    /// 最近一次计算插入提示的 (光标, 版本)，避免游标在语句内移动时重复计算。
+    /// 最近一次计算 INSERT values 区域的 (语句起点, 版本)。
     last_insert_hints_key: Option<(usize, u64)>,
 }
 
@@ -1556,8 +1551,6 @@ impl SqlEditorTab {
             schema_snapshot: Arc::new(RwLock::new(SqlSchema::default())),
             db_completion_info: Arc::new(RwLock::new(None)),
             foreign_prefetch_inflight: Arc::new(Mutex::new(HashSet::new())),
-            insert_hints: Vec::new(),
-            insert_hints_statement_start: 0,
             insert_values_highlight: None,
             last_insert_hints_key: None,
         };
@@ -1865,9 +1858,8 @@ impl SqlEditorTab {
         self.last_frame_key = Some(frame_key);
     }
 
-    /// Compute INSERT value hints for the statement under the cursor and
-    /// install them as inline widgets, plus a Fill decoration over the
-    /// values region (spec §14).
+    /// Compute INSERT value slots for the statement under the cursor and
+    /// highlight the values region (spec §14).
     ///
     /// Only the cursor's current statement is analyzed, so large documents stay
     /// cheap. Cached by (statement start, revision): moving the cursor within
@@ -1895,7 +1887,6 @@ impl SqlEditorTab {
                     .unwrap_or((0, String::new()))
             })
         else {
-            self.insert_hints.clear();
             self.insert_values_highlight = None;
             self.last_insert_hints_key = None;
             self.editor
@@ -1914,30 +1905,18 @@ impl SqlEditorTab {
             .and_then(|table| lookup_table_columns(&schema, &table))
             .unwrap_or_default();
 
-        let hints = insert_value_hints(&statement_text, &ordinal_columns);
-        let widgets = hints
-            .iter()
-            .map(|hint| {
-                InlineWidget::new(
-                    format!("insert-hint:{revision}:{statement_start}:{}", hint.offset),
-                    statement_start + hint.offset,
-                    hint.column.clone(),
-                )
-            })
-            .collect();
-        let values_highlight = (!hints.is_empty())
+        let has_value_slots = !insert_value_hints(&statement_text, &ordinal_columns).is_empty();
+        let values_highlight = has_value_slots
             .then(|| insert_values_range(&statement_text))
             .flatten()
             .map(|range| statement_start + range.start..statement_start + range.end);
 
-        self.insert_hints = hints;
-        self.insert_hints_statement_start = statement_start;
         self.insert_values_highlight = values_highlight;
 
         self.editor
             .read(cx)
             .input()
-            .update(cx, |state, cx| state.set_inline_widgets(widgets, cx));
+            .update(cx, |state, cx| state.clear_inline_widgets(cx));
         self.refresh_current_statement_frame(cx);
     }
 
@@ -4756,8 +4735,6 @@ impl Clone for SqlEditorTab {
             schema_snapshot: self.schema_snapshot.clone(),
             db_completion_info: self.db_completion_info.clone(),
             foreign_prefetch_inflight: self.foreign_prefetch_inflight.clone(),
-            insert_hints: self.insert_hints.clone(),
-            insert_hints_statement_start: self.insert_hints_statement_start,
             insert_values_highlight: self.insert_values_highlight.clone(),
             last_insert_hints_key: self.last_insert_hints_key,
         }
@@ -4955,6 +4932,22 @@ mod tests {
     use std::time::Duration;
 
     const WIRE_PREFIX: &str = "/*onetcli-ipc-wire*/ ";
+
+    #[test]
+    fn insert_value_hints_do_not_paint_over_sql_text() {
+        let source = include_str!("sql_editor_view.rs");
+        let refresh = source
+            .split("fn refresh_insert_value_hints")
+            .nth(1)
+            .unwrap()
+            .split("fn statement_index_for_document")
+            .next()
+            .unwrap();
+
+        assert!(!refresh.contains("InlineWidget"));
+        assert!(!refresh.contains("set_inline_widgets"));
+        assert!(refresh.contains("state.clear_inline_widgets(cx)"));
+    }
 
     #[test]
     fn foreign_prefetch_keys_are_isolated_by_metadata_scope() {
