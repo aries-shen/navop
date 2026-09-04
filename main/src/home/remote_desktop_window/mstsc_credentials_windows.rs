@@ -52,7 +52,7 @@ pub(crate) struct CredentialLease {
 }
 
 impl CredentialLease {
-    pub(super) fn restore_after(mut self, mut child: std::process::Child) {
+    pub(crate) fn restore_after(mut self, mut child: std::process::Child) {
         let _ = child.wait();
         std::thread::sleep(super::HANDOFF_GRACE_PERIOD);
         if let Err(error) = self.restore() {
